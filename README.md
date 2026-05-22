@@ -1,0 +1,151 @@
+# checkrun
+
+`checkrun` owns formatter, linter, and file-check dispatch used by the
+`checkrun`, `autoformat`, and `autolint` CLIs. Other tools can depend on those
+CLIs as their formatting and linting policy surface.
+
+## CLIs
+
+```text
+checkrun format FILE [FILE...]
+checkrun lint [--fix] [--json] FILE [FILE...]
+autoformat FILE [FILE...]
+autolint [--fix] [--json] FILE [FILE...]
+```
+
+`autoformat` always mutates eligible files. It exits 0 even when a formatter
+fails so save-time hooks surface stderr without blocking the caller.
+
+`autolint` is read-only by default, applies fixes with `--fix`, and emits
+newline-delimited diagnostics with `--json`. It exits non-zero when lint
+findings exist.
+
+Both commands ignore missing, deleted, or explicitly ignored files. Missing
+language tools are treated as graceful no-ops so a host without a language
+toolchain does not break unrelated workflows.
+
+## Dependencies
+
+- Bash for the CLI entry points and shell libraries.
+- `yq` is required by `autoformat` and by `autolint` once at least one lintable
+  file remains after filtering.
+- `jq` is required by `autolint --json`, schema association policy, and any
+  checks that need JSON diagnostics.
+- `python3` is required for schema association helpers.
+- `shdeps` is required only when a schema association policy references a
+  dependency-owned schema with `"dependency": "owner/repo"`.
+
+Formatter and linter backends such as `ruff`, `shfmt`, `shellcheck`, `stylua`,
+`biome`, and `rumdl` are optional. Missing backends are graceful no-ops for
+their file types so hosts can install only the language tools they use.
+
+## Public API
+
+- `bin/checkrun`, `bin/autoformat`, and `bin/autolint` are the PATH-visible
+  CLIs.
+- `lib/checkrun/schemas/schema_policy.py` is the schema association API shared
+  by editors and linting. Associations may set `"dependency": "owner/repo"` and
+  a repo-relative `"schema"` path when a schema is public API owned by a
+  shdeps-managed dependency; the interpreter resolves those through
+  `shdeps dep-file`.
+- `lib/checkrun/schemas/schema-lint.py` validates files through that policy.
+- `share/checkrun/schemas/associations.schema.json` is the JSON Schema for
+  schema association policy files.
+- `share/checkrun/shell.sh` is a stable no-op shell loader for integration
+  harnesses that source each dependency's shell API uniformly.
+
+Source non-binary assets through shdeps so install locations stay under the
+dependency manager's contract:
+
+```bash
+. "$(shdeps dep-file cgraf78/checkrun share/checkrun/shell.sh)"
+python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --nvim
+```
+
+## Editor And Hook Flow
+
+Editors, agent hooks, Git hooks, or Sapling hooks can either call `autoformat`
+and `autolint` directly or route through a higher-level policy tool such as
+Sley. Sley's default hook policy delegates back to these CLIs, while consumers
+can override that layer for repo-specific policy.
+
+The important contract is one-way: `checkrun` owns formatter/linter dispatch,
+and consumers decide when to invoke it.
+
+## Configs
+
+Global fallback configs live under `~/.config/autoformat` by default. Set
+`AUTOFORMAT_DIR` or `AUTOLINT_DIR` to override the config root for a run. The
+single config root is intentional: several backends, including Ruff, Biome,
+Rubocop, Rumdl, and Taplo, use one policy file for both formatting and linting.
+
+Schema association policy defaults to `~/.config/checkrun/associations.json`.
+Set `CHECKRUN_SCHEMA_ASSOCIATIONS` to point at a different policy file for a
+single run, test fixture, or integration harness. Local schema payload names
+resolve under `.local/share/checkrun/schemas` by default; a policy can override
+that with `schemaDataDir`.
+
+## Implementation Layout
+
+- `common.sh` owns shared path normalization, config walking, shell
+  classification, TOML reads, and ignore matching.
+- `autoformat.sh` owns formatter CLI behavior and formatter dispatch.
+- `autolint.sh` owns linter CLI behavior, diagnostic normalization, linter
+  routing, and read-only batching.
+- `linters/*.sh` owns the linter backend adapters grouped by domain:
+  `shell`, `web`, `build`, `config`, `languages`, `docs`, and
+  `github-actions`.
+
+`shdeps` installs each executable in `bin/` as a PATH-visible symlink, so these
+entry points resolve their dependency libraries without relying on consumer
+wrapper scripts.
+
+To add a linter, place its adapter in the narrowest existing `linters/*.sh`
+domain file, or add a new domain file only when the existing groups are a poor
+fit. Adapter helpers should return 0 when the underlying tool is missing, use
+the current invocation's dynamically scoped `fix` and `json` flags, and route
+from `_lint_one` in `autolint.sh`.
+
+## Supported Tools
+
+| File type | Formatter | Linter |
+| --- | --- | --- |
+| Python | `ruff format` | `ruff check` |
+| Shell | `shfmt` | `shellcheck` |
+| Zsh | `shfmt` | `zsh -n` |
+| Go | `goimports` + `gofumpt` | `golangci-lint` |
+| Lua | `stylua` | `selene` |
+| C/C++ | `clang-format` | - |
+| CMake | `cmake-format` | `cmake-lint` |
+| Rust | `rustfmt` | `cargo clippy` |
+| Java | `google-java-format` | dry-run format check |
+| PHP | `php-cs-fixer` | `php -l` |
+| Ruby | `rubocop` layout autocorrect | `rubocop` |
+| HTML | `superhtml fmt` | `superhtml check` |
+| TOML | `taplo` | `taplo` |
+| JSON/JSONC/CSS/JS/JSX/TS/TSX | `biome` | `biome` |
+| YAML | `yamlfmt` | - |
+| GitHub Actions | `yamlfmt` | `actionlint` + `zizmor` |
+| Markdown | `rumdl` | `rumdl` |
+| Spelling | - | `typos` |
+| Starlark | `buildifier` | `buildifier --lint` |
+| Make | - | `checkmake` |
+| Dockerfile/Containerfile | `dockerfmt` | `hadolint` |
+| EditorConfig | - | `editorconfig-checker` |
+| Git config | - | `git config --file --list` |
+| Crontab | - | `crontab -T` |
+| Tmux config | - | `tmux source-file -n` |
+| Systemd units | - | `systemd-analyze verify` |
+
+Basename-only files such as `Dockerfile`, `BUCK`, `BUILD`, `TARGETS`,
+`WORKSPACE`, `MODULE.bazel`, and `Containerfile` are dispatched before
+extension-based handling. Extensionless shell scripts are detected by shebang
+or dotfile name.
+
+The shared shell library provides config walking helpers, shell classification,
+batched TOML key reads, nested-key config walks, and ignore-file matching for
+both `autoformat` and `autolint`.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

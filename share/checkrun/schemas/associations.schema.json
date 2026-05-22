@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cgraf78.github.io/checkrun/schemas/associations.schema.json",
+  "title": "Checkrun schema association policy",
+  "type": "object",
+  "required": ["version", "associations"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "schemaDataDir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "associations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "format", "schema", "matches", "enforce"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "format": {
+            "type": "string",
+            "enum": ["json", "yaml", "toml"]
+          },
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dependency": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matches": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "enforce": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

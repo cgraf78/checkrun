@@ -1,0 +1,145 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
+    strategy:
+      fail-fast: false
+      # Push/PR should stay cheap; scheduled/manual runs keep broader drift
+      # coverage for platforms that are lower priority or rarely changed.
+      matrix: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'pull_request') && '{"include":[{"name":"macOS","runner":"macos-latest"},{"name":"CentOS Stream","runner":"ubuntu-latest","container":"quay.io/centos/centos:latest"},{"name":"Arch","runner":"ubuntu-latest","container":"archlinux:latest"},{"name":"Debian","runner":"ubuntu-latest","container":"debian:stable"}]}' || '{"include":[{"name":"macOS","runner":"macos-latest"},{"name":"CentOS Stream","runner":"ubuntu-latest","container":"quay.io/centos/centos:latest"},{"name":"Arch","runner":"ubuntu-latest","container":"archlinux:latest"},{"name":"Debian","runner":"ubuntu-latest","container":"debian:stable"},{"name":"Ubuntu","runner":"ubuntu-latest"},{"name":"WSL","runner":"ubuntu-latest"},{"name":"Fedora","runner":"ubuntu-latest","container":"fedora:latest"},{"name":"Alpine","runner":"ubuntu-latest","container":"alpine:latest"}]}') }}
+
+    name: ${{ matrix.name }}
+    steps:
+      - name: Install system prereqs
+        shell: sh
+        env:
+          MATRIX_NAME: ${{ matrix.name }}
+        run: |
+          set -eu
+
+          sudo_if_available() {
+            if command -v sudo >/dev/null 2>&1; then
+              sudo "$@"
+            else
+              "$@"
+            fi
+          }
+
+          install_yq() {
+            if command -v yq >/dev/null 2>&1 &&
+              yq --version 2>/dev/null | grep -q 'version v4'; then
+              return
+            fi
+
+            case "$(uname -s)" in
+              Linux) os=linux ;;
+              Darwin) os=darwin ;;
+              *)
+                echo "unsupported yq OS: $(uname -s)" >&2
+                exit 1
+                ;;
+            esac
+            case "$(uname -m)" in
+              x86_64 | amd64) arch=amd64 ;;
+              arm64 | aarch64) arch=arm64 ;;
+              *)
+                echo "unsupported yq arch: $(uname -m)" >&2
+                exit 1
+                ;;
+            esac
+
+            tmp="${RUNNER_TEMP:-/tmp}/yq"
+            curl -fsSL "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_${os}_${arch}" -o "$tmp"
+            chmod +x "$tmp"
+            sudo_if_available mv "$tmp" /usr/local/bin/yq
+          }
+
+          case "$MATRIX_NAME" in
+            macOS)
+              brew install bash jq yq python zsh
+              ;;
+            Debian | Ubuntu | WSL)
+              sudo_if_available apt-get update
+              sudo_if_available apt-get install -y bash git curl ca-certificates jq python3 python3-pip python3-venv zsh tar gzip unzip xz-utils
+              install_yq
+              ;;
+            Arch)
+              pacman-key --init
+              pacman-key --populate
+              pacman -Syu --noconfirm bash git curl ca-certificates jq python python-pip zsh tar gzip unzip xz
+              install_yq
+              ;;
+            CentOS* | Fedora)
+              dnf install -y --allowerasing bash git curl ca-certificates jq python3 python3-pip zsh tar gzip unzip xz
+              install_yq
+              ;;
+            Alpine)
+              apk add --no-cache bash git curl ca-certificates jq python3 tar gzip unzip xz
+              ;;
+          esac
+
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Simulate WSL environment
+        if: matrix.name == 'WSL'
+        run: |
+          echo 'Linux version 5.15.0 (Microsoft@Microsoft.com)' > /tmp/wsl-proc-version
+          sudo mount --bind /tmp/wsl-proc-version /proc/version
+
+      - name: Set HOME to workspace
+        run: echo "HOME=$(pwd)" >> "$GITHUB_ENV"
+
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$(pwd)"
+
+      - name: Install checkrun dev tools
+        if: matrix.name != 'Alpine'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          curl https://mise.run | sh
+          export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+
+          if [ -n "${GITHUB_TOKEN:-}" ]; then
+            export MISE_GITHUB_TOKEN="$GITHUB_TOKEN"
+          fi
+
+          mise trust "$HOME/.config/mise/config.toml" >/dev/null || true
+          mise install
+
+          python3 -m venv "$HOME/.venv"
+          "$HOME/.venv/bin/python" -m pip install --upgrade pip
+          "$HOME/.venv/bin/python" -m pip install clang-format jsonschema PyYAML tomli
+
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component rustfmt
+
+          {
+            echo "$HOME/.local/bin"
+            echo "$HOME/.local/share/mise/shims"
+            echo "$HOME/.venv/bin"
+            echo "$HOME/.cargo/bin"
+          } >> "$GITHUB_PATH"
+
+      - name: Run tests
+        shell: bash
+        run: test/checkrun-test

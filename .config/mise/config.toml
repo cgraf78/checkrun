@@ -1,0 +1,19 @@
+# Dev tools used by the checkrun test suite.
+#
+# The tests exercise real formatter and linter dispatch for the core languages
+# checkrun owns. Keep this list to portable release binaries; OS package
+# managers in CI still provide shell, Python, yq, rustfmt, and clang-format.
+
+[tools]
+"aqua:astral-sh/ruff" = "latest"
+"aqua:bazelbuild/buildtools/buildifier" = "latest"
+"aqua:biomejs/biome" = "latest"
+"aqua:google/yamlfmt" = "latest"
+"aqua:JohnnyMorganz/StyLua" = "latest"
+"aqua:Kampfkarren/selene" = "latest"
+"aqua:koalaman/shellcheck" = "latest"
+"aqua:mvdan/sh" = "latest"
+"aqua:rhysd/actionlint" = "latest"
+"aqua:tamasfe/taplo" = "latest"
+"aqua:zizmorcore/zizmor" = "latest"
+"ubi:rvben/rumdl" = "latest"

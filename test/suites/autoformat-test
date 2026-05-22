@@ -1,0 +1,1331 @@
+#!/usr/bin/env bash
+# autoformat-test — unit tests for the autoformat script.
+#
+# Tests formatting dispatch, config file discovery, fallback defaults,
+# shebang detection, and no-op behavior for unsupported/missing files.
+#
+# Usage: autoformat-test
+
+set -o pipefail
+export NO_COLOR=1
+
+# Formatter/linter dev tooling is expected to come from the global
+# mise toolset, so seed the shim dir explicitly for direct test runs.
+# On macOS, brew binaries are signed and must take priority over
+# unsigned mise downloads that macOS Gatekeeper kills.
+[ -d "$HOME/.local/share/mise/shims" ] &&
+  PATH="$HOME/.local/share/mise/shims:$PATH"
+[ -d "/opt/homebrew/bin" ] &&
+  PATH="/opt/homebrew/bin:$PATH"
+export MISE_GLOBAL_CONFIG_FILE="$HOME/.config/mise/config.toml"
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "autoformat-test"
+
+AUTOFORMAT="$CHECKRUN_REPO_ROOT/bin/autoformat"
+CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
+export AUTOFORMAT_DIR
+AUTOFORMAT_DIR=$(_checkrun_default_autoformat_dir)
+
+# ---------------------------------------------------------------------------
+# Tests: public shell API
+# ---------------------------------------------------------------------------
+
+echo "=== Public shell API ==="
+
+shell_api_output=$(
+  CHECKRUN_REPO_ROOT="$CHECKRUN_REPO_ROOT" bash --noprofile --norc -c '
+    source "$CHECKRUN_REPO_ROOT/share/checkrun/shell.sh"
+    printf "loaded=%s\n" "${CHECKRUN_SHELL_LOADED:-0}"
+  '
+)
+_assert_contains "shell api: loader is sourceable" \
+  "loaded=1" "$shell_api_output"
+
+# ---------------------------------------------------------------------------
+# Tests: CLI help
+# ---------------------------------------------------------------------------
+
+echo "=== CLI help ==="
+
+_help_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_help_bin/bash"
+ln -s "$(command -v readlink)" "$_help_bin/readlink"
+
+set +e
+output=$(PATH="$_help_bin" "$AUTOFORMAT" --help 2>&1)
+rc=$?
+_assert_exit "help: --help exits 0" 0 "$rc"
+_assert_contains "help: --help shows usage" "Usage: autoformat" "$output"
+_assert_contains "help: --help lists supported file types" "Supported file types:" "$output"
+_assert_colon_list_values_aligned "help: --help aligns supported file list" \
+  "$output" "Supported file types:"
+_assert_contains "help: --help aligns build category" "Build:     .bzl" "$output"
+_assert_contains "help: --help lists cmake files" "CMakeLists.txt, .cmake" "$output"
+_assert_contains "help: --help aligns c/c++ category" "C/C++:     .c" "$output"
+_assert_contains "help: --help aligns container category" "Container: Dockerfile" "$output"
+_assert_contains "help: --help uses docs/text category" "Docs/text: .md" "$output"
+_assert_contains "help: --help lists shell files" ".sh, .bash, .zsh" "$output"
+_assert_contains "help: --help lists envrc files" ".envrc" "$output"
+_assert_contains "help: --help lists config files" ".toml, .yaml, .yml" "$output"
+_assert_contains "help: --help lists java files" ".java" "$output"
+_assert_contains "help: --help lists php files" ".php" "$output"
+_assert_contains "help: --help lists ruby files" ".rb" "$output"
+_assert_contains "help: --help lists css files" ".css" "$output"
+_assert_contains "help: --help lists special basenames" "Dockerfile, Containerfile" "$output"
+_assert_not_contains "help: --help has no other bucket" "Other:" "$output"
+
+set +e
+output=$(PATH="$_help_bin" "$AUTOFORMAT" -h 2>&1)
+rc=$?
+_assert_exit "help: -h exits 0" 0 "$rc"
+_assert_contains "help: -h shows usage" "Usage: autoformat" "$output"
+_assert_contains "help: -h lists supported file types" "Supported file types:" "$output"
+_assert_not_contains "help: -h has no other bucket" "Other:" "$output"
+
+symlink_bin=$(_tmpdir)/bin
+mkdir -p "$symlink_bin"
+ln -s "$AUTOFORMAT" "$symlink_bin/autoformat"
+ln -s "$CHECKRUN" "$symlink_bin/checkrun"
+
+set +e
+output=$(PATH="$_help_bin" "$symlink_bin/autoformat" --help 2>&1)
+rc=$?
+_assert_exit "help: symlinked autoformat resolves dependency library" 0 "$rc"
+_assert_contains "help: symlinked autoformat shows usage" "Usage: autoformat" "$output"
+
+set +e
+output=$(PATH="$symlink_bin:$_help_bin" "$symlink_bin/checkrun" format --help 2>&1)
+rc=$?
+_assert_exit "help: symlinked checkrun dispatch resolves autoformat" 0 "$rc"
+_assert_contains "help: symlinked checkrun format shows usage" "Usage: autoformat" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: basic dispatch by extension
+# ---------------------------------------------------------------------------
+
+echo "=== Dispatch by extension ==="
+
+_td=$(_tmpdir)
+
+cat >"$_td/test.py" <<'EOF'
+x=1
+y =    2
+EOF
+"$AUTOFORMAT" "$_td/test.py"
+_assert_contains "py: ruff formats" "x = 1" "$(cat "$_td/test.py")"
+
+cat >"$_td/test.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/test.sh"
+_assert_contains "sh: shfmt formats" "  echo" "$(cat "$_td/test.sh")"
+
+cat >"$_td/test.cpp" <<'EOF'
+int main() {
+int x = 0;
+if (x) {
+return 0;
+}
+}
+EOF
+"$AUTOFORMAT" "$_td/test.cpp"
+_assert_contains "cpp: clang-format formats" "  int x" "$(cat "$_td/test.cpp")"
+
+cat >"$_td/test.bash" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/test.bash"
+_assert_contains "bash ext: shfmt formats" "  echo" "$(cat "$_td/test.bash")"
+
+cat >"$_td/test.zsh" <<'EOF'
+#!/usr/bin/env zsh
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/test.zsh"
+_assert_contains "zsh ext: shfmt formats" "  echo" "$(cat "$_td/test.zsh")"
+
+cat >"$_td/test.c" <<'EOF'
+int main() {
+int x = 0;
+}
+EOF
+"$AUTOFORMAT" "$_td/test.c"
+_assert_contains "c: clang-format formats" "  int x" "$(cat "$_td/test.c")"
+
+cat >"$_td/test.h" <<'EOF'
+void foo() {
+int x = 0;
+}
+EOF
+"$AUTOFORMAT" "$_td/test.h"
+_assert_contains "h: clang-format formats" "  int x" "$(cat "$_td/test.h")"
+
+cat >"$_td/test.lua" <<'EOF'
+if true then
+print("hello")
+end
+EOF
+"$AUTOFORMAT" "$_td/test.lua"
+_assert_contains "lua: stylua formats" "  print" "$(cat "$_td/test.lua")"
+
+cat >"$_td/test.json" <<'EOF'
+{"x":1}
+EOF
+"$AUTOFORMAT" "$_td/test.json"
+_assert_contains "json: biome formats" '"x": 1' "$(cat "$_td/test.json")"
+
+cat >"$_td/test.toml" <<'EOF'
+x=1
+EOF
+"$AUTOFORMAT" "$_td/test.toml"
+_assert_contains "toml: taplo formats" 'x = 1' "$(cat "$_td/test.toml")"
+
+cat >"$_td/test.rs" <<'EOF'
+fn main( ){ }
+EOF
+"$AUTOFORMAT" "$_td/test.rs"
+_assert_eq "rust: rustfmt formats" 'fn main() {}' "$(cat "$_td/test.rs")"
+
+# yamlfmt: reformats spacing and quoting around mappings.
+cat >"$_td/test.yaml" <<'EOF'
+a:  1
+b:   [1,2,3]
+EOF
+"$AUTOFORMAT" "$_td/test.yaml"
+_assert_contains "yaml: yamlfmt formats (single-space after colon)" "a: 1" "$(cat "$_td/test.yaml")"
+
+# Go: gofumpt formats (goimports runs first if available)
+if command -v gofumpt &>/dev/null; then
+  cat >"$_td/test.go" <<'EOF'
+package main
+func main() {
+x:=1
+_=x
+}
+EOF
+  "$AUTOFORMAT" "$_td/test.go"
+  _assert_contains "go: gofumpt formats" "	x := 1" "$(cat "$_td/test.go")"
+else
+  echo "  SKIP: go (gofumpt not installed)"
+fi
+
+# HTML: superhtml formats
+if command -v superhtml &>/dev/null; then
+  cat >"$_td/test.html" <<'EOF'
+<div><p>hello</p></div>
+EOF
+  "$AUTOFORMAT" "$_td/test.html"
+  _assert_contains "html: superhtml formats" "<div>" "$(cat "$_td/test.html")"
+
+  cat >"$_td/test.htm" <<'EOF'
+<div><p>hello</p></div>
+EOF
+  "$AUTOFORMAT" "$_td/test.htm"
+  _assert_contains "htm: superhtml formats" "<div>" "$(cat "$_td/test.htm")"
+else
+  echo "  SKIP: html (superhtml not installed)"
+fi
+
+# Starlark: buildifier formats (.bzl extension)
+if command -v buildifier &>/dev/null; then
+  cat >"$_td/test.bzl" <<'EOF'
+load("@rules","rule")
+rule(name="a",srcs=["b"])
+EOF
+  "$AUTOFORMAT" "$_td/test.bzl"
+  _assert_contains "bzl: buildifier formats" 'name = "a"' "$(cat "$_td/test.bzl")"
+else
+  echo "  SKIP: bzl (buildifier not installed)"
+fi
+
+# Starlark: buildifier formats (BUCK basename dispatch)
+if command -v buildifier &>/dev/null; then
+  cat >"$_td/BUCK" <<'EOF'
+load("@rules","rule")
+rule(name="a",srcs=["b"])
+EOF
+  "$AUTOFORMAT" "$_td/BUCK"
+  _assert_contains "BUCK: buildifier formats" 'name = "a"' "$(cat "$_td/BUCK")"
+
+  cat >"$_td/BUILD" <<'EOF'
+load("@rules","rule")
+rule(name="a",srcs=["b"])
+EOF
+  "$AUTOFORMAT" "$_td/BUILD"
+  _assert_contains "BUILD: buildifier formats" 'name = "a"' "$(cat "$_td/BUILD")"
+else
+  echo "  SKIP: BUCK/BUILD (buildifier not installed)"
+fi
+
+# CMake: cmake-format dispatch and fallback config routing. Uses a
+# mock because cmake-format is optional on the host running the tests.
+_cmakefmt_mock=$(_mock_bin)
+cat >"$_cmakefmt_mock/cmake-format" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-CMAKE-FORMAT-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_cmakefmt_mock/cmake-format"
+
+_cmakefmt_cfg=$(_tmpdir)
+: >"$_cmakefmt_cfg/cmake-format.py"
+cat >"$_td/CMakeLists.txt" <<'EOF'
+add_executable(app main.cpp)
+EOF
+set +e
+output=$(AUTOFORMAT_DIR="$_cmakefmt_cfg" PATH="$_cmakefmt_mock:$PATH" "$AUTOFORMAT" "$_td/CMakeLists.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "cmake: CMakeLists.txt exits 0" 0 "$rc"
+_assert_contains "cmake: CMakeLists.txt dispatches to cmake-format" \
+  "MOCK-CMAKE-FORMAT-ARGS:" "$output"
+_assert_contains "cmake: fallback config passed via --config-files" \
+  "--config-files $_cmakefmt_cfg/cmake-format.py" "$output"
+
+echo 'include(foo)' >"$_td/module.cmake"
+set +e
+output=$(AUTOFORMAT_DIR="$_cmakefmt_cfg" PATH="$_cmakefmt_mock:$PATH" "$AUTOFORMAT" "$_td/module.cmake" 2>&1)
+rc=$?
+set -e
+_assert_exit "cmake: .cmake exits 0" 0 "$rc"
+_assert_contains "cmake: .cmake dispatches to cmake-format" \
+  "MOCK-CMAKE-FORMAT-ARGS:" "$output"
+
+# rumdl --fix: auto-fixes rule violations. MD019 (multiple spaces
+# after the heading hash) has a reliable cross-version fix.
+printf '#  Title\n' >"$_td/test.md"
+"$AUTOFORMAT" "$_td/test.md"
+_assert_contains "md: rumdl --fix normalizes heading spacing" "# Title" "$(cat "$_td/test.md")"
+
+# Ruby: RuboCop layout autocorrect dispatch and fallback config routing.
+_rubocop_fmt_mock=$(_mock_bin)
+cat >"$_rubocop_fmt_mock/rubocop" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-RUBOCOP-FMT-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_rubocop_fmt_mock/rubocop"
+
+_ruby_cfg=$(_tmpdir)
+: >"$_ruby_cfg/rubocop.yml"
+echo 'puts "hi"' >"$_td/test.rb"
+set +e
+output=$(AUTOFORMAT_DIR="$_ruby_cfg" PATH="$_rubocop_fmt_mock:$PATH" "$AUTOFORMAT" "$_td/test.rb" 2>&1)
+rc=$?
+set -e
+_assert_exit "ruby: rubocop formatter exits 0" 0 "$rc"
+_assert_contains "ruby: rubocop formatter runs" "MOCK-RUBOCOP-FMT-ARGS:" "$output"
+_assert_contains "ruby: rubocop formatter uses layout-only autocorrect" \
+  "--autocorrect --only Layout" "$output"
+_assert_contains "ruby: fallback rubocop.yml passed via --config" \
+  "--config $_ruby_cfg/rubocop.yml" "$output"
+
+# PHP: php-cs-fixer dispatch and fallback config routing.
+_phpcsfixer_mock=$(_mock_bin)
+cat >"$_phpcsfixer_mock/php-cs-fixer" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-PHP-CS-FIXER-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_phpcsfixer_mock/php-cs-fixer"
+
+_php_cfg=$(_tmpdir)
+: >"$_php_cfg/php-cs-fixer.php"
+cat >"$_td/test.php" <<'EOF'
+<?php echo "hi";
+EOF
+set +e
+output=$(AUTOFORMAT_DIR="$_php_cfg" PATH="$_phpcsfixer_mock:$PATH" "$AUTOFORMAT" "$_td/test.php" 2>&1)
+rc=$?
+set -e
+_assert_exit "php: php-cs-fixer exits 0" 0 "$rc"
+_assert_contains "php: php-cs-fixer runs" "MOCK-PHP-CS-FIXER-ARGS:" "$output"
+_assert_contains "php: php-cs-fixer uses no cache" "--using-cache=no" "$output"
+_assert_contains "php: fallback php-cs-fixer config passed" \
+  "--config $_php_cfg/php-cs-fixer.php" "$output"
+
+# Java: google-java-format dispatch. The tool is intentionally
+# opinionated and has no fallback config to route.
+_gjf_fmt_mock=$(_mock_bin)
+cat >"$_gjf_fmt_mock/google-java-format" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-GOOGLE-JAVA-FORMAT-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_gjf_fmt_mock/google-java-format"
+
+cat >"$_td/Test.java" <<'EOF'
+class Test {}
+EOF
+set +e
+output=$(PATH="$_gjf_fmt_mock:$PATH" "$AUTOFORMAT" "$_td/Test.java" 2>&1)
+rc=$?
+set -e
+_assert_exit "java: google-java-format exits 0" 0 "$rc"
+_assert_contains "java: google-java-format runs" \
+  "MOCK-GOOGLE-JAVA-FORMAT-ARGS: -i $_td/Test.java" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: default indent values
+# ---------------------------------------------------------------------------
+
+echo "=== Default indent values ==="
+
+cat >"$_td/test.py" <<'EOF'
+def foo():
+  if True:
+    print("hello")
+EOF
+"$AUTOFORMAT" "$_td/test.py"
+_assert_contains "py: 4-space indent" "    if True:" "$(cat "$_td/test.py")"
+
+cat >"$_td/test.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/test.sh"
+_assert_contains "sh: 2-space indent" "  echo" "$(cat "$_td/test.sh")"
+_assert_not_contains "sh: no tabs" "	" "$(cat "$_td/test.sh")"
+
+cat >"$_td/test.lua" <<'EOF'
+if true then
+print("hello")
+end
+EOF
+"$AUTOFORMAT" "$_td/test.lua"
+_assert_contains "lua: 2-space indent" "  print" "$(cat "$_td/test.lua")"
+_assert_not_contains "lua: no tabs" "	" "$(cat "$_td/test.lua")"
+
+# ---------------------------------------------------------------------------
+# Tests: C++ fallback config
+# ---------------------------------------------------------------------------
+
+echo "=== C++ fallback config ==="
+
+cat >"$_td/test.cpp" <<'EOF'
+int main() {
+int *x = nullptr;
+}
+EOF
+"$AUTOFORMAT" "$_td/test.cpp"
+_assert_contains "cpp: pointer left (fallback)" "int* x" "$(cat "$_td/test.cpp")"
+
+# ---------------------------------------------------------------------------
+# Tests: repo config overrides defaults
+# ---------------------------------------------------------------------------
+
+echo "=== Repo config overrides ==="
+
+_repo_sh=$(_tmpdir)
+cat >"$_repo_sh/.editorconfig" <<'EOF'
+root = true
+[*.sh]
+indent_style = space
+indent_size = 4
+EOF
+cat >"$_repo_sh/test.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_repo_sh/test.sh"
+_assert_contains "sh: editorconfig overrides default" "    echo" "$(cat "$_repo_sh/test.sh")"
+
+_repo_py=$(_tmpdir)
+cat >"$_repo_py/ruff.toml" <<'EOF'
+indent-width = 2
+EOF
+cat >"$_repo_py/test.py" <<'EOF'
+def foo():
+    if True:
+        print("hello")
+EOF
+"$AUTOFORMAT" "$_repo_py/test.py"
+_assert_contains "py: ruff.toml overrides default" "  if True:" "$(cat "$_repo_py/test.py")"
+
+_repo_py2=$(_tmpdir)
+cat >"$_repo_py2/.ruff.toml" <<'EOF'
+indent-width = 2
+EOF
+cat >"$_repo_py2/test.py" <<'EOF'
+def foo():
+    if True:
+        print("hello")
+EOF
+"$AUTOFORMAT" "$_repo_py2/test.py"
+_assert_contains "py: .ruff.toml overrides default" "  if True:" "$(cat "$_repo_py2/test.py")"
+
+_repo_py3=$(_tmpdir)
+cat >"$_repo_py3/pyproject.toml" <<'EOF'
+[project]
+name = "demo"
+version = "0.1.0"
+EOF
+cat >"$_repo_py3/test.py" <<'EOF'
+def foo():
+  if True:
+    print("hello")
+EOF
+"$AUTOFORMAT" "$_repo_py3/test.py"
+_assert_contains "py: unrelated pyproject keeps fallback" "    if True:" "$(cat "$_repo_py3/test.py")"
+
+_repo_py4=$(_tmpdir)
+cat >"$_repo_py4/pyproject.toml" <<'EOF'
+[tool.ruff]
+indent-width = 2
+EOF
+cat >"$_repo_py4/test.py" <<'EOF'
+def foo():
+    if True:
+        print("hello")
+EOF
+"$AUTOFORMAT" "$_repo_py4/test.py"
+_assert_contains "py: pyproject ruff config overrides fallback" "  if True:" "$(cat "$_repo_py4/test.py")"
+
+_repo_cpp=$(_tmpdir)
+cat >"$_repo_cpp/.clang-format" <<'EOF'
+PointerAlignment: Right
+IndentWidth: 4
+EOF
+cat >"$_repo_cpp/test.cpp" <<'EOF'
+int main() {
+int* x = nullptr;
+}
+EOF
+"$AUTOFORMAT" "$_repo_cpp/test.cpp"
+_assert_contains "cpp: .clang-format overrides fallback" "int *x" "$(cat "$_repo_cpp/test.cpp")"
+
+_repo_cpp2=$(_tmpdir)
+cat >"$_repo_cpp2/_clang-format" <<'EOF'
+PointerAlignment: Right
+IndentWidth: 4
+EOF
+cat >"$_repo_cpp2/test.cpp" <<'EOF'
+int main() {
+int* x = nullptr;
+}
+EOF
+"$AUTOFORMAT" "$_repo_cpp2/test.cpp"
+_assert_contains "cpp: _clang-format overrides fallback" "int *x" "$(cat "$_repo_cpp2/test.cpp")"
+
+_repo_lua=$(_tmpdir)
+cat >"$_repo_lua/stylua.toml" <<'EOF'
+indent_type = "Tabs"
+EOF
+cat >"$_repo_lua/test.lua" <<'EOF'
+if true then
+print("hello")
+end
+EOF
+"$AUTOFORMAT" "$_repo_lua/test.lua"
+_assert_contains "lua: stylua.toml overrides default" "	print" "$(cat "$_repo_lua/test.lua")"
+
+# Rust: per-repo rustfmt.toml overrides fallback
+_repo_rs=$(_tmpdir)
+cat >"$_repo_rs/rustfmt.toml" <<'EOF'
+max_width = 40
+EOF
+cat >"$_repo_rs/test.rs" <<'EOF'
+fn very_long_function_name(a:i32,b:i32,c:i32)->i32{a+b+c}
+EOF
+"$AUTOFORMAT" "$_repo_rs/test.rs"
+# max_width=40 forces per-arg wrapping; signature must span multiple lines
+_rustout=$(cat "$_repo_rs/test.rs")
+_assert_contains "rust: rustfmt.toml overrides fallback (wraps args)" "    a: i32," "$_rustout"
+_assert_contains "rust: rustfmt.toml overrides fallback (wraps args)" "    b: i32," "$_rustout"
+
+# TOML: per-repo taplo.toml overrides fallback. Autoformat now
+# detects the per-repo config and passes it via --config explicitly,
+# since taplo's own auto-discovery walks cwd rather than file path.
+_repo_tm=$(_tmpdir)
+cat >"$_repo_tm/taplo.toml" <<'EOF'
+[formatting]
+reorder_keys = true
+EOF
+cat >"$_repo_tm/test.toml" <<'EOF'
+z = 1
+a = 2
+EOF
+"$AUTOFORMAT" "$_repo_tm/test.toml"
+_assert_contains "toml: taplo.toml overrides fallback (reorder)" "a = 2
+z = 1" "$(cat "$_repo_tm/test.toml")"
+
+# Biome: per-repo biome.json overrides fallback. Repo config forces
+# singleQuote, so the formatted JS should use single quotes despite
+# the global fallback asking for doubles.
+_repo_biome=$(_tmpdir)
+cat >"$_repo_biome/biome.json" <<'EOF'
+{
+  "formatter": { "indentStyle": "space", "indentWidth": 2 },
+  "javascript": { "formatter": { "quoteStyle": "single" } }
+}
+EOF
+cat >"$_repo_biome/test.js" <<'EOF'
+const x = { a: "b" };
+EOF
+"$AUTOFORMAT" "$_repo_biome/test.js"
+_assert_contains "biome: biome.json overrides fallback (single quotes)" "'b'" "$(cat "$_repo_biome/test.js")"
+
+# Rust fallback: autoformat passes --config-path when no per-repo config
+_td_rs=$(_tmpdir)
+cat >"$_td_rs/t.rs" <<'EOF'
+fn main(){ }
+EOF
+"$AUTOFORMAT" "$_td_rs/t.rs"
+_assert_eq "rust: fallback rustfmt.toml applied" 'fn main() {}' "$(cat "$_td_rs/t.rs")"
+
+_rustfmt_mock=$(_mock_bin)
+cat >"$_rustfmt_mock/rustfmt" <<'EOF'
+#!/usr/bin/env bash
+printf 'MOCK-RUSTFMT-ARGS: %s\n' "$*" >>"$MOCK_RUSTFMT_LOG"
+exit 0
+EOF
+chmod +x "$_rustfmt_mock/rustfmt"
+
+_rustfmt_cfg=$(_tmpdir)
+: >"$_rustfmt_cfg/rustfmt.toml"
+_rustfmt_project=$(_tmpdir)
+mkdir -p "$_rustfmt_project/src"
+cat >"$_rustfmt_project/Cargo.toml" <<'EOF'
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+EOF
+echo 'fn main(){ }' >"$_rustfmt_project/src/main.rs"
+export MOCK_RUSTFMT_LOG="$_rustfmt_project/rustfmt.log"
+AUTOFORMAT_DIR="$_rustfmt_cfg" PATH="$_rustfmt_mock:$PATH" "$AUTOFORMAT" "$_rustfmt_project/src/main.rs"
+_rustfmt_args=$(cat "$MOCK_RUSTFMT_LOG")
+_assert_contains "rust: Cargo edition is passed to rustfmt" \
+  "--edition 2024" "$_rustfmt_args"
+_assert_contains "rust: Cargo project without rustfmt.toml still receives fallback config" \
+  "--config-path $_rustfmt_cfg/rustfmt.toml" "$_rustfmt_args"
+
+# TOML fallback: autoformat passes --config when no per-repo config
+_td_tm=$(_tmpdir)
+cat >"$_td_tm/t.toml" <<'EOF'
+z=1
+a=2
+EOF
+"$AUTOFORMAT" "$_td_tm/t.toml"
+# Fallback reorder_keys=false, so original order preserved
+_assert_contains "toml: fallback taplo.toml applied (no reorder)" "z = 1
+a = 2" "$(cat "$_td_tm/t.toml")"
+
+# Biome fallback: autoformat passes --config-path when no per-repo
+# biome.json is found, so the global biome.json shapes the output.
+_td_biome=$(_tmpdir)
+cat >"$_td_biome/t.json" <<'EOF'
+{"x":1,"y":2}
+EOF
+"$AUTOFORMAT" "$_td_biome/t.json"
+_assert_contains "biome: fallback biome.json applied" '"x": 1' "$(cat "$_td_biome/t.json")"
+
+_biome_path_mock=$(_mock_bin)
+cat >"$_biome_path_mock/biome" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-BIOME-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_biome_path_mock/biome"
+
+_biome_rel=$(_tmpdir)
+mkdir -p "$_biome_rel/launch/cfg" "$_biome_rel/project"
+cat >"$_biome_rel/launch/cfg/biome.json" <<'EOF'
+{
+  "formatter": { "indentStyle": "space" }
+}
+EOF
+echo '{"a":1}' >"$_biome_rel/project/test.json"
+set +e
+output=$(cd "$_biome_rel/launch" &&
+  AUTOFORMAT_DIR=cfg PATH="$_biome_path_mock:$PATH" "$AUTOFORMAT" "$_biome_rel/project/test.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "biome: relative fallback config dir exits 0 from another cwd" 0 "$rc"
+_assert_contains "biome: relative fallback config dir resolved before dispatch" \
+  "--config-path $_biome_rel/launch/cfg" "$output"
+
+_biome_self=$(_tmpdir)
+cat >"$_biome_self/biome.json" <<'EOF'
+{
+  "formatter": { "indentStyle": "space" }
+}
+EOF
+set +e
+output=$(cd "$_biome_self" &&
+  AUTOFORMAT_DIR=/nonexistent PATH="$_biome_path_mock:$PATH" "$AUTOFORMAT" biome.json 2>&1)
+rc=$?
+set -e
+_assert_exit "biome: relative self config exits 0" 0 "$rc"
+_assert_not_contains "biome: relative self config omits --config-path" \
+  "--config-path" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: config in parent directory
+# ---------------------------------------------------------------------------
+
+echo "=== Config in parent directory ==="
+
+_parent=$(_tmpdir)
+mkdir -p "$_parent/sub"
+cat >"$_parent/.editorconfig" <<'EOF'
+root = true
+[*.sh]
+indent_style = space
+indent_size = 4
+EOF
+cat >"$_parent/sub/test.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_parent/sub/test.sh"
+_assert_contains "sh: parent editorconfig found" "    echo" "$(cat "$_parent/sub/test.sh")"
+
+# yamlfmt: parent-dir .yamlfmt is found and passed via -conf, since
+# yamlfmt only looks in cwd, not the file's parent chain. Uses a mock
+# to verify the -conf routing without depending on yamlfmt semantics.
+_yamlfmt_mockbin=$(_mock_bin)
+cat >"$_yamlfmt_mockbin/yamlfmt" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-YAMLFMT-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_yamlfmt_mockbin/yamlfmt"
+
+_yamlfmt_parent=$(_tmpdir)
+mkdir -p "$_yamlfmt_parent/sub"
+cat >"$_yamlfmt_parent/.yamlfmt" <<'EOF'
+line_ending: lf
+EOF
+echo 'a: 1' >"$_yamlfmt_parent/sub/test.yaml"
+output=$(PATH="$_yamlfmt_mockbin:$PATH" "$AUTOFORMAT" "$_yamlfmt_parent/sub/test.yaml" 2>&1)
+rc=$?
+_assert_exit "yaml: parent .yamlfmt — exits 0" 0 "$rc"
+_assert_contains "yaml: parent .yamlfmt passed via -conf" \
+  "-conf $_yamlfmt_parent/.yamlfmt" "$output"
+
+_taplo_path_mock=$(_mock_bin)
+cat >"$_taplo_path_mock/taplo" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-TAPLO-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_taplo_path_mock/taplo"
+
+_taplo_rel=$(_tmpdir)
+mkdir -p "$_taplo_rel/launch/cfg" "$_taplo_rel/project"
+cat >"$_taplo_rel/launch/cfg/taplo.toml" <<'EOF'
+[formatting]
+reorder_keys = false
+EOF
+echo 'k = "v"' >"$_taplo_rel/project/test.toml"
+set +e
+output=$(cd "$_taplo_rel/launch" &&
+  AUTOFORMAT_DIR=cfg PATH="$_taplo_path_mock:$PATH" "$AUTOFORMAT" "$_taplo_rel/project/test.toml" 2>&1)
+rc=$?
+set -e
+_assert_exit "toml: relative fallback config exits 0 from another cwd" 0 "$rc"
+_assert_contains "toml: relative fallback config path resolved before dispatch" \
+  "--config $_taplo_rel/launch/cfg/taplo.toml" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: config at search root
+# ---------------------------------------------------------------------------
+
+echo "=== Config at search root ==="
+
+_cfg_root=$(_tmpdir)
+mkdir -p "$_cfg_root/sub"
+cat >"$_cfg_root/.editorconfig" <<'EOF'
+root = true
+[*.sh]
+indent_style = space
+indent_size = 4
+EOF
+
+# shellcheck source=../format/common.sh
+. "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh"
+
+_has_config "$_cfg_root/sub" ".editorconfig" "$_cfg_root"
+rc=$?
+_assert_exit "has_config: checks search root" 0 "$rc"
+
+# Regression: relative root and relative starting dir must terminate.
+set +e
+_has_config "." ".editorconfig" "."
+rc=$?
+set -e
+_assert_exit "has_config: relative root terminates" 1 "$rc"
+
+_find_abs=$(_tmpdir)
+mkdir -p "$_find_abs/project/sub" "$_find_abs/launch"
+cat >"$_find_abs/project/taplo.toml" <<'EOF'
+[formatting]
+reorder_keys = false
+EOF
+found=$(cd "$_find_abs/launch" && _find_config ../project/sub taplo.toml)
+_assert_eq "find_config: relative search returns absolute path" \
+  "$_find_abs/project/taplo.toml" "$found"
+
+# ---------------------------------------------------------------------------
+# Tests: shebang detection for extensionless files
+# ---------------------------------------------------------------------------
+
+echo "=== Shebang detection ==="
+
+cat >"$_td/myscript" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/myscript"
+_assert_contains "shebang bash: formatted" "  echo" "$(cat "$_td/myscript")"
+
+cat >"$_td/shscript" <<'EOF'
+#!/bin/sh
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/shscript"
+_assert_contains "shebang sh: formatted" "  echo" "$(cat "$_td/shscript")"
+
+cat >"$_td/envscript" <<'EOF'
+#!/usr/bin/env bash
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/envscript"
+_assert_contains "shebang env bash: formatted" "  echo" "$(cat "$_td/envscript")"
+
+cat >"$_td/.zshrc" <<'EOF'
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/.zshrc"
+_assert_contains "dotfile zshrc: formatted" "  echo" "$(cat "$_td/.zshrc")"
+
+cat >"$_td/.zshenv" <<'EOF'
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/.zshenv"
+_assert_contains "dotfile zshenv: formatted" "  echo" "$(cat "$_td/.zshenv")"
+
+cat >"$_td/.bashrc" <<'EOF'
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/.bashrc"
+_assert_contains "dotfile bashrc: formatted" "  echo" "$(cat "$_td/.bashrc")"
+
+cat >"$_td/.envrc" <<'EOF'
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/.envrc"
+_assert_contains "dotfile envrc: formatted" "  echo" "$(cat "$_td/.envrc")"
+
+cat >"$_td/envrc-example" <<'EOF'
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/envrc-example"
+_assert_contains "envrc example: formatted" "  echo" "$(cat "$_td/envrc-example")"
+
+cat >"$_td/.profile" <<'EOF'
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/.profile"
+_assert_contains "dotfile profile: formatted" "  echo" "$(cat "$_td/.profile")"
+
+cat >"$_td/zshscript" <<'EOF'
+#!/usr/bin/env zsh
+if true; then
+echo "hello"
+fi
+EOF
+"$AUTOFORMAT" "$_td/zshscript"
+_assert_contains "shebang zsh: formatted" "  echo" "$(cat "$_td/zshscript")"
+
+cat >"$_td/pyscript" <<'EOF'
+#!/usr/bin/env python3
+x=1
+EOF
+cp "$_td/pyscript" "$_td/pyscript.orig"
+"$AUTOFORMAT" "$_td/pyscript"
+_assert_eq "shebang python: not formatted as shell" "$(cat "$_td/pyscript.orig")" "$(cat "$_td/pyscript")"
+
+# ---------------------------------------------------------------------------
+# Tests: skip known non-shell extensionless files
+# ---------------------------------------------------------------------------
+
+echo "=== Skip non-shell files ==="
+
+cat >"$_td/Makefile" <<'EOF'
+#!/bin/bash
+echo "fake"
+EOF
+cp "$_td/Makefile" "$_td/Makefile.orig"
+"$AUTOFORMAT" "$_td/Makefile"
+_assert_eq "Makefile: not formatted" "$(cat "$_td/Makefile.orig")" "$(cat "$_td/Makefile")"
+
+# Dockerfile: dockerfmt formats (basename dispatch)
+if command -v dockerfmt &>/dev/null; then
+  cat >"$_td/Dockerfile" <<'EOF'
+FROM    node:lts-alpine    as   builder
+COPY        .      /app
+EOF
+  "$AUTOFORMAT" "$_td/Dockerfile"
+  _assert_contains "Dockerfile: dockerfmt formats" "FROM node" "$(cat "$_td/Dockerfile")"
+
+  cat >"$_td/Dockerfile.prod" <<'EOF'
+FROM    node:lts-alpine    as   builder
+COPY        .      /app
+EOF
+  "$AUTOFORMAT" "$_td/Dockerfile.prod"
+  _assert_contains "Dockerfile.prod: dockerfmt formats" "FROM node" "$(cat "$_td/Dockerfile.prod")"
+
+  cat >"$_td/Containerfile" <<'EOF'
+FROM    node:lts-alpine    as   builder
+COPY        .      /app
+EOF
+  "$AUTOFORMAT" "$_td/Containerfile"
+  _assert_contains "Containerfile: dockerfmt formats" "FROM node" "$(cat "$_td/Containerfile")"
+else
+  echo "  SKIP: Dockerfile (dockerfmt not installed)"
+fi
+
+# ---------------------------------------------------------------------------
+# Tests: missing tool graceful skip (new languages)
+# ---------------------------------------------------------------------------
+
+echo "=== Missing tool graceful skip ==="
+
+_notools=$(_mock_bin)
+ln -s "$(command -v bash)" "$_notools/bash"
+ln -s "$(command -v yq)" "$_notools/yq"
+
+cat >"$_td/skip.go" <<'EOF'
+package main
+func main() { }
+EOF
+cp "$_td/skip.go" "$_td/skip.go.orig"
+set +e
+PATH="$_notools" "$AUTOFORMAT" "$_td/skip.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "go: no gofumpt — exits 0" 0 "$rc"
+_assert_eq "go: no gofumpt — file unchanged" "$(cat "$_td/skip.go.orig")" "$(cat "$_td/skip.go")"
+
+cat >"$_td/skip.html" <<'EOF'
+<div><p>hello</p></div>
+EOF
+cp "$_td/skip.html" "$_td/skip.html.orig"
+set +e
+PATH="$_notools" "$AUTOFORMAT" "$_td/skip.html" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "html: no superhtml — exits 0" 0 "$rc"
+_assert_eq "html: no superhtml — file unchanged" "$(cat "$_td/skip.html.orig")" "$(cat "$_td/skip.html")"
+
+cat >"$_td/skip.bzl" <<'EOF'
+load("@rules","rule")
+EOF
+cp "$_td/skip.bzl" "$_td/skip.bzl.orig"
+set +e
+PATH="$_notools" "$AUTOFORMAT" "$_td/skip.bzl" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "bzl: no buildifier — exits 0" 0 "$rc"
+_assert_eq "bzl: no buildifier — file unchanged" "$(cat "$_td/skip.bzl.orig")" "$(cat "$_td/skip.bzl")"
+
+cat >"$_td/Dockerfile_skip" <<'EOF'
+FROM ubuntu
+EOF
+mv "$_td/Dockerfile_skip" "$_td/Dockerfile"
+cp "$_td/Dockerfile" "$_td/Dockerfile.orig"
+set +e
+PATH="$_notools" "$AUTOFORMAT" "$_td/Dockerfile" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "dockerfile: no dockerfmt — exits 0" 0 "$rc"
+_assert_eq "dockerfile: no dockerfmt — file unchanged" "$(cat "$_td/Dockerfile.orig")" "$(cat "$_td/Dockerfile")"
+
+# ---------------------------------------------------------------------------
+# Tests: _classify_shell (shared lib)
+# ---------------------------------------------------------------------------
+
+echo "=== _classify_shell ==="
+
+cat >"$_td/zshrc_file" <<'EOF'
+echo hi
+EOF
+mv "$_td/zshrc_file" "$_td/.zshrc"
+_assert_eq "classify: .zshrc → zsh" "zsh" "$(_classify_shell "$_td/.zshrc")"
+
+cat >"$_td/.bashrc" <<'EOF'
+echo hi
+EOF
+_assert_eq "classify: .bashrc → bash" "bash" "$(_classify_shell "$_td/.bashrc")"
+
+cat >"$_td/.profile" <<'EOF'
+echo hi
+EOF
+_assert_eq "classify: .profile → bash" "bash" "$(_classify_shell "$_td/.profile")"
+
+cat >"$_td/.envrc" <<'EOF'
+echo hi
+EOF
+_assert_eq "classify: .envrc → bash" "bash" "$(_classify_shell "$_td/.envrc")"
+
+cat >"$_td/envrc-example" <<'EOF'
+echo hi
+EOF
+_assert_eq "classify: envrc-example → bash" "bash" "$(_classify_shell "$_td/envrc-example")"
+
+cat >"$_td/Dockerfile2" <<'EOF'
+FROM alpine
+EOF
+mv "$_td/Dockerfile2" "$_td/Dockerfile"
+_assert_eq "classify: Dockerfile → skip" "skip" "$(_classify_shell "$_td/Dockerfile")"
+
+cat >"$_td/bashscript" <<'EOF'
+#!/usr/bin/env bash
+echo hi
+EOF
+_assert_eq "classify: bash shebang → bash" "bash" "$(_classify_shell "$_td/bashscript")"
+
+cat >"$_td/zshshebang" <<'EOF'
+#!/usr/bin/env zsh
+echo hi
+EOF
+_assert_eq "classify: zsh shebang → zsh" "zsh" "$(_classify_shell "$_td/zshshebang")"
+
+cat >"$_td/pyshebang" <<'EOF'
+#!/usr/bin/env python3
+print("hi")
+EOF
+_assert_eq "classify: python shebang → unknown" "unknown" "$(_classify_shell "$_td/pyshebang")"
+
+cat >"$_td/noshebang" <<'EOF'
+hello
+EOF
+_assert_eq "classify: no shebang → unknown" "unknown" "$(_classify_shell "$_td/noshebang")"
+
+# Regression: binary files must not leak null bytes through the
+# `first=$(head -n1 ...)` command substitution. Classifier should
+# short-circuit to `unknown` with zero warnings on stderr.
+printf '\x7fELF\x02\x01\x01\x00%.0s' {1..10} >"$_td/binary"
+set +e
+_stderr=$(_classify_shell "$_td/binary" 2>&1 >/dev/null)
+result=$(_classify_shell "$_td/binary" 2>/dev/null)
+set -e
+_assert_eq "classify: binary → unknown" "unknown" "$result"
+_assert_not_contains "classify: binary emits no null-byte warning" "null byte" "$_stderr"
+
+# ---------------------------------------------------------------------------
+# Tests: ignore file ($AUTOFORMAT_DIR/ignore)
+# ---------------------------------------------------------------------------
+
+echo "=== Ignore file ==="
+
+_ign_dir=$(_tmpdir)
+cat >"$_ign_dir/ignore" <<'EOF'
+# comment line
+*/skipme.py
+
+exact-name.sh
+*.generated.*
+EOF
+
+# Glob pattern in ignore list → file is not formatted.
+_ign_py_dir=$(_tmpdir)
+cat >"$_ign_py_dir/skipme.py" <<'EOF'
+x=1
+EOF
+AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/skipme.py"
+_assert_eq "ignore: glob match skips formatting" "x=1" "$(cat "$_ign_py_dir/skipme.py")"
+
+# File NOT in ignore list → formats as usual.
+cat >"$_ign_py_dir/keepme.py" <<'EOF'
+x=1
+EOF
+AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/keepme.py"
+_assert_contains "ignore: non-match still formats" "x = 1" "$(cat "$_ign_py_dir/keepme.py")"
+
+# Missing ignore file → scripts proceed normally.
+cat >"$_ign_py_dir/plain.py" <<'EOF'
+x=1
+EOF
+AUTOFORMAT_DIR=/nonexistent "$AUTOFORMAT" "$_ign_py_dir/plain.py"
+_assert_contains "ignore: missing ignore file → normal flow" \
+  "x = 1" "$(cat "$_ign_py_dir/plain.py")"
+
+_ign_rel_repo=$(_tmpdir)
+cat >"$_ign_rel_repo/skipme.py" <<'EOF'
+x=1
+EOF
+cat >"$_ign_rel_repo/keepme.py" <<'EOF'
+x=1
+EOF
+set +e
+output=$(cd "$_ign_rel_repo" &&
+  AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" skipme.py 2>&1)
+rc=$?
+set -e
+_assert_exit "ignore: relative basename path exits 0" 0 "$rc"
+_assert_eq "ignore: relative basename path still matches glob" \
+  "x=1" "$(cat "$_ign_rel_repo/skipme.py")"
+set +e
+(cd "$_ign_rel_repo" &&
+  AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" keepme.py >/dev/null 2>&1)
+rc=$?
+set -e
+_assert_exit "ignore: relative non-ignored basename formats" 0 "$rc"
+_assert_contains "ignore: relative non-ignored basename still formats" \
+  "x = 1" "$(cat "$_ign_rel_repo/keepme.py")"
+
+# ---------------------------------------------------------------------------
+# Tests: no-op for missing/empty input
+# ---------------------------------------------------------------------------
+
+echo "=== No-op edge cases ==="
+
+rc=0
+"$AUTOFORMAT" "" || rc=$?
+_assert_exit "empty arg: exits 0" 0 "$rc"
+
+rc=0
+"$AUTOFORMAT" "/nonexistent/file.py" || rc=$?
+_assert_exit "missing file: exits 0" 0 "$rc"
+
+rc=0
+"$AUTOFORMAT" || rc=$?
+_assert_exit "no args: exits 0" 0 "$rc"
+
+# Multi-file invocation: every file should be formatted.
+cat >"$_td/a.py" <<'EOF'
+x=1
+EOF
+cat >"$_td/b.py" <<'EOF'
+y=2
+EOF
+set +e
+"$AUTOFORMAT" "$_td/a.py" "$_td/b.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "multi-file args: exits 0" 0 "$rc"
+_assert_contains "multi-file args: formats first file" "x = 1" "$(cat "$_td/a.py")"
+_assert_contains "multi-file args: formats second file" "y = 2" "$(cat "$_td/b.py")"
+
+# Skipped paths in a batch must not stop later files from being formatted.
+cat >"$_td/missing-before.py" <<'EOF'
+a=1
+EOF
+cat >"$_td/missing-after.py" <<'EOF'
+b=2
+EOF
+set +e
+"$AUTOFORMAT" "$_td/missing-before.py" "$_td/not-there.py" "$_td/missing-after.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "multi-file missing path: exits 0" 0 "$rc"
+_assert_contains "multi-file missing path: formats first file" \
+  "a = 1" "$(cat "$_td/missing-before.py")"
+_assert_contains "multi-file missing path: formats later file" \
+  "b = 2" "$(cat "$_td/missing-after.py")"
+
+cat >"$_ign_py_dir/batch-before.py" <<'EOF'
+c=3
+EOF
+cat >"$_ign_py_dir/skipme.py" <<'EOF'
+d=4
+EOF
+cat >"$_ign_py_dir/batch-after.py" <<'EOF'
+e=5
+EOF
+set +e
+AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" \
+  "$_ign_py_dir/batch-before.py" "$_ign_py_dir/skipme.py" "$_ign_py_dir/batch-after.py" \
+  >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "multi-file ignored path: exits 0" 0 "$rc"
+_assert_contains "multi-file ignored path: formats first file" \
+  "c = 3" "$(cat "$_ign_py_dir/batch-before.py")"
+_assert_eq "multi-file ignored path: leaves ignored file unchanged" \
+  "d=4" "$(cat "$_ign_py_dir/skipme.py")"
+_assert_contains "multi-file ignored path: formats later file" \
+  "e = 5" "$(cat "$_ign_py_dir/batch-after.py")"
+
+# ---------------------------------------------------------------------------
+# Tests: required tools
+# ---------------------------------------------------------------------------
+
+echo "=== Required tools ==="
+
+_noyq_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_noyq_bin/bash"
+
+set +e
+output=$(PATH="$_noyq_bin" "$AUTOFORMAT" "$_td/test.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "missing yq: exits 1" 1 "$rc"
+_assert_contains "missing yq: prints error" "autoformat: yq is required" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: formatter failures are surfaced
+# ---------------------------------------------------------------------------
+
+echo "=== Formatter failures ==="
+
+_mockbin=$(_mock_bin)
+cat >"$_mockbin/shfmt" <<'EOF'
+#!/usr/bin/env bash
+echo "mock shfmt parse error" >&2
+exit 2
+EOF
+chmod +x "$_mockbin/shfmt"
+
+cat >"$_td/fail.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+cp "$_td/fail.sh" "$_td/fail.sh.orig"
+
+set +e
+output=$(PATH="$_mockbin:$PATH" "$AUTOFORMAT" "$_td/fail.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "formatter failure: autoformat still exits 0" 0 "$rc"
+_assert_contains "formatter failure: prints stderr" "mock shfmt parse error" "$output"
+_assert_eq "formatter failure: file left unchanged" "$(cat "$_td/fail.sh.orig")" "$(cat "$_td/fail.sh")"
+
+# ---------------------------------------------------------------------------
+# Tests: AUTOFORMAT_DIR override
+# ---------------------------------------------------------------------------
+
+echo "=== AUTOFORMAT_DIR override ==="
+
+_custom_cfg=$(_tmpdir)
+cat >"$_custom_cfg/shfmt.toml" <<'EOF'
+indent = 4
+EOF
+cat >"$_td/custom.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+AUTOFORMAT_DIR="$_custom_cfg" "$AUTOFORMAT" "$_td/custom.sh"
+_assert_contains "custom config dir: 4-space" "    echo" "$(cat "$_td/custom.sh")"
+
+# ---------------------------------------------------------------------------
+# Tests: missing config dir gracefully falls back to tool defaults
+# ---------------------------------------------------------------------------
+
+echo "=== Missing config dir ==="
+
+cat >"$_td/noconfig.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+AUTOFORMAT_DIR="/nonexistent/path" "$AUTOFORMAT" "$_td/noconfig.sh"
+# shfmt default is tabs when no config
+_assert_contains "no config dir: shfmt uses tabs" "	echo" "$(cat "$_td/noconfig.sh")"
+
+# ---------------------------------------------------------------------------
+# Tests: relative paths terminate (regression for _has_config loop on ".")
+# ---------------------------------------------------------------------------
+
+echo "=== Relative paths ==="
+
+_reldir=$(_tmpdir)
+cat >"$_reldir/rel.py" <<'EOF'
+x=1
+EOF
+set +e
+output=$(cd "$_reldir" && _with_timeout 10 "$AUTOFORMAT" rel.py 2>&1)
+rc=$?
+set -e
+_assert_exit "rel py: terminates (no infinite loop)" 0 "$rc"
+_assert_contains "rel py: formatted via relative path" "x = 1" "$(cat "$_reldir/rel.py")"
+
+cat >"$_reldir/rel.cpp" <<'EOF'
+int main(){int x=0;}
+EOF
+set +e
+cd "$_reldir" && _with_timeout 10 "$AUTOFORMAT" rel.cpp
+rc=$?
+cd - >/dev/null
+set -e
+_assert_exit "rel cpp: terminates" 0 "$rc"
+_assert_contains "rel cpp: formatted via relative path" "  int x" "$(cat "$_reldir/rel.cpp")"
+
+cat >"$_reldir/rel.sh" <<'EOF'
+#!/bin/bash
+if true; then
+echo "hello"
+fi
+EOF
+set +e
+cd "$_reldir" && _with_timeout 10 "$AUTOFORMAT" rel.sh
+rc=$?
+cd - >/dev/null
+set -e
+_assert_exit "rel sh: terminates" 0 "$rc"
+_assert_contains "rel sh: formatted via relative path" "  echo" "$(cat "$_reldir/rel.sh")"
+
+cat >"$_reldir/rel.lua" <<'EOF'
+if true then
+print("hi")
+end
+EOF
+set +e
+cd "$_reldir" && _with_timeout 10 "$AUTOFORMAT" rel.lua
+rc=$?
+cd - >/dev/null
+set -e
+_assert_exit "rel lua: terminates" 0 "$rc"
+_assert_contains "rel lua: formatted via relative path" "  print" "$(cat "$_reldir/rel.lua")"
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+_test_summary

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -u
+
+_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_script_parent "$path")" && pwd
+}
+
+_bin_dir=$(_script_dir "${BASH_SOURCE[0]}") || {
+  echo "autoformat: cannot resolve executable path" >&2
+  exit 2
+}
+
+# shellcheck source=../lib/checkrun/autoformat.sh
+. "$_bin_dir/../lib/checkrun/autoformat.sh"
+
+_autoformat_main "$@"

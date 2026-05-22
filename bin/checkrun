@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# checkrun — dispatch the checkrun formatter/linter compatibility commands.
+
+set -u
+
+_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_script_parent "$path")" && pwd
+}
+
+_bin_dir=$(_script_dir "${BASH_SOURCE[0]}") || {
+  echo "checkrun: cannot resolve executable path" >&2
+  exit 2
+}
+
+_usage() {
+  cat <<'EOF'
+Usage: checkrun COMMAND [ARGS...]
+
+Commands:
+  format    run autoformat compatibility entry point
+  lint      run autolint compatibility entry point
+  check     alias for lint
+EOF
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  format | fmt)
+    shift
+    exec "$_bin_dir/autoformat" "$@"
+    ;;
+  lint | check)
+    shift
+    exec "$_bin_dir/autolint" "$@"
+    ;;
+  -h | --help | help | "")
+    _usage
+    ;;
+  *)
+    printf 'checkrun: unknown command: %s\n' "$cmd" >&2
+    _usage >&2
+    exit 2
+    ;;
+esac

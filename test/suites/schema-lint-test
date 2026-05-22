@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+# schema-lint-test — unit tests for shared Checkrun schema validation.
+#
+# Usage: schema-lint-test
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "schema-lint-test"
+
+SCRIPT="$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema-lint.py"
+POLICY_SCRIPT="$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema_policy.py"
+POLICY_SCHEMA="$CHECKRUN_REPO_ROOT/share/checkrun/schemas/associations.schema.json"
+
+echo "=== schema-lint: public schema API ==="
+
+_assert_file_exists "policy schema: repo schema file is tracked" "$POLICY_SCHEMA"
+
+echo "=== schema-lint: policy matching and diagnostics ==="
+
+_td=$(_tmpdir)
+_home="$_td/home"
+_schemas="$_td/schemas"
+_dep_root="$_td/deps/sley"
+_policy="$_td/associations.json"
+mkdir -p \
+  "$_home/.config/example/schema.d" \
+  "$_home/.config/sley/verify.d" \
+  "$_schemas" \
+  "$_dep_root/share/sley/schemas" \
+  "$_td/copy/.config/example/schema.d"
+
+cat >"$_schemas/settings.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["enabled"],
+  "additionalProperties": false,
+  "properties": {
+    "enabled": { "type": "boolean" }
+  }
+}
+JSON
+cat >"$_schemas/yaml.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object"
+}
+JSON
+cat >"$_schemas/toml.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["count"],
+  "properties": {
+    "count": { "type": "integer" }
+  }
+}
+JSON
+cat >"$_schemas/invalid.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "not-a-json-schema-type"
+}
+JSON
+cat >"$_schemas/file-url.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object"
+}
+JSON
+cat >"$_dep_root/share/sley/schemas/verify.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["rules"],
+  "properties": {
+    "rules": { "type": "array" }
+  },
+  "additionalProperties": false
+}
+JSON
+_dep_schema="$_dep_root/share/sley/schemas/verify.schema.json"
+_shdeps_bin=$(_mock_bin)
+cat >"$_shdeps_bin/shdeps" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "dep-file" &&
+  "\$2" == "cgraf78/sley" &&
+  "\$3" == "share/sley/schemas/verify.schema.json" ]]; then
+  printf '%s\n' "$_dep_schema"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$_shdeps_bin/shdeps"
+cat >"$_policy" <<JSON
+{
+  "version": 1,
+  "schemaDataDir": "$_schemas",
+  "associations": [
+    {
+      "name": "Test settings",
+      "format": "json",
+      "schema": "settings.schema.json",
+      "source": "https://example.invalid/settings.schema.json",
+      "matches": [".config/example/schema.d/test-settings-*.json"],
+      "enforce": true
+    },
+    {
+      "name": "Advisory settings",
+      "format": "json",
+      "schema": "settings.schema.json",
+      "matches": [".config/example/schema.d/advisory-settings-*.json"],
+      "enforce": false
+    },
+    {
+      "name": "Test YAML",
+      "format": "yaml",
+      "schema": "yaml.schema.json",
+      "matches": [".config/example/schema.d/test-yaml-*.yaml"],
+      "enforce": true
+    },
+    {
+      "name": "Test TOML",
+      "format": "toml",
+      "schema": "toml.schema.json",
+      "matches": [".config/example/schema.d/test-toml-*.toml"],
+      "enforce": true
+    },
+    {
+      "name": "Invalid Schema",
+      "format": "json",
+      "schema": "invalid.schema.json",
+      "matches": [".config/example/schema.d/invalid-schema.json"],
+      "enforce": true
+    },
+    {
+      "name": "File URL Schema",
+      "format": "json",
+      "schema": "file://$_schemas/file-url.schema.json",
+      "matches": [".config/example/schema.d/file-url-schema.json"],
+      "enforce": true
+    },
+    {
+      "name": "Dependency Schema",
+      "format": "json",
+      "dependency": "cgraf78/sley",
+      "schema": "share/sley/schemas/verify.schema.json",
+      "matches": [".config/sley/verify.d/*.json"],
+      "enforce": true
+    }
+  ]
+}
+JSON
+
+cat >"$_home/.config/example/schema.d/test-settings-ok.json" <<'JSON'
+{ "enabled": true }
+JSON
+cat >"$_home/.config/example/schema.d/test-settings-bad.json" <<'JSON'
+{ "enabled": "yes" }
+JSON
+cat >"$_home/.config/example/schema.d/advisory-settings-bad.json" <<'JSON'
+{ "enabled": "yes" }
+JSON
+cat >"$_td/copy/.config/example/schema.d/test-settings-copy.json" <<'JSON'
+{ "enabled": false }
+JSON
+cat >"$_home/.config/example/schema.d/test-yaml-bad.yaml" <<'YAML'
+root:
+  - ok
+  broken
+YAML
+cat >"$_home/.config/example/schema.d/test-toml-bad.toml" <<'TOML'
+count = "one"
+TOML
+cat >"$_home/.config/example/schema.d/invalid-schema.json" <<'JSON'
+{}
+JSON
+cat >"$_home/.config/example/schema.d/file-url-schema.json" <<'JSON'
+{}
+JSON
+cat >"$_home/.config/sley/verify.d/local.json" <<'JSON'
+{ "rules": [] }
+JSON
+
+_default_home="$_td/default-home"
+mkdir -p \
+  "$_default_home/.config/checkrun" \
+  "$_default_home/.config/example" \
+  "$_default_home/.local/share/checkrun/schemas"
+cat >"$_default_home/.local/share/checkrun/schemas/default-settings.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["enabled"],
+  "properties": {
+    "enabled": { "type": "boolean" }
+  }
+}
+JSON
+cat >"$_default_home/.config/checkrun/associations.json" <<'JSON'
+{
+  "version": 1,
+  "associations": [
+    {
+      "name": "Default settings",
+      "format": "json",
+      "schema": "default-settings.schema.json",
+      "matches": [".config/example/settings.json"],
+      "enforce": true
+    }
+  ]
+}
+JSON
+cat >"$_default_home/.config/example/settings.json" <<'JSON'
+{ "enabled": "yes" }
+JSON
+
+set +e
+output=$(HOME="$_default_home" "$SCRIPT" "$_default_home/.config/example/settings.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "default policy: checkrun config path is used" 1 "$rc"
+_assert_contains "default policy: checkrun schema data dir is used" "Default settings" "$output"
+
+set +e
+output=$(HOME="$_default_home" "$SCRIPT" "$_default_home/.config/checkrun/associations.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "default policy: schemaDataDir is optional" 0 "$rc"
+_assert_eq "default policy: optional schemaDataDir has no diagnostics" "" "$output"
+
+set +e
+output=$(cd "$_home" &&
+  HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" .config/example/schema.d/test-settings-ok.json 2>&1)
+rc=$?
+set -e
+_assert_exit "relative match: valid document passes" 0 "$rc"
+_assert_eq "relative match: no output for valid document" "" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" "$_home/.config/example/schema.d/test-settings-bad.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "home absolute match: invalid document fails" 1 "$rc"
+_assert_contains "home absolute match: reports association name" "Test settings" "$output"
+_assert_contains "home absolute match: reports schema path" "enabled" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" "$_td/copy/.config/example/schema.d/test-settings-copy.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "recursive match: copied checkout path passes" 0 "$rc"
+_assert_eq "recursive match: no output for valid document" "" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" "$_home/.config/example/schema.d/advisory-settings-bad.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "advisory match: unenforced association does not fail" 0 "$rc"
+_assert_eq "advisory match: unenforced association produces no output" "" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --json "$_home/.config/example/schema.d/test-settings-bad.json" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json diagnostics: invalid document fails" 1 "$rc"
+_assert_contains "json diagnostics: source is unified" '"source":"json-schema"' "$output"
+_assert_contains "json diagnostics: code carries association name" '"code":"Test settings"' "$output"
+_assert_contains "json diagnostics: message includes failing path" 'enabled' "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --json "$_home/.config/example/schema.d/test-yaml-bad.yaml" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "yaml parse: invalid yaml fails without traceback" 1 "$rc"
+_assert_contains "yaml parse: reports association name" '"code":"Test YAML"' "$output"
+_assert_contains "yaml parse: reports json-schema source" '"source":"json-schema"' "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --json "$_home/.config/example/schema.d/test-toml-bad.toml" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "toml validation: invalid toml shape fails" 1 "$rc"
+_assert_contains "toml validation: reports association name" '"code":"Test TOML"' "$output"
+_assert_contains "toml validation: reports json-schema source" '"source":"json-schema"' "$output"
+_assert_contains "toml validation: reports failing key" 'count' "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --json "$_home/.config/example/schema.d/invalid-schema.json" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "schema parse: invalid schema fails without traceback" 1 "$rc"
+_assert_contains "schema parse: reports association name" '"code":"Invalid Schema"' "$output"
+_assert_contains "schema parse: reports invalid schema" 'invalid schema' "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" "$_home/.config/example/schema.d/file-url-schema.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "file schema url: validates through local file URL" 0 "$rc"
+_assert_eq "file schema url: no output for valid document" "" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" PATH="$_shdeps_bin:$PATH" "$SCRIPT" "$_home/.config/sley/verify.d/local.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "dependency schema: validates through shdeps dep-file" 0 "$rc"
+_assert_eq "dependency schema: no output for valid document" "" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" "$_policy" 2>&1)
+rc=$?
+set -e
+_assert_exit "policy bootstrap: valid policy passes checkrun-owned schema" 0 "$rc"
+_assert_eq "policy bootstrap: valid policy produces no output" "" "$output"
+
+_bad_policy_dir=$(_tmpdir)
+cat >"$_bad_policy_dir/associations.json" <<JSON
+{
+  "version": 1,
+  "schemaDataDir": "$_schemas"
+}
+JSON
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy_dir/associations.json" "$SCRIPT" "$_bad_policy_dir/associations.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "policy bootstrap: damaged association list fails" 1 "$rc"
+_assert_contains "policy bootstrap: reports policy schema name" "Checkrun schema association policy" "$output"
+_assert_contains "policy bootstrap: reports missing associations" "associations" "$output"
+
+_bad_top_policy_dir=$(_tmpdir)
+cat >"$_bad_top_policy_dir/associations.json" <<'JSON'
+[]
+JSON
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_top_policy_dir/associations.json" "$SCRIPT" "$_bad_top_policy_dir/associations.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "policy bootstrap: non-object policy fails without traceback" 1 "$rc"
+_assert_contains "policy bootstrap: non-object reports policy schema name" "Checkrun schema association policy" "$output"
+_assert_contains "policy bootstrap: non-object reports object type" "object" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" PATH="$_shdeps_bin:$PATH" python3 "$POLICY_SCRIPT" --nvim 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "editor config: policy interpreter exits 0" 0 "$rc"
+_assert_contains "editor config: prefers public source urls" '"url":"https://example.invalid/settings.schema.json"' "$output"
+_assert_contains "editor config: expands recursive matches" '"**/.config/example/schema.d/test-settings-*.json"' "$output"
+_assert_contains "editor config: resolves source-less local schema" '"file://'"$_schemas"'/yaml.schema.json"' "$output"
+_assert_contains "editor config: preserves local file schema urls" '"file://'"$_schemas"'/file-url.schema.json"' "$output"
+_assert_contains "editor config: resolves dependency schema" \
+  '"file://'"$_dep_schema"'"' "$output"
+
+echo "=== schema-lint: production config schemas ==="
+
+if [[ -f "$HOME/.config/checkrun/associations.json" ]]; then
+  set +e
+  output=$(python3 "$POLICY_SCRIPT" --nvim 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "production schemas: editor config emits successfully" 0 "$rc"
+  for expected in \
+    "share/checkrun/schemas/associations.schema.json" \
+    "share/sley/schemas/verify.schema.json" \
+    "https://raw.githubusercontent.com/jesseduffield/lazygit/master/schema/config.json" \
+    "https://biomejs.dev/schemas/latest/schema.json" \
+    "https://mise.jdx.dev/schema/mise.json" \
+    "https://raw.githubusercontent.com/ClementTsang/bottom/main/schema/v0.10/bottom.json" \
+    "https://raw.githubusercontent.com/hadolint/hadolint/master/contrib/hadolint.json" \
+    "https://www.schemastore.org/ruff.json" \
+    "https://www.schemastore.org/rustfmt.json" \
+    "https://www.schemastore.org/stylua.json" \
+    "https://www.schemastore.org/taplo.json" \
+    "https://raw.githubusercontent.com/crate-ci/typos/master/config.schema.json" \
+    "https://raw.githubusercontent.com/SchemaStore/schemastore/master/src/schemas/json/rumdl.json"; do
+    _assert_contains "production schemas: editor exposes $expected" \
+      "$expected" "$output"
+  done
+
+  for config_path in \
+    ".config/checkrun/associations.json" \
+    ".config/lazygit/config.yml" \
+    ".config/autoformat/biome.json" \
+    ".config/mise/config.toml" \
+    ".config/bottom/bottom.toml" \
+    ".config/autoformat/hadolint.yaml" \
+    ".config/autoformat/ruff.toml" \
+    ".config/autoformat/rustfmt.toml" \
+    ".config/autoformat/stylua.toml" \
+    ".config/autoformat/taplo.toml" \
+    ".config/autoformat/typos.toml" \
+    ".config/autoformat/rumdl.toml"; do
+    set +e
+    output=$("$SCRIPT" "$HOME/$config_path" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "production schemas: $config_path validates" 0 "$rc"
+    _assert_eq "production schemas: $config_path has no diagnostics" "" "$output"
+  done
+else
+  echo "  SKIP: production schema policy not present in this checkout"
+fi
+
+_test_summary

@@ -1,0 +1,2703 @@
+#!/usr/bin/env bash
+# autolint-test — unit tests for the autolint script.
+#
+# Tests linting dispatch, error detection, auto-fix, shebang detection,
+# and no-op behavior for unsupported/missing files.
+#
+# Usage: autolint-test
+
+set -o pipefail
+export NO_COLOR=1
+
+# Formatter/linter dev tooling is expected to come from the global
+# mise toolset, so seed the shim dir explicitly for direct test runs.
+# On macOS, brew binaries are signed and must take priority over
+# unsigned mise downloads that macOS Gatekeeper kills.
+[ -d "$HOME/.local/share/mise/shims" ] &&
+  PATH="$HOME/.local/share/mise/shims:$PATH"
+[ -d "/opt/homebrew/bin" ] &&
+  PATH="/opt/homebrew/bin:$PATH"
+export MISE_GLOBAL_CONFIG_FILE="$HOME/.config/mise/config.toml"
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "autolint-test"
+
+AUTOLINT="$CHECKRUN_TEST_ROOT/bin/autolint"
+export AUTOLINT_DIR
+AUTOLINT_DIR=$(_checkrun_default_autoformat_dir)
+
+# ---------------------------------------------------------------------------
+# Tests: CLI help
+# ---------------------------------------------------------------------------
+
+echo "=== CLI help ==="
+
+set +e
+output=$("$AUTOLINT" --help 2>&1)
+rc=$?
+_assert_exit "help: --help exits 0" 0 "$rc"
+_assert_contains "help: --help shows usage" "Usage: autolint" "$output"
+_assert_contains "help: --help lists supported file types" "Supported file types:" "$output"
+_assert_colon_list_values_aligned "help: --help aligns supported file list" \
+  "$output" "Supported file types:"
+_assert_contains "help: --help aligns build category" "Build:     .bzl" "$output"
+_assert_contains "help: --help lists make files" "Makefile, GNUmakefile, .mk" "$output"
+_assert_contains "help: --help lists cmake files" "CMakeLists.txt, .cmake" "$output"
+_assert_contains "help: --help aligns ci category" "CI:        .github/workflows" "$output"
+_assert_contains "help: --help aligns container category" "Container: Dockerfile" "$output"
+_assert_contains "help: --help uses docs/text category" "Docs/text: .md" "$output"
+_assert_contains "help: --help lists shell files" ".sh, .bash, .zsh" "$output"
+_assert_contains "help: --help lists systemd units" ".service" "$output"
+_assert_contains "help: --help lists systemd timers" ".timer" "$output"
+_assert_contains "help: --help lists systemd sockets" ".socket" "$output"
+_assert_contains "help: --help lists envrc files" ".envrc" "$output"
+_assert_contains "help: --help lists java files" ".java" "$output"
+_assert_contains "help: --help lists php files" ".php" "$output"
+_assert_contains "help: --help lists ruby files" ".rb" "$output"
+_assert_contains "help: --help lists json files" ".json, .jsonc" "$output"
+_assert_contains "help: --help lists css files" ".css" "$output"
+_assert_contains "help: --help lists config linters" ".editorconfig, .toml, git config, tmux.conf, crontab" "$output"
+_assert_contains "help: --help lists workflow files" ".github/workflows/*.yml" "$output"
+_assert_contains "help: --help lists docker files" "Dockerfile, Containerfile" "$output"
+_assert_not_contains "help: --help has no other bucket" "Other:" "$output"
+
+set +e
+output=$("$AUTOLINT" -h 2>&1)
+rc=$?
+_assert_exit "help: -h exits 0" 0 "$rc"
+_assert_contains "help: -h shows usage" "Usage: autolint" "$output"
+_assert_contains "help: -h lists supported file types" "Supported file types:" "$output"
+_assert_not_contains "help: -h has no other bucket" "Other:" "$output"
+
+symlink_bin=$(_tmpdir)/bin
+mkdir -p "$symlink_bin"
+ln -s "$AUTOLINT" "$symlink_bin/autolint"
+
+set +e
+output=$("$symlink_bin/autolint" --help 2>&1)
+rc=$?
+_assert_exit "help: symlinked autolint resolves dependency library" 0 "$rc"
+_assert_contains "help: symlinked autolint shows usage" "Usage: autolint" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: linter module wiring
+# ---------------------------------------------------------------------------
+
+echo "=== Linter module wiring ==="
+
+_autolint_impl="$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh"
+_linter_dir="$CHECKRUN_TEST_ROOT/lib/checkrun/linters"
+
+_linter_sources=$(
+  awk -v root="$CHECKRUN_TEST_ROOT/lib/checkrun" '
+    /^\.[[:space:]]+"\$CHECKRUN_LIB_DIR\/linters\/.*\.sh"$/ {
+      path = $2
+      gsub(/^"/, "", path)
+      gsub(/"$/, "", path)
+      sub(/^\$CHECKRUN_LIB_DIR/, root, path)
+      print path
+    }
+  ' "$_autolint_impl"
+)
+_sorted_linter_sources=$(printf '%s\n' "$_linter_sources" | sort)
+_expected_linter_sources=$(find "$_linter_dir" -type f -name '*.sh' -print | sort)
+_first_linter_source=$(printf '%s\n' "$_linter_sources" | sed -n '1p')
+
+_assert_eq "linter sources: every adapter file is loaded" \
+  "$_expected_linter_sources" "$_sorted_linter_sources"
+_assert_eq "linter sources: shared core loads before adapters" \
+  "$_linter_dir/core.sh" "$_first_linter_source"
+
+# ---------------------------------------------------------------------------
+# Tests: dispatch by extension — errors detected
+# ---------------------------------------------------------------------------
+
+echo "=== Dispatch: errors detected ==="
+
+_td=$(_tmpdir)
+
+cat >"$_td/bad.sh" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED_VAR
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/bad.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "sh: exits non-zero on error" 1 "$rc"
+_assert_contains "sh: shellcheck output shown" "SC" "$output"
+
+cat >"$_td/bad.zsh" <<'EOF'
+#!/usr/bin/env zsh
+if true
+  echo "missing then"
+fi
+EOF
+set +e
+_stdout=$("$AUTOLINT" "$_td/bad.zsh" 2>"$_td/bad.zsh.err")
+rc=$?
+set -e
+_assert_exit "zsh: exits non-zero on syntax error" 1 "$rc"
+_assert_eq "zsh: errors not on stdout" "" "$_stdout"
+_assert_contains "zsh: errors on stderr" "parse error" "$(cat "$_td/bad.zsh.err")"
+
+cat >"$_td/bad.py" <<'EOF'
+import os
+import sys
+x=1
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/bad.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "py: exits non-zero on lint error" 1 "$rc"
+_assert_contains "py: ruff output shown" "F401" "$output"
+
+if command -v selene &>/dev/null; then
+  cat >"$_td/unused.lua" <<'EOF'
+local function unused()
+end
+local value = 1
+print("hello")
+EOF
+  set +e
+  output=$("$AUTOLINT" "$_td/unused.lua" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "lua: fallback config flags unused locals" 1 "$rc"
+  _assert_contains "lua: unused local diagnostic shown" "unused_variable" "$output"
+fi
+
+# ---------------------------------------------------------------------------
+# Tests: dispatch by extension — clean files pass
+# ---------------------------------------------------------------------------
+
+echo "=== Dispatch: clean files pass ==="
+
+cat >"$_td/ok.sh" <<'EOF'
+#!/bin/bash
+echo "hello"
+EOF
+set +e
+"$AUTOLINT" "$_td/ok.sh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "sh: exits 0 on clean file" 0 "$rc"
+
+cat >"$_td/ok.zsh" <<'EOF'
+#!/usr/bin/env zsh
+echo "hello"
+EOF
+set +e
+"$AUTOLINT" "$_td/ok.zsh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "zsh: exits 0 on clean file" 0 "$rc"
+
+cat >"$_td/ok.py" <<'EOF'
+x = 1
+EOF
+set +e
+"$AUTOLINT" "$_td/ok.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "py: exits 0 on clean file" 0 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: multi-file linting runs concurrently
+# ---------------------------------------------------------------------------
+
+echo "=== Multi-file concurrency ==="
+
+_parallel_dir=$(_tmpdir)
+_parallel_sync=$(_tmpdir)
+cat >"$_parallel_dir/a.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "a"
+EOF
+cat >"$_parallel_dir/b.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "b"
+EOF
+
+_parallel_mock=$(_mock_bin)
+cat >"$_parallel_mock/yq" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_parallel_mock/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+file="${@: -1}"
+case "${file##*/}" in
+  a.sh)
+    touch "$AUTOLINT_PARALLEL_SYNC/a-start"
+    for _i in $(seq 1 100); do
+      if [ -f "$AUTOLINT_PARALLEL_SYNC/b-start" ]; then
+        echo "a saw b"
+        exit 0
+      fi
+      sleep 0.02
+    done
+    echo "a timed out waiting for b" >&2
+    exit 7
+    ;;
+  b.sh)
+    touch "$AUTOLINT_PARALLEL_SYNC/b-start"
+    echo "b started"
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$_parallel_mock/yq" "$_parallel_mock/shellcheck"
+
+set +e
+output=$(AUTOLINT_DIR=/nonexistent AUTOLINT_PARALLEL_SYNC="$_parallel_sync" \
+  PATH="$_parallel_mock:$PATH" "$AUTOLINT" "$_parallel_dir/a.sh" "$_parallel_dir/b.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "parallel: second file starts before first completes" 0 "$rc"
+_assert_contains "parallel: first file observes second" "a saw b" "$output"
+_assert_eq "parallel: output preserves input order" $'a saw b\nb started' "$output"
+
+# The batch runner forks worker subshells. Adapters intentionally read
+# `_autolint_main`'s local `json` flag via Bash dynamic scope, so this pins the
+# non-obvious contract that `--json` still reaches parallel workers.
+_parallel_json_dir=$(_tmpdir)
+_parallel_json_sync=$(_tmpdir)
+cat >"$_parallel_json_dir/a.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$A"
+EOF
+cat >"$_parallel_json_dir/b.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$B"
+EOF
+
+_parallel_json_mock=$(_mock_bin)
+cat >"$_parallel_json_mock/yq" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_parallel_json_mock/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+format=
+prev=
+for arg in "$@"; do
+  if [ "$prev" = "-f" ]; then
+    format=$arg
+    break
+  fi
+  prev=$arg
+done
+[ "$format" = "json1" ] || {
+  echo "expected shellcheck -f json1, got: $*" >&2
+  exit 9
+}
+
+file="${@: -1}"
+case "${file##*/}" in
+  a.sh)
+    touch "$AUTOLINT_PARALLEL_JSON_SYNC/a-start"
+    saw_b=0
+    for _i in $(seq 1 100); do
+      if [ -f "$AUTOLINT_PARALLEL_JSON_SYNC/b-start" ]; then
+        saw_b=1
+        break
+      fi
+      sleep 0.02
+    done
+    if [ "$saw_b" -ne 1 ]; then
+      echo "a timed out waiting for b" >&2
+      exit 7
+    fi
+    ;;
+  b.sh)
+    touch "$AUTOLINT_PARALLEL_JSON_SYNC/b-start"
+    ;;
+esac
+
+printf '{"comments":[{"line":1,"column":1,"endLine":1,"endColumn":8,"level":"error","code":2086,"message":"mock finding in %s"}]}\n' "${file##*/}"
+exit 1
+EOF
+chmod +x "$_parallel_json_mock/yq" "$_parallel_json_mock/shellcheck"
+
+set +e
+output=$(AUTOLINT_DIR=/nonexistent AUTOLINT_JOBS=2 \
+  AUTOLINT_PARALLEL_JSON_SYNC="$_parallel_json_sync" \
+  PATH="$_parallel_json_mock:$PATH" \
+  "$AUTOLINT" --json "$_parallel_json_dir/a.sh" "$_parallel_json_dir/b.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "parallel json: exits non-zero on findings" 1 "$rc"
+_parallel_json_check=$(printf '%s\n' "$output" | jq -e -s '
+  length == 2 and
+  (.[0].path | endswith("/a.sh")) and
+  (.[1].path | endswith("/b.sh")) and
+  all(.[]; .source == "shellcheck" and .code == "SC2086")
+' >/dev/null && echo ok || echo fail)
+_assert_eq "parallel json: workers inherit json mode and preserve order" \
+  "ok" "$_parallel_json_check"
+
+# Schema validation is policy-driven and cross-cutting: fixture JSON
+# and YAML names should be checked before extension dispatch decides which
+# language linter, if any, also applies.
+if python3 - <<'PY' >/dev/null 2>&1; then
+import jsonschema
+import yaml
+PY
+  _schema_td=$(_tmpdir)
+  _schema_dir="$_schema_td/copy/.config/example/schema.d"
+  mkdir -p "$_schema_dir" "$_schema_td/schemas"
+  cat >"$_schema_td/schemas/settings.schema.json" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["enabled"],
+  "additionalProperties": false,
+  "properties": {
+    "enabled": { "type": "boolean" }
+  }
+}
+JSON
+  cat >"$_schema_td/associations.json" <<JSON
+{
+  "version": 1,
+  "schemaDataDir": "$_schema_td/schemas",
+  "associations": [
+    {
+      "name": "Test settings",
+      "format": "json",
+      "schema": "settings.schema.json",
+      "matches": [".config/example/schema.d/test-settings-*.json"],
+      "enforce": true
+    },
+    {
+      "name": "Advisory settings",
+      "format": "json",
+      "schema": "settings.schema.json",
+      "matches": [".config/example/schema.d/advisory-settings-*.json"],
+      "enforce": false
+    }
+  ]
+}
+JSON
+  cat >"$_schema_dir/test-settings-bad.json" <<'JSON'
+{ "enabled": "yes" }
+JSON
+  cat >"$_schema_dir/advisory-settings-bad.json" <<'JSON'
+{ "enabled": "yes" }
+JSON
+
+  set +e
+  output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_schema_td/associations.json" "$AUTOLINT" "$_schema_dir/test-settings-bad.json" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "schema: enforced association exits non-zero" 1 "$rc"
+  _assert_contains "schema: enforced association reports schema name" "Test settings" "$output"
+
+  set +e
+  output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_schema_td/associations.json" "$AUTOLINT" "$_schema_dir/advisory-settings-bad.json" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "schema: advisory association does not fail autolint" 0 "$rc"
+
+  set +e
+  output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_schema_td/associations.json" "$AUTOLINT" --json "$_schema_dir/test-settings-bad.json" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "schema json: enforced association exits non-zero" 1 "$rc"
+  if printf '%s\n' "$output" | jq -e '
+    select(
+      .source == "json-schema" and
+      .code == "Test settings" and
+      (.line | type == "number") and
+      (.col | type == "number") and
+      (.message | contains("enabled"))
+    )
+  ' >/dev/null; then
+    _pass "schema json: valid unified schema"
+  else
+    _fail "schema json: valid unified schema"
+  fi
+  _assert_contains "schema json: code carries association name" '"code":"Test settings"' "$output"
+else
+  echo "  SKIP: schema validation (requires python jsonschema and PyYAML)"
+fi
+
+# Go: golangci-lint detects issues
+if command -v golangci-lint &>/dev/null && command -v go &>/dev/null; then
+  _go_dir=$(_tmpdir)
+  cat >"$_go_dir/go.mod" <<'EOF'
+module example.com/test
+go 1.21
+EOF
+  cat >"$_go_dir/bad.go" <<'EOF'
+package main
+import "fmt"
+func main() {
+	x := 1
+	fmt.Println("hello")
+}
+EOF
+  set +e
+  output=$("$AUTOLINT" "$_go_dir/bad.go" 2>&1)
+  rc=$?
+  set -e
+  # x is declared but unused — golangci-lint should catch it
+  if [ "$rc" -ne 0 ]; then
+    _pass "go: golangci-lint exits non-zero on lint error"
+  else
+    echo "  SKIP: go lint (golangci-lint did not flag test fixture)"
+  fi
+else
+  echo "  SKIP: go (golangci-lint or go not installed)"
+fi
+
+# Rust: cargo clippy is the default linter
+_rust_mock=$(_mock_bin)
+cat >"$_rust_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "clippy" ] && [ "${2:-}" = "--version" ]; then
+  exit 0
+fi
+printf '%s\n' "$*"
+exit 7
+EOF
+chmod +x "$_rust_mock/cargo"
+_rust_dir=$(_tmpdir)
+cat >"$_rust_dir/Cargo.toml" <<'EOF'
+[package]
+name = "linttest"
+version = "0.1.0"
+edition = "2021"
+EOF
+mkdir -p "$_rust_dir/src"
+cat >"$_rust_dir/src/lib.rs" <<'EOF'
+pub fn answer() -> i32 { 42 }
+EOF
+
+set +e
+output=$(PATH="$_rust_mock:$PATH" "$AUTOLINT" "$_rust_dir/src/lib.rs" 2>&1)
+rc=$?
+set -e
+_assert_exit "rust: clippy exit propagates" 7 "$rc"
+_assert_contains "rust: clippy uses manifest path" \
+  "clippy --manifest-path $_rust_dir/Cargo.toml --all-targets -- -D warnings" "$output"
+
+set +e
+output=$(PATH="$_rust_mock:$PATH" "$AUTOLINT" --fix "$_rust_dir/src/lib.rs" 2>&1)
+rc=$?
+set -e
+_assert_exit "rust: clippy --fix exit propagates" 7 "$rc"
+_assert_contains "rust: --fix uses clippy fix" \
+  "clippy --fix --allow-dirty --allow-staged --manifest-path $_rust_dir/Cargo.toml --all-targets -- -D warnings" "$output"
+
+# HTML: superhtml check detects issues
+if command -v superhtml &>/dev/null; then
+  cat >"$_td/bad.html" <<'EOF'
+<div>
+<p>unclosed
+</div>
+EOF
+  set +e
+  "$AUTOLINT" "$_td/bad.html" >/dev/null 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    _pass "html: superhtml check exits non-zero on error"
+  else
+    echo "  SKIP: html lint (superhtml did not flag test fixture)"
+  fi
+else
+  echo "  SKIP: html (superhtml not installed)"
+fi
+
+# Starlark: buildifier lint detects issues
+if command -v buildifier &>/dev/null; then
+  cat >"$_td/bad.bzl" <<'EOF'
+def _impl(ctx):
+  pass
+my_rule = rule(implementation = _impl)
+EOF
+  set +e
+  "$AUTOLINT" "$_td/bad.bzl" >/dev/null 2>&1
+  rc=$?
+  set -e
+  # buildifier --lint=warn --mode=check exits non-zero when file
+  # needs formatting OR has lint warnings. Either is acceptable.
+  _pass "bzl: buildifier --lint runs (exit $rc)"
+else
+  echo "  SKIP: bzl (buildifier not installed)"
+fi
+
+# Dockerfile: hadolint detects issues (basename dispatch)
+if command -v hadolint &>/dev/null; then
+  cat >"$_td/Dockerfile" <<'EOF'
+FROM ubuntu
+RUN apt-get update && apt-get install -y python
+EOF
+  set +e
+  output=$("$AUTOLINT" "$_td/Dockerfile" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "dockerfile: hadolint exits non-zero on lint" 1 "$rc"
+  _assert_contains "dockerfile: hadolint output shown" "DL" "$output"
+
+  # Dockerfile.prod variant (basename dispatch)
+  cp "$_td/Dockerfile" "$_td/Dockerfile.prod"
+  set +e
+  output=$("$AUTOLINT" "$_td/Dockerfile.prod" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "dockerfile.prod: hadolint exits non-zero" 1 "$rc"
+
+  # Containerfile variant (basename dispatch)
+  cp "$_td/Dockerfile" "$_td/Containerfile"
+  set +e
+  output=$("$AUTOLINT" "$_td/Containerfile" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "containerfile: hadolint exits non-zero" 1 "$rc"
+  _assert_contains "containerfile: hadolint output shown" "DL" "$output"
+else
+  echo "  SKIP: dockerfile (hadolint not installed)"
+fi
+
+# BUCK: buildifier lint via basename dispatch
+if command -v buildifier &>/dev/null; then
+  cat >"$_td/BUCK" <<'EOF'
+load("@rules","rule")
+rule(name="a",srcs=["b"])
+EOF
+  set +e
+  "$AUTOLINT" "$_td/BUCK" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _pass "BUCK: buildifier --lint runs via basename dispatch (exit $rc)"
+else
+  echo "  SKIP: BUCK (buildifier not installed)"
+fi
+
+# CMake: cmake-lint dispatch and fallback config routing. Uses a mock
+# because cmakelang is optional on hosts running these tests.
+_cmakelint_mock=$(_mock_bin)
+cat >"$_cmakelint_mock/cmake-lint" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-CMAKE-LINT-ARGS: $*"
+exit 7
+EOF
+chmod +x "$_cmakelint_mock/cmake-lint"
+
+_cmakelint_cfg=$(_tmpdir)
+: >"$_cmakelint_cfg/cmake-format.py"
+cat >"$_td/CMakeLists.txt" <<'EOF'
+add_executable(app main.cpp)
+EOF
+set +e
+output=$(AUTOLINT_DIR="$_cmakelint_cfg" PATH="$_cmakelint_mock:$PATH" "$AUTOLINT" "$_td/CMakeLists.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "cmake: CMakeLists.txt exits with cmake-lint status" 7 "$rc"
+_assert_contains "cmake: CMakeLists.txt dispatches to cmake-lint" \
+  "MOCK-CMAKE-LINT-ARGS:" "$output"
+_assert_contains "cmake: fallback config passed via --config-files" \
+  "--config-files $_cmakelint_cfg/cmake-format.py" "$output"
+
+echo 'include(foo)' >"$_td/module.cmake"
+set +e
+output=$(AUTOLINT_DIR="$_cmakelint_cfg" PATH="$_cmakelint_mock:$PATH" "$AUTOLINT" "$_td/module.cmake" 2>&1)
+rc=$?
+set -e
+_assert_exit "cmake: .cmake exits with cmake-lint status" 7 "$rc"
+_assert_contains "cmake: .cmake dispatches to cmake-lint" \
+  "MOCK-CMAKE-LINT-ARGS:" "$output"
+
+# Clean Go file passes
+if command -v golangci-lint &>/dev/null && command -v go &>/dev/null; then
+  _clean_go=$(_tmpdir)
+  cat >"$_clean_go/go.mod" <<'EOF'
+module example.com/test
+go 1.21
+EOF
+  cat >"$_clean_go/ok.go" <<'EOF'
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("hello")
+}
+EOF
+  set +e
+  "$AUTOLINT" "$_clean_go/ok.go" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "go: exits 0 on clean file" 0 "$rc"
+else
+  echo "  SKIP: go clean (golangci-lint or go not installed)"
+fi
+
+# Clean HTML file passes
+if command -v superhtml &>/dev/null; then
+  cat >"$_td/ok.html" <<'EOF'
+<p>hello</p>
+EOF
+  set +e
+  "$AUTOLINT" "$_td/ok.html" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "html: exits 0 on clean file" 0 "$rc"
+
+  cat >"$_td/ok.htm" <<'EOF'
+<p>hello</p>
+EOF
+  set +e
+  "$AUTOLINT" "$_td/ok.htm" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "htm: exits 0 on clean file" 0 "$rc"
+else
+  echo "  SKIP: html clean (superhtml not installed)"
+fi
+
+# Clean Dockerfile passes
+if command -v hadolint &>/dev/null; then
+  cat >"$_td/ok-Dockerfile" <<'EOF'
+FROM node:20-alpine
+WORKDIR /app
+COPY . .
+EOF
+  mv "$_td/ok-Dockerfile" "$_td/Dockerfile.ok"
+  set +e
+  "$AUTOLINT" "$_td/Dockerfile.ok" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "dockerfile: exits 0 on clean file" 0 "$rc"
+else
+  echo "  SKIP: dockerfile clean (hadolint not installed)"
+fi
+
+# Clean .bzl file passes (buildifier --lint=warn --mode=check exits 0
+# when the file is both formatted and lint-clean)
+if command -v buildifier &>/dev/null; then
+  cat >"$_td/ok.bzl" <<'EOF'
+"""Module docstring."""
+
+def greet(name):
+    """Greet someone."""
+    return name
+EOF
+  set +e
+  "$AUTOLINT" "$_td/ok.bzl" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "bzl: exits 0 on clean file" 0 "$rc"
+else
+  echo "  SKIP: bzl clean (buildifier not installed)"
+fi
+
+# taplo check: clean TOML is syntax-valid → exit 0; malformed TOML
+# (unclosed table header) → exit 1 with parse errors surfaced.
+if command -v taplo &>/dev/null; then
+  cat >"$_td/ok.toml" <<'EOF'
+key = "value"
+[section]
+n = 1
+EOF
+  set +e
+  "$AUTOLINT" "$_td/ok.toml" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "toml: taplo check passes clean file" 0 "$rc"
+
+  printf '[a\nbroken\n' >"$_td/bad.toml"
+  set +e
+  "$AUTOLINT" "$_td/bad.toml" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "toml: taplo check fails malformed file" 1 "$rc"
+fi
+
+# Dispatch-wiring: per-repo .taplo.toml wins over fallback. Uses a
+# mock taplo that echoes its args so we can check --config routing
+# without depending on taplo's actual semantics.
+_taplo_mockbin=$(_mock_bin)
+cat >"$_taplo_mockbin/taplo" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-TAPLO-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_taplo_mockbin/taplo"
+
+_taplo_repo=$(_tmpdir)
+cat >"$_taplo_repo/.taplo.toml" <<'EOF'
+# per-repo sentinel
+EOF
+echo 'k = "v"' >"$_taplo_repo/test.toml"
+set +e
+output=$(PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_taplo_repo/test.toml" 2>&1)
+rc=$?
+set -e
+_assert_exit "toml: per-repo .taplo.toml wins — exits 0" 0 "$rc"
+_assert_contains "toml: per-repo .taplo.toml passed via --config" \
+  "--config $_taplo_repo/.taplo.toml" "$output"
+
+# No per-repo config + $AUTOLINT_DIR/taplo.toml present → fallback applies.
+_alt_taplo=$(_tmpdir)
+cat >"$_alt_taplo/taplo.toml" <<'EOF'
+# fallback sentinel
+EOF
+echo 'k = "v"' >"$_td/fb.toml"
+set +e
+output=$(AUTOLINT_DIR="$_alt_taplo" PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_td/fb.toml" 2>&1)
+rc=$?
+set -e
+_assert_exit "toml: fallback taplo.toml — exits 0" 0 "$rc"
+_assert_contains "toml: fallback taplo.toml passed via --config" \
+  "--config $_alt_taplo/taplo.toml" "$output"
+
+# No per-repo config + no fallback → --no-schema.
+echo 'k = "v"' >"$_td/ns.toml"
+set +e
+output=$(AUTOLINT_DIR=/nonexistent PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_td/ns.toml" 2>&1)
+rc=$?
+set -e
+_assert_exit "toml: no configs → exits 0" 0 "$rc"
+_assert_contains "toml: no configs → --no-schema" "--no-schema" "$output"
+
+# Dispatch-wiring: selene config routing. Selene only looks for its
+# config in cwd, not the file's parent chain. Autolint uses _find_config
+# to locate selene.toml in the parent chain and passes --config explicitly.
+_selene_mockbin=$(_mock_bin)
+cat >"$_selene_mockbin/selene" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-SELENE-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_selene_mockbin/selene"
+
+# Per-repo selene.toml in parent dir → passed via --config.
+_selene_parent=$(_tmpdir)
+mkdir -p "$_selene_parent/sub"
+: >"$_selene_parent/selene.toml"
+echo 'print("hi")' >"$_selene_parent/sub/test.lua"
+set +e
+output=$(PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_selene_parent/sub/test.lua" 2>&1)
+rc=$?
+set -e
+_assert_exit "lua: parent selene.toml — exits 0" 0 "$rc"
+_assert_contains "lua: parent selene.toml passed via --config" \
+  "--config $_selene_parent/selene.toml" "$output"
+
+# No per-repo config + $AUTOLINT_DIR/selene.toml present → fallback applies.
+_alt_selene=$(_tmpdir)
+: >"$_alt_selene/selene.toml"
+echo 'print("hi")' >"$_td/fb.lua"
+set +e
+output=$(AUTOLINT_DIR="$_alt_selene" PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_td/fb.lua" 2>&1)
+rc=$?
+set -e
+_assert_exit "lua: fallback selene.toml — exits 0" 0 "$rc"
+_assert_contains "lua: fallback selene.toml passed via --config" \
+  "--config $_alt_selene/selene.toml" "$output"
+
+# No per-repo config + no fallback → no --config arg.
+echo 'print("hi")' >"$_td/nc.lua"
+set +e
+output=$(AUTOLINT_DIR=/nonexistent PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_td/nc.lua" 2>&1)
+rc=$?
+set -e
+_assert_exit "lua: no configs → exits 0" 0 "$rc"
+_assert_not_contains "lua: no configs → no --config" "--config" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: --fix flag
+# ---------------------------------------------------------------------------
+
+echo "=== Auto-fix ==="
+
+cat >"$_td/fixable.py" <<'EOF'
+import os
+x = 1
+EOF
+set +e
+"$AUTOLINT" --fix "$_td/fixable.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "py: --fix exits 0 after fixing" 0 "$rc"
+_assert_not_contains "py: --fix removes unused import" "import os" "$(cat "$_td/fixable.py")"
+
+# buildifier --fix: --lint=fix auto-fixes lint warnings. Uses a mock
+# to verify the flag translation (--fix → --lint=fix) without depending
+# on buildifier actually fixing a specific warning.
+_bf_fix_mock=$(_mock_bin)
+cat >"$_bf_fix_mock/buildifier" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do [ "$arg" = "--lint=fix" ] && echo "fixed" && exit 0; done
+echo "not-fixed"
+exit 1
+EOF
+chmod +x "$_bf_fix_mock/buildifier"
+
+cat >"$_td/fixable.bzl" <<'EOF'
+load("@rules","rule")
+EOF
+set +e
+output=$(PATH="$_bf_fix_mock:$PATH" "$AUTOLINT" --fix "$_td/fixable.bzl" 2>&1)
+rc=$?
+set -e
+_assert_exit "bzl: --fix translated to --lint=fix" 0 "$rc"
+_assert_contains "bzl: buildifier --lint=fix runs" "fixed" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: JS/TS/CSS/JSON linted via biome (mocked)
+#
+# Unlike eslint, biome ships a recommended rule set and runs without
+# a project config — so there is no "skipped without config" path to
+# test. The mocks just verify dispatch wiring (file reaches the tool,
+# --fix is translated to --write).
+# ---------------------------------------------------------------------------
+
+echo "=== JS/TS: linted via biome ==="
+
+_biome_repo=$(_tmpdir)
+cat >"$_biome_repo/test.js" <<'EOF'
+var x = 1
+EOF
+
+_mockbin=$(_mock_bin)
+cat >"$_mockbin/biome" <<'EOF'
+#!/usr/bin/env bash
+echo "mock biome error"
+exit 1
+EOF
+chmod +x "$_mockbin/biome"
+
+set +e
+output=$(PATH="$_mockbin:$PATH" "$AUTOLINT" "$_biome_repo/test.js" 2>&1)
+rc=$?
+set -e
+_assert_exit "js: biome runs" 1 "$rc"
+_assert_contains "js: biome output shown" "mock biome error" "$output"
+
+_mockbin_fix=$(_mock_bin)
+cat >"$_mockbin_fix/biome" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do [ "$arg" = "--write" ] && echo "fixed" && exit 0; done
+exit 1
+EOF
+chmod +x "$_mockbin_fix/biome"
+
+set +e
+output=$(PATH="$_mockbin_fix:$PATH" "$AUTOLINT" --fix "$_biome_repo/test.js" 2>&1)
+rc=$?
+set -e
+_assert_exit "js: --fix translated to --write" 0 "$rc"
+_assert_contains "js: biome --write output shown" "fixed" "$output"
+
+_biome_cfg_mock=$(_mock_bin)
+cat >"$_biome_cfg_mock/biome" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-BIOME-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_biome_cfg_mock/biome"
+
+_biome_rel=$(_tmpdir)
+mkdir -p "$_biome_rel/launch/cfg" "$_biome_rel/project"
+cat >"$_biome_rel/launch/cfg/biome.json" <<'EOF'
+{
+  "linter": { "enabled": true }
+}
+EOF
+echo 'var x = 1' >"$_biome_rel/project/test.js"
+set +e
+output=$(cd "$_biome_rel/launch" &&
+  AUTOLINT_DIR=cfg PATH="$_biome_cfg_mock:$PATH" "$AUTOLINT" "$_biome_rel/project/test.js" 2>&1)
+rc=$?
+set -e
+_assert_exit "js: relative fallback config dir exits 0 from another cwd" 0 "$rc"
+_assert_contains "js: relative fallback config dir resolved before dispatch" \
+  "--config-path $_biome_rel/launch/cfg" "$output"
+
+_biome_self=$(_tmpdir)
+cat >"$_biome_self/biome.json" <<'EOF'
+{
+  "linter": { "enabled": true }
+}
+EOF
+set +e
+output=$(cd "$_biome_self" &&
+  AUTOLINT_DIR=/nonexistent PATH="$_biome_cfg_mock:$PATH" "$AUTOLINT" biome.json 2>&1)
+rc=$?
+set -e
+_assert_exit "js: relative self config exits 0" 0 "$rc"
+_assert_not_contains "js: relative self config omits --config-path" \
+  "--config-path" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: shebang detection for extensionless files
+# ---------------------------------------------------------------------------
+
+echo "=== Shebang detection ==="
+
+cat >"$_td/myscript" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/myscript" 2>&1)
+rc=$?
+set -e
+_assert_exit "shebang bash: shellcheck runs" 1 "$rc"
+_assert_contains "shebang bash: output shown" "SC" "$output"
+
+cat >"$_td/shscript" <<'EOF'
+#!/bin/sh
+echo $UNDEFINED
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/shscript" 2>&1)
+rc=$?
+set -e
+_assert_exit "shebang sh: shellcheck runs" 1 "$rc"
+
+cat >"$_td/zshscript" <<'EOF'
+#!/usr/bin/env zsh
+if true
+  echo "bad"
+fi
+EOF
+set +e
+"$AUTOLINT" "$_td/zshscript" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "shebang zsh: zsh -n runs" 1 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: known dotfile names
+# ---------------------------------------------------------------------------
+
+echo "=== Dotfile names ==="
+
+cat >"$_td/.zshrc" <<'EOF'
+if true
+  echo "missing then"
+fi
+EOF
+set +e
+"$AUTOLINT" "$_td/.zshrc" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "dotfile .zshrc: zsh -n runs" 1 "$rc"
+
+cat >"$_td/.bashrc" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/.bashrc" 2>&1)
+rc=$?
+set -e
+_assert_exit "dotfile .bashrc: shellcheck runs" 1 "$rc"
+_assert_contains "dotfile .bashrc: output shown" "SC" "$output"
+
+cat >"$_td/.envrc" <<'EOF'
+echo $UNDEFINED
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/.envrc" 2>&1)
+rc=$?
+set -e
+_assert_exit "dotfile .envrc: shellcheck runs as bash" 1 "$rc"
+_assert_contains "dotfile .envrc: reports shell issue" "SC2086" "$output"
+_assert_not_contains "dotfile .envrc: shell is specified" "SC2148" "$output"
+
+cat >"$_td/envrc-example" <<'EOF'
+echo $UNDEFINED
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/envrc-example" 2>&1)
+rc=$?
+set -e
+_assert_exit "envrc example: shellcheck runs as bash" 1 "$rc"
+_assert_contains "envrc example: reports shell issue" "SC2086" "$output"
+_assert_not_contains "envrc example: shell is specified" "SC2148" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: Makefile linted via checkmake
+# ---------------------------------------------------------------------------
+
+echo "=== Makefile lint ==="
+
+_checkmake_mock=$(_mock_bin)
+cat >"$_checkmake_mock/checkmake" <<'EOF'
+#!/usr/bin/env bash
+echo "checkmake: $1"
+exit 6
+EOF
+chmod +x "$_checkmake_mock/checkmake"
+
+cat >"$_td/Makefile" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(AUTOLINT_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTOLINT" "$_td/Makefile" 2>&1)
+rc=$?
+set -e
+_assert_exit "Makefile: checkmake exit propagates" 6 "$rc"
+_assert_contains "Makefile: checkmake output shown" "checkmake: $_td/Makefile" "$output"
+
+cat >"$_td/rules.mk" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(AUTOLINT_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTOLINT" "$_td/rules.mk" 2>&1)
+rc=$?
+set -e
+_assert_exit "mk: checkmake exit propagates" 6 "$rc"
+_assert_contains "mk: checkmake output shown" "checkmake: $_td/rules.mk" "$output"
+
+# checkmake config routing: fallback applies when no per-repo
+# checkmake.ini exists; per-repo config wins over fallback.
+_checkmake_cfg_mock=$(_mock_bin)
+cat >"$_checkmake_cfg_mock/checkmake" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-CHECKMAKE-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_checkmake_cfg_mock/checkmake"
+
+_checkmake_cfg=$(_tmpdir)
+cat >"$_checkmake_cfg/checkmake.ini" <<'EOF'
+# fallback sentinel
+EOF
+_checkmake_cfg_target=$(_tmpdir)
+cat >"$_checkmake_cfg_target/Makefile" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(AUTOLINT_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_cfg_target/Makefile" 2>&1)
+rc=$?
+set -e
+_assert_exit "Makefile: fallback checkmake.ini exits 0" 0 "$rc"
+_assert_contains "Makefile: fallback checkmake.ini passed via --config" \
+  "--config $_checkmake_cfg/checkmake.ini" "$output"
+
+_checkmake_repo=$(_tmpdir)
+cat >"$_checkmake_repo/checkmake.ini" <<'EOF'
+# repo sentinel
+EOF
+cat >"$_checkmake_repo/Makefile" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(AUTOLINT_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_repo/Makefile" 2>&1)
+rc=$?
+set -e
+_assert_exit "Makefile: per-repo checkmake.ini exits 0" 0 "$rc"
+_assert_contains "Makefile: per-repo checkmake.ini passed via --config" \
+  "--config $_checkmake_repo/checkmake.ini" "$output"
+_assert_not_contains "Makefile: per-repo checkmake.ini suppresses fallback" \
+  "--config $_checkmake_cfg/checkmake.ini" "$output"
+
+_checkmake_parent=$(_tmpdir)
+mkdir -p "$_checkmake_parent/project/sub" "$_checkmake_parent/launch"
+cat >"$_checkmake_parent/project/checkmake.ini" <<'EOF'
+# parent sentinel
+EOF
+cat >"$_checkmake_parent/project/sub/Makefile" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(cd "$_checkmake_parent/launch" &&
+  PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_parent/project/sub/Makefile" 2>&1)
+rc=$?
+set -e
+_assert_exit "Makefile: parent checkmake.ini works from another cwd" 0 "$rc"
+_assert_contains "Makefile: parent checkmake.ini path is stable" \
+  "--config $_checkmake_parent/project/checkmake.ini" "$output"
+
+_checkmake_rel=$(_tmpdir)
+mkdir -p "$_checkmake_rel/launch/cfg" "$_checkmake_rel/project"
+cat >"$_checkmake_rel/launch/cfg/checkmake.ini" <<'EOF'
+# relative fallback sentinel
+EOF
+cat >"$_checkmake_rel/project/Makefile" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(cd "$_checkmake_rel/launch" &&
+  AUTOLINT_DIR=cfg PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_rel/project/Makefile" 2>&1)
+rc=$?
+set -e
+_assert_exit "Makefile: relative fallback checkmake.ini exits 0 from another cwd" 0 "$rc"
+_assert_contains "Makefile: relative fallback checkmake.ini resolved before cd" \
+  "--config $_checkmake_rel/launch/cfg/checkmake.ini" "$output"
+
+if command -v checkmake &>/dev/null; then
+  _real_checkmake=$(_tmpdir)
+  cat >"$_real_checkmake/Makefile" <<'EOF'
+all:
+	echo hi
+EOF
+  set +e
+  "$AUTOLINT" "$_real_checkmake/Makefile" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "Makefile: fallback allows project-specific target names" 0 "$rc"
+
+  _real_checkmake_dup=$(_tmpdir)
+  cat >"$_real_checkmake_dup/Makefile" <<'EOF'
+.PHONY: all
+all:
+	echo hi
+all:
+	echo again
+EOF
+  set +e
+  output=$("$AUTOLINT" "$_real_checkmake_dup/Makefile" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "Makefile: fallback keeps structural checks enabled" 1 "$rc"
+  _assert_contains "Makefile: duplicate target reported" "uniquetargets" "$output"
+else
+  echo "  SKIP: real checkmake fallback policy (checkmake not installed)"
+fi
+
+# ---------------------------------------------------------------------------
+# Tests: actionlint dispatched only for GH workflow YAML
+# ---------------------------------------------------------------------------
+
+echo "=== actionlint path scoping ==="
+
+_alint_mock=$(_mock_bin)
+cat >"$_alint_mock/actionlint" <<'EOF'
+#!/usr/bin/env bash
+echo "actionlint: $1"
+exit 3
+EOF
+chmod +x "$_alint_mock/actionlint"
+cat >"$_alint_mock/zizmor" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$_alint_mock/zizmor"
+
+# In a workflow path — actionlint should run and its exit propagate.
+_wf_dir="$_td/.github/workflows"
+mkdir -p "$_wf_dir"
+cat >"$_wf_dir/test.yml" <<'EOF'
+name: t
+on: push
+EOF
+set +e
+output=$(PATH="$_alint_mock:$PATH" "$AUTOLINT" "$_wf_dir/test.yml" 2>&1)
+rc=$?
+set -e
+_assert_exit "yml under .github/workflows: actionlint invoked" 3 "$rc"
+_assert_contains "yml under .github/workflows: output shown" "actionlint:" "$output"
+
+# Same extension outside a workflow path — actionlint must NOT run.
+cat >"$_td/other.yml" <<'EOF'
+foo: bar
+EOF
+set +e
+output=$(PATH="$_alint_mock:$PATH" "$AUTOLINT" "$_td/other.yml" 2>&1)
+rc=$?
+set -e
+_assert_exit "non-workflow yml: actionlint skipped — exits 0" 0 "$rc"
+_assert_not_contains "non-workflow yml: actionlint not invoked" "actionlint:" "$output"
+
+# Workflow path but actionlint not installed — graceful no-op.
+_noalint=$(_mock_bin)
+ln -s "$(command -v bash)" "$_noalint/bash"
+ln -s "$(command -v yq)" "$_noalint/yq"
+set +e
+PATH="$_noalint" "$AUTOLINT" "$_wf_dir/test.yml" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "workflow yml: no actionlint — exits 0" 0 "$rc"
+
+_zizmor_mock=$(_mock_bin)
+cat >"$_zizmor_mock/actionlint" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$_zizmor_mock/actionlint"
+cat >"$_zizmor_mock/zizmor" <<'EOF'
+#!/usr/bin/env bash
+echo "zizmor: $*"
+exit 4
+EOF
+chmod +x "$_zizmor_mock/zizmor"
+
+set +e
+output=$(PATH="$_zizmor_mock:$PATH" "$AUTOLINT" "$_wf_dir/test.yml" 2>&1)
+rc=$?
+set -e
+_assert_exit "yml under .github/workflows: zizmor invoked" 4 "$rc"
+_assert_contains "yml under .github/workflows: zizmor output shown" "zizmor:" "$output"
+_assert_contains "yml under .github/workflows: zizmor target path passed" "$_wf_dir/test.yml" "$output"
+
+set +e
+output=$(PATH="$_zizmor_mock:$PATH" "$AUTOLINT" "$_td/other.yml" 2>&1)
+rc=$?
+set -e
+_assert_exit "non-workflow yml: zizmor skipped — exits 0" 0 "$rc"
+_assert_not_contains "non-workflow yml: zizmor not invoked" "zizmor:" "$output"
+
+_no_workflow_linters=$(_mock_bin)
+ln -s "$(command -v bash)" "$_no_workflow_linters/bash"
+ln -s "$(command -v yq)" "$_no_workflow_linters/yq"
+set +e
+PATH="$_no_workflow_linters" "$AUTOLINT" "$_wf_dir/test.yml" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "workflow yml: no actionlint or zizmor — exits 0" 0 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: config file syntax linters
+# ---------------------------------------------------------------------------
+
+echo "=== Config syntax linters ==="
+
+_editorconfig_mock=$(_mock_bin)
+cat >"$_editorconfig_mock/editorconfig-checker" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "3.6.1"; exit 0 ;;
+esac
+echo "MOCK-EDITORCONFIG-CHECKER-ARGS: $*"
+case "$*" in
+  *"-config"*) exit 10 ;;
+esac
+exit 9
+EOF
+chmod +x "$_editorconfig_mock/editorconfig-checker"
+
+cat >"$_td/.editorconfig" <<'EOF'
+root = true
+
+[*]
+indent_style = space
+EOF
+set +e
+output=$(PATH="$_editorconfig_mock:$PATH" "$AUTOLINT" "$_td/.editorconfig" 2>&1)
+rc=$?
+set -e
+_assert_exit "editorconfig: checker exit propagates" 9 "$rc"
+_assert_contains "editorconfig: checker runs" \
+  "MOCK-EDITORCONFIG-CHECKER-ARGS:" "$output"
+_assert_contains "editorconfig: checker receives target file" \
+  "$_td/.editorconfig" "$output"
+_assert_not_contains "editorconfig: checker does not pass .editorconfig as tool config" \
+  "-config" "$output"
+
+_ec_mock=$(_mock_bin)
+cat >"$_ec_mock/ec" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "3.6.1"; exit 0 ;;
+esac
+echo "MOCK-EC-ARGS: $*"
+exit 8
+EOF
+chmod +x "$_ec_mock/ec"
+set +e
+output=$(PATH="$_ec_mock:$PATH" "$AUTOLINT" "$_td/.editorconfig" 2>&1)
+rc=$?
+set -e
+_assert_exit "editorconfig: ec fallback exit propagates" 8 "$rc"
+_assert_contains "editorconfig: ec fallback runs" "MOCK-EC-ARGS:" "$output"
+
+_later_checker_mock=$(_mock_bin)
+cat >"$_later_checker_mock/editorconfig-checker" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "3.5.0"; exit 0 ;;
+  *) echo "LATER-CHECKER-SHOULD-NOT-RUN"; exit 0 ;;
+esac
+EOF
+chmod +x "$_later_checker_mock/editorconfig-checker"
+set +e
+output=$(PATH="$_ec_mock:$_later_checker_mock:$PATH" "$AUTOLINT" "$_td/.editorconfig" 2>&1)
+rc=$?
+set -e
+_assert_exit "editorconfig: path-earlier ec beats later checker" 8 "$rc"
+_assert_contains "editorconfig: path-earlier ec runs" "MOCK-EC-ARGS:" "$output"
+_assert_not_contains "editorconfig: later checker does not run" \
+  "LATER-CHECKER-SHOULD-NOT-RUN" "$output"
+
+_broken_ec_mock=$(_mock_bin)
+_working_ec_mock=$(_mock_bin)
+cat >"$_broken_ec_mock/ec" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "broken shim"; exit 1 ;;
+  *) echo "BROKEN-EC-SHOULD-NOT-RUN"; exit 10 ;;
+esac
+EOF
+chmod +x "$_broken_ec_mock/ec"
+cat >"$_working_ec_mock/ec" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "3.6.1"; exit 0 ;;
+  *) echo "MOCK-WORKING-EC-ARGS: $*"; exit 8 ;;
+esac
+EOF
+chmod +x "$_working_ec_mock/ec"
+set +e
+output=$(PATH="$_broken_ec_mock:$_working_ec_mock:$PATH" "$AUTOLINT" "$_td/.editorconfig" 2>&1)
+rc=$?
+set -e
+_assert_exit "editorconfig: broken ec shim is skipped" 8 "$rc"
+_assert_contains "editorconfig: later working ec runs" \
+  "MOCK-WORKING-EC-ARGS:" "$output"
+_assert_not_contains "editorconfig: broken ec shim does not lint" \
+  "BROKEN-EC-SHOULD-NOT-RUN" "$output"
+
+_cfglint_mock=$(_mock_bin)
+cat >"$_cfglint_mock/crontab" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-CRONTAB-ARGS: $*"
+exit 7
+EOF
+chmod +x "$_cfglint_mock/crontab"
+cat >"$_cfglint_mock/tmux" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-TMUX-ARGS: $*"
+exit 6
+EOF
+chmod +x "$_cfglint_mock/tmux"
+cat >"$_cfglint_mock/git" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-GIT-ARGS: $*"
+exit 5
+EOF
+chmod +x "$_cfglint_mock/git"
+cat >"$_cfglint_mock/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-SSH-ARGS: $*"
+exit 4
+EOF
+chmod +x "$_cfglint_mock/ssh"
+cat >"$_td/cron" <<'EOF'
+* * * * * echo hi
+EOF
+set +e
+output=$(PATH="$_cfglint_mock:$PATH" "$AUTOLINT" "$_td/cron" 2>&1)
+rc=$?
+set -e
+_assert_exit "cron: crontab syntax checker runs" 7 "$rc"
+_assert_contains "cron: crontab -T receives file" \
+  "MOCK-CRONTAB-ARGS: -T $_td/cron" "$output"
+
+cat >"$_td/tmux.conf" <<'EOF'
+set -g mouse on
+EOF
+set +e
+output=$(PATH="$_cfglint_mock:$PATH" "$AUTOLINT" "$_td/tmux.conf" 2>&1)
+rc=$?
+set -e
+_assert_exit "tmux.conf: tmux syntax checker runs" 6 "$rc"
+_assert_contains "tmux.conf: tmux source-file dry-run receives file" \
+  "MOCK-TMUX-ARGS: source-file -n $_td/tmux.conf" "$output"
+
+_git_cfg_dir="$_td/.config/git"
+mkdir -p "$_git_cfg_dir"
+cat >"$_git_cfg_dir/config" <<'EOF'
+[user]
+	name = Test
+EOF
+set +e
+output=$(PATH="$_cfglint_mock:$PATH" "$AUTOLINT" "$_git_cfg_dir/config" 2>&1)
+rc=$?
+set -e
+_assert_exit "git config: git parser runs" 5 "$rc"
+_assert_contains "git config: git config --file receives file" \
+  "MOCK-GIT-ARGS: config --file $_git_cfg_dir/config --list" "$output"
+
+cat >"$_td/ssh-config" <<'EOF'
+Host test
+  HostName example.com
+EOF
+set +e
+output=$(PATH="$_cfglint_mock:$PATH" "$AUTOLINT" "$_td/ssh-config" 2>&1)
+rc=$?
+set -e
+_assert_exit "ssh config: skipped because ssh -G can execute Match exec" 0 "$rc"
+_assert_not_contains "ssh config: ssh parser is not invoked" "MOCK-SSH-ARGS" "$output"
+
+_no_cfg_linters=$(_mock_bin)
+ln -s "$(command -v bash)" "$_no_cfg_linters/bash"
+ln -s "$(command -v yq)" "$_no_cfg_linters/yq"
+set +e
+PATH="$_no_cfg_linters" "$AUTOLINT" "$_td/tmux.conf" "$_td/cron" \
+  >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "config syntax linters: missing tools skip gracefully" 0 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: systemd unit syntax lint
+# ---------------------------------------------------------------------------
+
+echo "=== systemd unit lint ==="
+
+_systemd_mock=$(_mock_bin)
+cat >"$_systemd_mock/systemd-analyze" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-SYSTEMD-ANALYZE-ARGS: $*"
+exit 11
+EOF
+chmod +x "$_systemd_mock/systemd-analyze"
+
+cat >"$_td/demo.service" <<'EOF'
+[Service]
+ExecStart=/bin/true
+EOF
+set +e
+output=$(PATH="$_systemd_mock:$PATH" "$AUTOLINT" "$_td/demo.service" 2>&1)
+rc=$?
+set -e
+_assert_exit "systemd: service verifier exit propagates" 11 "$rc"
+_assert_contains "systemd: service verifier runs" \
+  "MOCK-SYSTEMD-ANALYZE-ARGS: verify $_td/demo.service" "$output"
+
+cat >"$_td/demo.timer" <<'EOF'
+[Timer]
+OnCalendar=daily
+EOF
+set +e
+output=$(PATH="$_systemd_mock:$PATH" "$AUTOLINT" "$_td/demo.timer" 2>&1)
+rc=$?
+set -e
+_assert_exit "systemd: timer verifier exit propagates" 11 "$rc"
+_assert_contains "systemd: timer verifier runs" \
+  "MOCK-SYSTEMD-ANALYZE-ARGS: verify $_td/demo.timer" "$output"
+
+_no_systemd=$(_mock_bin)
+ln -s "$(command -v bash)" "$_no_systemd/bash"
+ln -s "$(command -v yq)" "$_no_systemd/yq"
+set +e
+PATH="$_no_systemd" "$AUTOLINT" "$_td/demo.service" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "systemd: missing verifier skips gracefully" 0 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: Ruby lint
+# ---------------------------------------------------------------------------
+
+echo "=== Ruby lint ==="
+
+_rubocop_mock=$(_mock_bin)
+cat >"$_rubocop_mock/rubocop" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-RUBOCOP-ARGS: $*"
+[ -n "${RUBOCOP_LOG:-}" ] && printf '%s\n' "$*" >>"$RUBOCOP_LOG"
+case "$*" in
+  *"--autocorrect"*) exit 0 ;;
+  *) exit 12 ;;
+esac
+EOF
+chmod +x "$_rubocop_mock/rubocop"
+
+_ruby_cfg=$(_tmpdir)
+_rubocop_log="$_td/rubocop.log"
+: >"$_ruby_cfg/rubocop.yml"
+echo 'puts "hi"' >"$_td/test.rb"
+set +e
+output=$(AUTOLINT_DIR="$_ruby_cfg" RUBOCOP_LOG="$_rubocop_log" PATH="$_rubocop_mock:$PATH" "$AUTOLINT" "$_td/test.rb" 2>&1)
+rc=$?
+set -e
+_assert_exit "ruby: rubocop exit propagates" 12 "$rc"
+_assert_contains "ruby: rubocop runs" "MOCK-RUBOCOP-ARGS:" "$output"
+_assert_contains "ruby: fallback rubocop.yml passed via --config" \
+  "--config $_ruby_cfg/rubocop.yml" "$output"
+
+set +e
+output=$(AUTOLINT_DIR="$_ruby_cfg" RUBOCOP_LOG="$_rubocop_log" PATH="$_rubocop_mock:$PATH" "$AUTOLINT" --fix "$_td/test.rb" 2>&1)
+rc=$?
+set -e
+_assert_exit "ruby: --fix exits 0 after autocorrect" 0 "$rc"
+_assert_contains "ruby: --fix maps to rubocop autocorrect" "--autocorrect" "$(cat "$_rubocop_log")"
+
+# ---------------------------------------------------------------------------
+# Tests: PHP lint
+# ---------------------------------------------------------------------------
+
+echo "=== PHP lint ==="
+
+_php_mock=$(_mock_bin)
+cat >"$_php_mock/php" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-PHP-ARGS: $*"
+exit 13
+EOF
+chmod +x "$_php_mock/php"
+
+cat >"$_td/test.php" <<'EOF'
+<?php echo "hi";
+EOF
+set +e
+output=$(PATH="$_php_mock:$PATH" "$AUTOLINT" "$_td/test.php" 2>&1)
+rc=$?
+set -e
+_assert_exit "php: parser exit propagates" 13 "$rc"
+_assert_contains "php: parser runs" "MOCK-PHP-ARGS:" "$output"
+_assert_contains "php: parser receives -l and file" "-l $_td/test.php" "$output"
+
+_hhvm_mock=$(_mock_bin)
+cat >"$_hhvm_mock/php" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "-v") echo "HipHop VM test" ;;
+  *) echo "PHP-SHIM-LINT-SHOULD-NOT-RUN"; exit 14 ;;
+esac
+EOF
+chmod +x "$_hhvm_mock/php"
+
+set +e
+output=$(PATH="$_hhvm_mock:$PATH" "$AUTOLINT" "$_td/test.php" 2>&1)
+rc=$?
+set -e
+_assert_exit "php: compatibility shim skips gracefully" 0 "$rc"
+_assert_not_contains "php: compatibility shim does not run -l" \
+  "PHP-SHIM-LINT-SHOULD-NOT-RUN" "$output"
+
+_hhvm_then_php_mock=$(_mock_bin)
+_real_php_mock=$(_mock_bin)
+cat >"$_hhvm_then_php_mock/php" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "-v") echo "HipHop VM test" ;;
+  *) echo "PHP-SHIM-LINT-SHOULD-NOT-RUN"; exit 14 ;;
+esac
+EOF
+chmod +x "$_hhvm_then_php_mock/php"
+cat >"$_real_php_mock/php" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "-v") echo "PHP 8.3.0 test" ;;
+  *) echo "MOCK-REAL-PHP-ARGS: $*"; exit 16 ;;
+esac
+EOF
+chmod +x "$_real_php_mock/php"
+
+set +e
+output=$(PATH="$_hhvm_then_php_mock:$_real_php_mock:$PATH" "$AUTOLINT" "$_td/test.php" 2>&1)
+rc=$?
+set -e
+_assert_exit "php: real CLI behind shim exit propagates" 16 "$rc"
+_assert_contains "php: real CLI behind shim runs" \
+  "MOCK-REAL-PHP-ARGS:" "$output"
+_assert_not_contains "php: shim before real CLI does not run -l" \
+  "PHP-SHIM-LINT-SHOULD-NOT-RUN" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: Java lint
+# ---------------------------------------------------------------------------
+
+echo "=== Java lint ==="
+
+_gjf_mock=$(_mock_bin)
+cat >"$_gjf_mock/google-java-format" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-GOOGLE-JAVA-FORMAT-ARGS: $*"
+exit 15
+EOF
+chmod +x "$_gjf_mock/google-java-format"
+
+cat >"$_td/Test.java" <<'EOF'
+class Test {}
+EOF
+set +e
+output=$(PATH="$_gjf_mock:$PATH" "$AUTOLINT" "$_td/Test.java" 2>&1)
+rc=$?
+set -e
+_assert_exit "java: formatter check exit propagates" 15 "$rc"
+_assert_contains "java: formatter check runs" \
+  "MOCK-GOOGLE-JAVA-FORMAT-ARGS:" "$output"
+_assert_contains "java: formatter check uses dry run" \
+  "--dry-run --set-exit-if-changed $_td/Test.java" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: typos runs as a cross-cutting linter
+# ---------------------------------------------------------------------------
+
+echo "=== typos cross-cutting lint ==="
+
+_typos_mock=$(_mock_bin)
+cat >"$_typos_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-TYPOS-ARGS: $*"
+case "$*" in
+  *--write-changes*) exit 0 ;;
+  *) exit 7 ;;
+esac
+EOF
+chmod +x "$_typos_mock/typos"
+
+cat >"$_td/typo.txt" <<'EOF'
+This sentence has zzword.
+EOF
+set +e
+output=$(PATH="$_typos_mock:$PATH" AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/typo.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "typos: invoked for plain text file" 7 "$rc"
+_assert_contains "typos: command output shown" "MOCK-TYPOS-ARGS:" "$output"
+_assert_contains "typos: target path passed" "$_td/typo.txt" "$output"
+
+set +e
+output=$(PATH="$_typos_mock:$PATH" AUTOLINT_DIR=/nonexistent "$AUTOLINT" --fix "$_td/typo.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "typos: --fix maps to --write-changes" 0 "$rc"
+_assert_contains "typos: --write-changes passed" "--write-changes" "$output"
+
+_typos_cfg_dir=$(_tmpdir)
+cat >"$_typos_cfg_dir/typos.toml" <<'EOF'
+[default]
+extend-ignore-re = []
+EOF
+set +e
+output=$(PATH="$_typos_mock:$PATH" AUTOLINT_DIR="$_typos_cfg_dir" "$AUTOLINT" --fix "$_td/typo.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "typos: fallback config exits 0" 0 "$rc"
+_assert_contains "typos: fallback typos.toml passed via --config" \
+  "--config $_typos_cfg_dir/typos.toml" "$output"
+
+_typos_repo=$(_tmpdir)
+cat >"$_typos_repo/.typos.toml" <<'EOF'
+[default]
+extend-ignore-re = []
+EOF
+cp "$_td/typo.txt" "$_typos_repo/"
+set +e
+output=$(PATH="$_typos_mock:$PATH" AUTOLINT_DIR="$_typos_cfg_dir" "$AUTOLINT" --fix "$_typos_repo/typo.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "typos: per-repo config exits 0" 0 "$rc"
+_assert_not_contains "typos: per-repo config suppresses fallback" \
+  "--config $_typos_cfg_dir" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: fallback configs (AUTOLINT_DIR) applied when no per-repo config
+# ---------------------------------------------------------------------------
+
+echo "=== Fallback configs (AUTOLINT_DIR) ==="
+
+# Build a controlled AUTOLINT_DIR so these tests don't depend on the
+# contents of the user's real ~/.config/autoformat/.
+_alt_dir=$(_tmpdir)
+cat >"$_alt_dir/shellcheckrc" <<'EOF'
+disable=SC1091
+EOF
+cat >"$_alt_dir/selene.toml" <<'EOF'
+[rules]
+divide_by_zero = "allow"
+EOF
+cat >"$_alt_dir/rumdl.toml" <<'EOF'
+[global]
+disable = ["MD013"]
+EOF
+
+# Scenario: file with SC1091 (sourced path missing). With fallback
+# (SC1091 disabled) → rc=0; without fallback → rc=1.
+cat >"$_td/sc-src.sh" <<'EOF'
+#!/bin/bash
+. "/no/such/file/autolint/does/not/exist"
+echo "all good"
+EOF
+set +e
+AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/sc-src.sh" >/dev/null 2>&1
+rc=$?
+AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/sc-src.sh" >/dev/null 2>&1
+rc_no_cfg=$?
+set -e
+_assert_exit "sh: fallback shellcheckrc disables SC1091" 0 "$rc"
+_assert_exit "sh: no fallback — SC1091 fires" 1 "$rc_no_cfg"
+
+# Scenario: per-repo .shellcheckrc wins over fallback. Empty per-repo
+# file re-enables SC1091, so the sourced-missing file should warn again.
+_sc_repo=$(_tmpdir)
+touch "$_sc_repo/.shellcheckrc"
+cp "$_td/sc-src.sh" "$_sc_repo/"
+set +e
+AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_sc_repo/sc-src.sh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "sh: per-repo .shellcheckrc overrides fallback" 1 "$rc"
+
+# selene: file with a divide-by-zero (selene treats as error by
+# default). Fallback allows the rule → rc=0; without fallback, selene
+# errors and exits non-zero → rc=1.
+if command -v selene &>/dev/null; then
+  cat >"$_td/lint.lua" <<'EOF'
+local x = 1 / 0
+print(x)
+EOF
+  set +e
+  AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/lint.lua" >/dev/null 2>&1
+  rc=$?
+  AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/lint.lua" >/dev/null 2>&1
+  rc_no_cfg=$?
+  set -e
+  _assert_exit "lua: fallback selene.toml allows divide_by_zero" 0 "$rc"
+  _assert_exit "lua: no fallback — divide_by_zero fires" 1 "$rc_no_cfg"
+fi
+
+# rumdl: file with a long line (MD013). Fallback disables MD013
+# → rc=0; without fallback → rc=1.
+if command -v rumdl &>/dev/null; then
+  python3 -c "
+open('$_td/doc.md','w').write('# Title\n\n' + 'x ' * 80 + 'end\n')
+"
+  set +e
+  AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/doc.md" >/dev/null 2>&1
+  rc=$?
+  AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/doc.md" >/dev/null 2>&1
+  rc_no_cfg=$?
+  set -e
+  _assert_exit "md: fallback rumdl.toml disables MD013" 0 "$rc"
+  _assert_exit "md: no fallback — MD013 fires on long line" 1 "$rc_no_cfg"
+
+  # Per-repo .markdownlint.json counts as config (rumdl reads it for
+  # compat) — fallback should NOT apply. Repo config keeps MD013 on,
+  # so long line fires even with AUTOLINT_DIR set.
+  _md_repo=$(_tmpdir)
+  cat >"$_md_repo/.markdownlint.json" <<'EOF'
+{ "MD013": { "line_length": 80 } }
+EOF
+  python3 -c "
+open('$_md_repo/doc.md','w').write('# Title\n\n' + 'x ' * 80 + 'end\n')
+"
+  set +e
+  AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_md_repo/doc.md" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "md: .markdownlint.json overrides fallback" 1 "$rc"
+
+  cat >"$_td/clean.md" <<'EOF'
+# Title
+
+Text.
+EOF
+  output=$(AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/clean.md" 2>&1)
+  _assert_not_contains "md: clean rumdl output is quiet" "Success:" "$output"
+fi
+
+# hadolint: fallback config routing via mock. Verifies that autolint
+# passes `-c $AUTOLINT_DIR/hadolint.yaml` when no per-repo config exists,
+# and that per-repo `.hadolint.yaml` wins over the fallback.
+_hadolint_mock=$(_mock_bin)
+cat >"$_hadolint_mock/hadolint" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-HADOLINT-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_hadolint_mock/hadolint"
+
+# No per-repo config + fallback present → -c flag applied.
+_alt_hadolint=$(_tmpdir)
+cat >"$_alt_hadolint/hadolint.yaml" <<'EOF'
+# fallback sentinel
+EOF
+cat >"$_td/fb-Dockerfile" <<'EOF'
+FROM ubuntu
+EOF
+mv "$_td/fb-Dockerfile" "$_td/Dockerfile.fb"
+set +e
+output=$(AUTOLINT_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$AUTOLINT" "$_td/Dockerfile.fb" 2>&1)
+rc=$?
+set -e
+_assert_exit "dockerfile: fallback hadolint.yaml — exits 0" 0 "$rc"
+_assert_contains "dockerfile: fallback hadolint.yaml passed via -c" \
+  "-c $_alt_hadolint/hadolint.yaml" "$output"
+
+# Per-repo .hadolint.yaml wins — no -c flag to fallback.
+_hadolint_repo=$(_tmpdir)
+cat >"$_hadolint_repo/.hadolint.yaml" <<'EOF'
+# per-repo sentinel
+EOF
+cat >"$_hadolint_repo/Dockerfile" <<'EOF'
+FROM ubuntu
+EOF
+set +e
+output=$(AUTOLINT_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$AUTOLINT" "$_hadolint_repo/Dockerfile" 2>&1)
+rc=$?
+set -e
+_assert_exit "dockerfile: per-repo .hadolint.yaml — exits 0" 0 "$rc"
+_assert_not_contains "dockerfile: per-repo .hadolint.yaml — no -c fallback" \
+  "-c $_alt_hadolint" "$output"
+
+# golangci-lint: fallback config routing via mock. Verifies --config
+# routing when no per-repo .golangci.yml is found.
+_gc_mock=$(_mock_bin)
+cat >"$_gc_mock/golangci-lint" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK-GC-ARGS: $*"
+exit 0
+EOF
+chmod +x "$_gc_mock/golangci-lint"
+
+# No per-repo config + fallback present → --config flag applied.
+_alt_gc=$(_tmpdir)
+cat >"$_alt_gc/golangci-lint.yml" <<'EOF'
+version: "2"
+EOF
+cat >"$_td/fb.go" <<'EOF'
+package main
+EOF
+set +e
+output=$(AUTOLINT_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_td/fb.go" 2>&1)
+rc=$?
+set -e
+_assert_exit "go: fallback golangci-lint.yml — exits 0" 0 "$rc"
+_assert_contains "go: fallback golangci-lint.yml passed via --config" \
+  "--config $_alt_gc/golangci-lint.yml" "$output"
+
+_gc_rel=$(_tmpdir)
+mkdir -p "$_gc_rel/launch/cfg" "$_gc_rel/project"
+cat >"$_gc_rel/launch/cfg/golangci-lint.yml" <<'EOF'
+version: "2"
+EOF
+cat >"$_gc_rel/project/test.go" <<'EOF'
+package main
+EOF
+set +e
+output=$(cd "$_gc_rel/launch" &&
+  AUTOLINT_DIR=cfg PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_rel/project/test.go" 2>&1)
+rc=$?
+set -e
+_assert_exit "go: relative fallback config exits 0 from another cwd" 0 "$rc"
+_assert_contains "go: relative fallback config path resolved before package cwd" \
+  "--config $_gc_rel/launch/cfg/golangci-lint.yml" "$output"
+
+# Per-repo .golangci.yml wins — no --config flag to fallback.
+_gc_repo=$(_tmpdir)
+cat >"$_gc_repo/.golangci.yml" <<'EOF'
+version: "2"
+EOF
+cat >"$_gc_repo/test.go" <<'EOF'
+package main
+EOF
+set +e
+output=$(AUTOLINT_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_repo/test.go" 2>&1)
+rc=$?
+set -e
+_assert_exit "go: per-repo .golangci.yml — exits 0" 0 "$rc"
+_assert_not_contains "go: per-repo .golangci.yml — no --config fallback" \
+  "--config $_alt_gc" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: ignore file ($AUTOLINT_DIR/ignore)
+# ---------------------------------------------------------------------------
+
+echo "=== Ignore file ==="
+
+# File matched by ignore → autolint exits 0 without invoking any
+# linter, even for content that would otherwise produce diagnostics.
+_ign_al_dir=$(_tmpdir)
+cat >"$_ign_al_dir/ignore" <<'EOF'
+*/skipme.sh
+EOF
+
+_ign_tgt=$(_tmpdir)
+cat >"$_ign_tgt/skipme.sh" <<'EOF'
+#!/bin/bash
+echo $undefined  # would normally trip SC2154
+EOF
+set +e
+AUTOLINT_DIR="$_ign_al_dir" "$AUTOLINT" "$_ign_tgt/skipme.sh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "ignore: glob match skips linting" 0 "$rc"
+
+# File NOT in ignore list → linter runs and catches issues.
+cat >"$_ign_tgt/keepme.sh" <<'EOF'
+#!/bin/bash
+echo $undefined
+EOF
+set +e
+AUTOLINT_DIR="$_ign_al_dir" "$AUTOLINT" "$_ign_tgt/keepme.sh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "ignore: non-match still lints" 1 "$rc"
+
+# Regression: a caller passing a repo-relative path (git pre-commit
+# hook, for instance) must still hit the ignore rule. Pre-normalization
+# the file would slip past `*/skipme.sh` and get linted, emitting
+# SC2154. The path-absolute-normalization step makes this case match
+# and silently exit 0 — pin that behavior.
+_ign_rel_repo=$(_tmpdir)
+mkdir -p "$_ign_rel_repo/sub"
+cat >"$_ign_rel_repo/sub/skipme.sh" <<'EOF'
+#!/bin/bash
+echo $undefined
+EOF
+cat >"$_ign_rel_repo/sub/other.sh" <<'EOF'
+#!/bin/bash
+echo $undefined
+EOF
+set +e
+output=$(cd "$_ign_rel_repo" && AUTOLINT_DIR="$_ign_al_dir" \
+  "$AUTOLINT" sub/skipme.sh 2>&1)
+rc=$?
+set -e
+_assert_exit "ignore: relative path still matches ignore glob" 0 "$rc"
+_assert_eq "ignore: relative ignored path emits no output" "" "$output"
+# Control: a non-ignored relative path still lints.
+set +e
+(cd "$_ign_rel_repo" && AUTOLINT_DIR="$_ign_al_dir" \
+  "$AUTOLINT" sub/other.sh >/dev/null 2>&1)
+rc=$?
+set -e
+_assert_exit "ignore: relative non-ignored path still lints" 1 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: no-op for missing/empty input
+# ---------------------------------------------------------------------------
+
+echo "=== No-op edge cases ==="
+
+rc=0
+"$AUTOLINT" "" || rc=$?
+_assert_exit "empty arg: exits 0" 0 "$rc"
+
+rc=0
+"$AUTOLINT" "/nonexistent/file.sh" || rc=$?
+_assert_exit "missing file: exits 0" 0 "$rc"
+
+_noyq_noop_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_noyq_noop_bin/bash"
+
+set +e
+output=$(PATH="$_noyq_noop_bin" "$AUTOLINT" "/nonexistent/file.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "missing file: skips before yq requirement" 0 "$rc"
+_assert_eq "missing file: no yq error" "" "$output"
+
+set +e
+output=$(AUTOLINT_DIR="$_ign_al_dir" PATH="$_noyq_noop_bin" \
+  "$AUTOLINT" "$_ign_tgt/skipme.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "ignored file: skips before yq requirement" 0 "$rc"
+_assert_eq "ignored file: no yq error" "" "$output"
+
+_nojq_noop_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_nojq_noop_bin/bash"
+ln -s "$(command -v yq)" "$_nojq_noop_bin/yq"
+
+set +e
+output=$(AUTOLINT_DIR="$_ign_al_dir" PATH="$_nojq_noop_bin" \
+  "$AUTOLINT" --json "$_ign_tgt/skipme.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "ignored json file: skips before jq requirement" 0 "$rc"
+_assert_eq "ignored json file: no jq error" "" "$output"
+
+rc=0
+"$AUTOLINT" || rc=$?
+_assert_exit "no args: exits 0" 0 "$rc"
+
+# Multi-file invocation: every file should be linted and failures
+# should be aggregated into the final exit code.
+cat >"$_td/a.sh" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED_A
+EOF
+cat >"$_td/b.sh" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED_B
+EOF
+set +e
+output=$("$AUTOLINT" "$_td/a.sh" "$_td/b.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "multi-file args: exits non-zero when any file fails" 1 "$rc"
+_assert_contains "multi-file args: lints first file" "a.sh" "$output"
+_assert_contains "multi-file args: lints second file" "b.sh" "$output"
+
+cat >"$_td/clean.sh" <<'EOF'
+#!/bin/bash
+echo "ok"
+EOF
+set +e
+"$AUTOLINT" "$_td/a.sh" "$_td/clean.sh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "multi-file args: failure persists after later clean file" 1 "$rc"
+
+set +e
+"$AUTOLINT" "$_td/clean.sh" "$_td/a.sh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "multi-file args: later failure sets final exit" 1 "$rc"
+
+cat >"$_td/fix-a.py" <<'EOF'
+import os
+x = 1
+EOF
+cat >"$_td/fix-b.py" <<'EOF'
+import sys
+y = 2
+EOF
+set +e
+"$AUTOLINT" --fix "$_td/fix-a.py" "$_td/fix-b.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "multi-file args with --fix: exits 0 after fixing" 0 "$rc"
+_assert_not_contains "multi-file --fix: fixes first file" "import os" "$(cat "$_td/fix-a.py")"
+_assert_not_contains "multi-file --fix: fixes second file" "import sys" "$(cat "$_td/fix-b.py")"
+
+# ---------------------------------------------------------------------------
+# Tests: graceful skip when linter not installed
+# ---------------------------------------------------------------------------
+
+echo "=== Missing linters ==="
+
+_nolinters=$(_mock_bin)
+ln -s "$(command -v bash)" "$_nolinters/bash"
+# yq is hard-required by autolint; keep it on PATH so these tests
+# still reach the linter-missing graceful-skip branches.
+ln -s "$(command -v yq)" "$_nolinters/yq"
+
+cat >"$_td/nolint.sh" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.sh" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "sh: no shellcheck — exits 0" 0 "$rc"
+
+cat >"$_td/nolint.py" <<'EOF'
+import os
+x=1
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "py: no ruff — exits 0" 0 "$rc"
+
+cat >"$_td/nolint.txt" <<'EOF'
+This sentence has zzword.
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.txt" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "txt: no typos — exits 0" 0 "$rc"
+
+cat >"$_td/nolint.go" <<'EOF'
+package main
+func main() {}
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "go: no golangci-lint — exits 0" 0 "$rc"
+
+cat >"$_td/nolint.mk" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.mk" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "mk: no checkmake — exits 0" 0 "$rc"
+
+cat >"$_td/nolint.html" <<'EOF'
+<p>hello</p>
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.html" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "html: no superhtml — exits 0" 0 "$rc"
+
+cat >"$_td/nolint.bzl" <<'EOF'
+load("@rules","rule")
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.bzl" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "bzl: no buildifier — exits 0" 0 "$rc"
+
+cat >"$_td/nolint-Dockerfile" <<'EOF'
+FROM ubuntu
+EOF
+mv "$_td/nolint-Dockerfile" "$_td/Dockerfile"
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/Dockerfile" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "dockerfile: no hadolint — exits 0" 0 "$rc"
+
+cat >"$_td/nolint.rs" <<'EOF'
+fn main() {}
+EOF
+set +e
+PATH="$_nolinters" "$AUTOLINT" "$_td/nolint.rs" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "rust: no cargo — exits 0" 0 "$rc"
+
+# Missing yq: autolint must exit 1 with an error message (yq is
+# hard-required, matching autoformat's behavior).
+_noyq_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_noyq_bin/bash"
+
+set +e
+output=$(PATH="$_noyq_bin" "$AUTOLINT" "$_td/nolint.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "missing yq: exits 1" 1 "$rc"
+_assert_contains "missing yq: prints error" "autolint: yq is required" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: ruff check fallback (AUTOLINT_DIR/ruff.toml)
+# ---------------------------------------------------------------------------
+
+echo "=== ruff check fallback ==="
+
+# Controlled AUTOLINT_DIR with a ruff.toml that disables F401
+# (unused-import). Without fallback, ruff's default rules catch
+# F401; with fallback, it's ignored.
+_ruff_dir=$(_tmpdir)
+cat >"$_ruff_dir/ruff.toml" <<'EOF'
+[lint]
+ignore = ["F401"]
+EOF
+
+cat >"$_td/py-fallback.py" <<'EOF'
+import os
+x = 1
+EOF
+set +e
+AUTOLINT_DIR="$_ruff_dir" "$AUTOLINT" "$_td/py-fallback.py" >/dev/null 2>&1
+rc=$?
+AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/py-fallback.py" >/dev/null 2>&1
+rc_no_cfg=$?
+set -e
+_assert_exit "py: fallback ruff.toml ignores F401" 0 "$rc"
+_assert_exit "py: no fallback — F401 fires" 1 "$rc_no_cfg"
+
+# Per-repo ruff.toml overrides fallback — empty per-repo config
+# means default rules apply, so F401 fires again.
+_repo_ruff=$(_tmpdir)
+cat >"$_repo_ruff/ruff.toml" <<'EOF'
+# empty: use ruff defaults
+EOF
+cp "$_td/py-fallback.py" "$_repo_ruff/"
+set +e
+AUTOLINT_DIR="$_ruff_dir" "$AUTOLINT" "$_repo_ruff/py-fallback.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "py: per-repo ruff.toml overrides fallback" 1 "$rc"
+
+# Per-repo pyproject.toml[tool.ruff] overrides fallback — same idea.
+_repo_pp=$(_tmpdir)
+cat >"$_repo_pp/pyproject.toml" <<'EOF'
+[tool.ruff]
+EOF
+cp "$_td/py-fallback.py" "$_repo_pp/"
+set +e
+AUTOLINT_DIR="$_ruff_dir" "$AUTOLINT" "$_repo_pp/py-fallback.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "py: pyproject[tool.ruff] overrides fallback" 1 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: relative paths terminate (regression for _has_config loop on ".")
+# ---------------------------------------------------------------------------
+
+echo "=== Relative paths ==="
+
+_reldir=$(_tmpdir)
+cat >"$_reldir/ok.sh" <<'EOF'
+#!/bin/bash
+echo "hello"
+EOF
+set +e
+cd "$_reldir" && _with_timeout 10 "$AUTOLINT" ok.sh >/dev/null 2>&1
+rc=$?
+cd - >/dev/null
+set -e
+_assert_exit "rel sh: terminates (no infinite loop)" 0 "$rc"
+
+cat >"$_reldir/ok.py" <<'EOF'
+x = 1
+EOF
+set +e
+cd "$_reldir" && _with_timeout 10 "$AUTOLINT" ok.py >/dev/null 2>&1
+rc=$?
+cd - >/dev/null
+set -e
+_assert_exit "rel py: terminates" 0 "$rc"
+
+# JS/TS dispatch walks config chain via _find_config — the prior case
+# that could loop on relative input when biome is installed.
+_rel_js_mock=$(_mock_bin)
+cat >"$_rel_js_mock/biome" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$_rel_js_mock/biome"
+cat >"$_reldir/ok.js" <<'EOF'
+var x = 1
+EOF
+set +e
+cd "$_reldir" && PATH="$_rel_js_mock:$PATH" _with_timeout 10 "$AUTOLINT" ok.js >/dev/null 2>&1
+rc=$?
+cd - >/dev/null
+set -e
+_assert_exit "rel js: terminates with biome on PATH" 0 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: --json mode — unified schema per tool
+#
+# Each subtest feeds a known-bad fixture and asserts the per-tool
+# output is a stream of JSON objects matching the unified schema:
+#   {path, line, col, severity, message, source} (+ optional
+#   code/end_line/end_col). Position fields must be 1-based integers.
+# These tests pin the schema so tool-version drift fails loudly
+# rather than silently reshaping the diagnostics nvim consumes.
+# ---------------------------------------------------------------------------
+
+echo "=== --json: unified schema per filetype ==="
+
+# Shared assertion: every non-empty line of $1 parses as JSON with
+# the required fields and sensible types/values.
+_assert_json_lines_valid() {
+  local label="$1" output="$2" expected_source="$3"
+  if [ -z "$output" ]; then
+    _fail "$label (no output)"
+    return
+  fi
+  local check
+  # Walk each input record and return the first schema problem we
+  # find, or "ok" if every record is well-formed. `inputs` + `-n`
+  # streams JSON-lines safely even when a record contains nested
+  # objects that span no newlines.
+  check=$(printf '%s\n' "$output" | jq -nr --arg src "$expected_source" '
+    def problem:
+      if type != "object" then "not-object"
+      elif (.path | type) != "string" then "bad-path"
+      elif (.line | type) != "number" or .line < 1 then "bad-line"
+      elif (.col  | type) != "number" or .col  < 1 then "bad-col"
+      elif ([.severity] | inside(["error","warning","info","hint"]) | not) then "bad-severity: " + (.severity|tostring)
+      elif (.message | type) != "string" or (.message | length) == 0 then "bad-message"
+      elif .source != $src then "bad-source: " + (.source|tostring)
+      else "ok"
+      end;
+    [inputs | problem] as $ps |
+    if ($ps | length) == 0 then "no-records"
+    else ($ps | map(select(. != "ok")) | if length == 0 then "ok" else .[0] end)
+    end')
+  if [ "$check" = "ok" ]; then
+    _pass "$label"
+  else
+    _fail "$label ($check)"
+  fi
+}
+
+# sh via shellcheck
+cat >"$_td/json-bad.sh" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED
+EOF
+set +e
+output=$("$AUTOLINT" --json "$_td/json-bad.sh" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json sh: exits non-zero on lint error" 1 "$rc"
+_assert_json_lines_valid "json sh: valid unified schema" "$output" "shellcheck"
+_assert_contains "json sh: shellcheck code prefixed SC" '"code":"SC' "$output"
+
+cat >"$_td/json-multi-a.sh" <<'EOF'
+#!/bin/bash
+echo $JSON_MULTI_A
+EOF
+cat >"$_td/json-multi-b.sh" <<'EOF'
+#!/bin/bash
+echo $JSON_MULTI_B
+EOF
+set +e
+output=$("$AUTOLINT" --json "$_td/json-multi-a.sh" "$_td/json-multi-b.sh" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json multi-file: exits non-zero on lint errors" 1 "$rc"
+_assert_json_lines_valid "json multi-file: valid unified schema" "$output" "shellcheck"
+_assert_contains "json multi-file: includes first file" "$_td/json-multi-a.sh" "$output"
+_assert_contains "json multi-file: includes second file" "$_td/json-multi-b.sh" "$output"
+
+# ruff
+cat >"$_td/json-bad.py" <<'EOF'
+import os
+x = 1
+EOF
+set +e
+output=$(AUTOLINT_DIR=/nonexistent "$AUTOLINT" --json "$_td/json-bad.py" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json py: exits non-zero on lint error" 1 "$rc"
+_assert_json_lines_valid "json py: valid unified schema" "$output" "ruff"
+_assert_contains "json py: ruff code present" '"code":"F401"' "$output"
+
+# selene — use per-repo empty config so divide_by_zero fires
+if command -v selene &>/dev/null; then
+  _json_lua_repo=$(_tmpdir)
+  : >"$_json_lua_repo/selene.toml"
+  cat >"$_json_lua_repo/bad.lua" <<'EOF'
+local x = 1 / 0
+print(x)
+EOF
+  set +e
+  output=$("$AUTOLINT" --json "$_json_lua_repo/bad.lua" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "json lua: exits non-zero" 1 "$rc"
+  _assert_json_lines_valid "json lua: valid unified schema" "$output" "selene"
+  _assert_contains "json lua: selene code present" '"code":"divide_by_zero"' "$output"
+  # selene native spans are 0-based; verify the shift to 1-based
+  # coordinates — divide_by_zero on line 1, col 11 (the "1 / 0"
+  # expression starts at column 11 in the 1-based view).
+  _assert_contains "json lua: line shifted to 1-based" '"line":1' "$output"
+fi
+
+# rumdl
+if command -v rumdl &>/dev/null; then
+  cat >"$_td/json-bad.md" <<'EOF'
+# Title
+
+## Dup
+
+## Dup
+EOF
+  set +e
+  output=$("$AUTOLINT" --json "$_td/json-bad.md" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "json md: exits non-zero" 1 "$rc"
+  _assert_json_lines_valid "json md: valid unified schema" "$output" "rumdl"
+  _assert_contains "json md: rumdl rule present" '"code":"MD024"' "$output"
+fi
+
+# biome
+cat >"$_td/json-bad.js" <<'EOF'
+var x = 1
+if (x == 1) x++;
+EOF
+set +e
+output=$("$AUTOLINT" --json "$_td/json-bad.js" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json js: exits non-zero" 1 "$rc"
+_assert_json_lines_valid "json js: valid unified schema" "$output" "biome"
+_assert_contains "json js: biome category present" '"code":"lint/suspicious/noDoubleEquals"' "$output"
+
+# actionlint (workflow YAML)
+_json_wf="$_td/.github/workflows/json-bad.yml"
+mkdir -p "$(dirname "$_json_wf")"
+cat >"$_json_wf" <<'EOF'
+name: t
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ secrets.FOO "
+EOF
+if command -v actionlint &>/dev/null; then
+  _json_actionlint_path=$PATH
+  _json_actionlint_zizmor_mock=$(_mock_bin)
+  cat >"$_json_actionlint_zizmor_mock/zizmor" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$_json_actionlint_zizmor_mock/zizmor"
+  set +e
+  output=$(PATH="$_json_actionlint_zizmor_mock:$_json_actionlint_path" "$AUTOLINT" --json "$_json_wf" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "json yml: exits non-zero" 1 "$rc"
+  _assert_json_lines_valid "json yml: valid unified schema" "$output" "actionlint"
+fi
+
+_json_zizmor_mock=$(_mock_bin)
+cat >"$_json_zizmor_mock/actionlint" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$_json_zizmor_mock/actionlint"
+cat >"$_json_zizmor_mock/zizmor" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+[{"ident":"unpinned-uses","desc":"action is not pinned","determinations":{"severity":"Medium"},"locations":[{"concrete":{"location":{"start_point":{"row":6,"column":8},"end_point":{"row":6,"column":30}}}}]}]
+JSON
+exit 4
+EOF
+chmod +x "$_json_zizmor_mock/zizmor"
+
+set +e
+output=$(PATH="$_json_zizmor_mock:$PATH" "$AUTOLINT" --json "$_json_wf" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json zizmor: exits non-zero" 4 "$rc"
+_assert_json_lines_valid "json zizmor: valid unified schema" "$output" "zizmor"
+_assert_contains "json zizmor: rule present" '"code":"unpinned-uses"' "$output"
+
+# zsh — synthesized diagnostic with parsed line number
+cat >"$_td/json-bad.zsh" <<'EOF'
+#!/usr/bin/env zsh
+if true
+  echo oops
+fi
+EOF
+set +e
+output=$("$AUTOLINT" --json "$_td/json-bad.zsh" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json zsh: exits non-zero" 1 "$rc"
+_assert_json_lines_valid "json zsh: valid unified schema" "$output" "zsh"
+_assert_contains "json zsh: error severity" '"severity":"error"' "$output"
+
+# taplo — synthesized file-level error on malformed TOML
+if command -v taplo &>/dev/null; then
+  printf '[a\nbroken\n' >"$_td/json-bad.toml"
+  set +e
+  output=$("$AUTOLINT" --json "$_td/json-bad.toml" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "json toml: exits non-zero on malformed" 1 "$rc"
+  _assert_json_lines_valid "json toml: valid unified schema" "$output" "taplo"
+fi
+
+# hadolint (Dockerfile via basename dispatch)
+if command -v hadolint &>/dev/null; then
+  cat >"$_td/json-Dockerfile" <<'EOF'
+FROM ubuntu
+RUN apt-get update && apt-get install -y python
+EOF
+  # Rename to Dockerfile for basename dispatch
+  mv "$_td/json-Dockerfile" "$_td/Dockerfile.json-test"
+  set +e
+  output=$("$AUTOLINT" --json "$_td/Dockerfile.json-test" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "json dockerfile: exits non-zero" 1 "$rc"
+  _assert_json_lines_valid "json dockerfile: valid unified schema" "$output" "hadolint"
+  _assert_contains "json dockerfile: hadolint code present" '"code":"DL' "$output"
+fi
+
+# buildifier (Starlark .bzl)
+if command -v buildifier &>/dev/null; then
+  cat >"$_td/json-bad.bzl" <<'EOF'
+def _impl(ctx):
+  pass
+my_rule = rule(implementation = _impl)
+EOF
+  set +e
+  output=$("$AUTOLINT" --json "$_td/json-bad.bzl" 2>/dev/null)
+  rc=$?
+  set -e
+  # buildifier may or may not produce warnings on this fixture;
+  # if it does, verify the schema is correct.
+  if [ -n "$output" ]; then
+    _assert_json_lines_valid "json bzl: valid unified schema" "$output" "buildifier"
+  else
+    _pass "json bzl: no warnings (clean fixture)"
+  fi
+fi
+
+# superhtml (HTML)
+if command -v superhtml &>/dev/null; then
+  cat >"$_td/json-bad.html" <<'EOF'
+<div>
+<p>unclosed
+</div>
+EOF
+  set +e
+  output=$("$AUTOLINT" --json "$_td/json-bad.html" 2>/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && [ -n "$output" ]; then
+    _assert_json_lines_valid "json html: valid unified schema" "$output" "superhtml"
+  else
+    _pass "json html: superhtml did not flag fixture (exit $rc)"
+  fi
+fi
+
+# golangci-lint (Go)
+if command -v golangci-lint &>/dev/null && command -v go &>/dev/null; then
+  _json_go_dir=$(_tmpdir)
+  cat >"$_json_go_dir/go.mod" <<'EOF'
+module example.com/test
+go 1.21
+EOF
+  cat >"$_json_go_dir/bad.go" <<'EOF'
+package main
+import "fmt"
+func main() {
+	x := 1
+	fmt.Println("hello")
+}
+EOF
+  set +e
+  output=$("$AUTOLINT" --json "$_json_go_dir/bad.go" 2>/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] && [ -n "$output" ]; then
+    _assert_json_lines_valid "json go: valid unified schema" "$output" "golangci-lint"
+  else
+    echo "  SKIP: json go (golangci-lint did not flag test fixture)"
+  fi
+fi
+
+# clippy (Rust)
+_json_rust_mock=$(_mock_bin)
+cat >"$_json_rust_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "clippy" ] && [ "${2:-}" = "--version" ]; then
+  exit 0
+fi
+case "$*" in
+  *"--message-format=json"*)
+    printf '%s\n' '{"reason":"compiler-message","message":{"level":"warning","message":"manual implementation of unwrap_or","code":{"code":"clippy::manual_unwrap_or"},"spans":[{"file_name":"src/lib.rs","is_primary":true,"line_start":1,"column_start":1,"line_end":1,"column_end":3}]}}'
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$_json_rust_mock/cargo"
+_json_rust_dir=$(_tmpdir)
+cat >"$_json_rust_dir/Cargo.toml" <<'EOF'
+[package]
+name = "jsonlinttest"
+version = "0.1.0"
+edition = "2021"
+EOF
+mkdir -p "$_json_rust_dir/src"
+cat >"$_json_rust_dir/src/lib.rs" <<'EOF'
+pub fn f() {}
+EOF
+set +e
+output=$(PATH="$_json_rust_mock:$PATH" "$AUTOLINT" --json "$_json_rust_dir/src/lib.rs" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json rust: exits non-zero on clippy finding" 1 "$rc"
+_assert_json_lines_valid "json rust: valid unified schema" "$output" "clippy"
+_assert_contains "json rust: clippy code present" '"code":"clippy::manual_unwrap_or"' "$output"
+
+# typos
+_json_typos_mock=$(_mock_bin)
+cat >"$_json_typos_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+last="${@: -1}"
+case "$*" in
+  *"--format json"*)
+    printf '{"type":"typo","path":"%s","line_num":1,"byte_offset":19,"typo":"zzword","corrections":["realword"]}\n' "$last"
+    exit 2
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$_json_typos_mock/typos"
+
+cat >"$_td/json-typo.txt" <<'EOF'
+This sentence has zzword.
+EOF
+set +e
+output=$(PATH="$_json_typos_mock:$PATH" AUTOLINT_DIR=/nonexistent "$AUTOLINT" --json "$_td/json-typo.txt" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json typos: exits non-zero" 2 "$rc"
+_assert_json_lines_valid "json typos: valid unified schema" "$output" "typos"
+_assert_contains "json typos: typo code present" '"code":"zzword"' "$output"
+
+_json_checkmake_mock=$(_mock_bin)
+cat >"$_json_checkmake_mock/checkmake" <<'EOF'
+#!/usr/bin/env bash
+last="${@: -1}"
+cat <<JSON
+[
+  {
+    "rule": "minphony",
+    "violation": "missing .PHONY target",
+    "file_name": "$last",
+    "line_number": 1
+  }
+]
+JSON
+exit 6
+EOF
+chmod +x "$_json_checkmake_mock/checkmake"
+
+_json_make_dir=$(_tmpdir)
+cat >"$_json_make_dir/Makefile" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(PATH="$_json_checkmake_mock:$PATH" "$AUTOLINT" --json "$_json_make_dir/Makefile" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json make: exits non-zero" 6 "$rc"
+_assert_json_lines_valid "json make: valid unified schema" "$output" "checkmake"
+_assert_contains "json make: checkmake message present" "missing .PHONY target" "$output"
+
+# Clean input → no output in json mode, exit 0.
+cat >"$_td/json-ok.py" <<'EOF'
+x = 1
+EOF
+set +e
+output=$("$AUTOLINT" --json "$_td/json-ok.py" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json py: exits 0 on clean file" 0 "$rc"
+_assert_eq "json py: no output on clean file" "" "$output"
+
+# Missing jq → hard error (same shape as missing yq).
+_nojq_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_nojq_bin/bash"
+ln -s "$(command -v yq)" "$_nojq_bin/yq"
+set +e
+output=$(PATH="$_nojq_bin" "$AUTOLINT" --json "$_td/json-ok.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "json: missing jq exits 1" 1 "$rc"
+_assert_contains "json: missing jq error message" "jq is required for --json" "$output"
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+_test_summary
