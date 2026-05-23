@@ -1,5 +1,10 @@
 # checkrun
 
+![Tests](https://github.com/cgraf78/checkrun/actions/workflows/test.yml/badge.svg?branch=main)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Bash Version](https://img.shields.io/badge/bash-%3E%3D3.2-blue.svg)](https://www.gnu.org/software/bash/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-lightgrey.svg)](#)
+
 `checkrun` owns formatter, linter, and file-check dispatch used by the
 `checkrun`, `autoformat`, and `autolint` CLIs. Other tools can depend on those
 CLIs as their formatting and linting policy surface.
