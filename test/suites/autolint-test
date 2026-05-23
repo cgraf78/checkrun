@@ -9,15 +9,17 @@
 set -o pipefail
 export NO_COLOR=1
 
-# Formatter/linter dev tooling is expected to come from the global
-# mise toolset, so seed the shim dir explicitly for direct test runs.
+# Formatter/linter dev tooling is expected to come from a mise toolset, so seed
+# the shim dir explicitly for direct test runs. CI sets MISE_GLOBAL_CONFIG_FILE
+# to the repo-local manifest; local runs usually inherit the user's superset.
 # On macOS, brew binaries are signed and must take priority over
 # unsigned mise downloads that macOS Gatekeeper kills.
 [ -d "$HOME/.local/share/mise/shims" ] &&
   PATH="$HOME/.local/share/mise/shims:$PATH"
 [ -d "/opt/homebrew/bin" ] &&
   PATH="/opt/homebrew/bin:$PATH"
-export MISE_GLOBAL_CONFIG_FILE="$HOME/.config/mise/config.toml"
+: "${MISE_GLOBAL_CONFIG_FILE:=$HOME/.config/mise/config.toml}"
+export MISE_GLOBAL_CONFIG_FILE
 
 CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"

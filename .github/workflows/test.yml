@@ -124,7 +124,9 @@ jobs:
             export MISE_GITHUB_TOKEN="$GITHUB_TOKEN"
           fi
 
-          mise trust "$HOME/.config/mise/config.toml" >/dev/null || true
+          export MISE_GLOBAL_CONFIG_FILE="$PWD/.github/mise/checkrun-ci.toml"
+          echo "MISE_GLOBAL_CONFIG_FILE=$MISE_GLOBAL_CONFIG_FILE" >> "$GITHUB_ENV"
+          mise trust "$MISE_GLOBAL_CONFIG_FILE" >/dev/null || true
           mise install
 
           python3 -m venv "$HOME/.venv"

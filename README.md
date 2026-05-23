@@ -39,6 +39,11 @@ Formatter and linter backends such as `ruff`, `shfmt`, `shellcheck`, `stylua`,
 `biome`, and `rumdl` are optional. Missing backends are graceful no-ops for
 their file types so hosts can install only the language tools they use.
 
+CI installs a representative backend set from
+`.github/mise/checkrun-ci.toml` before running the full test suite. That file
+is test infrastructure for this repo; installed consumers should provide their
+own toolchain through the host environment or integration layer.
+
 ## Public API
 
 - `bin/checkrun`, `bin/autoformat`, and `bin/autolint` are the PATH-visible

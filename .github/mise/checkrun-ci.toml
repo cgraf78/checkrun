@@ -1,4 +1,4 @@
-# Dev tools used by the checkrun test suite.
+# CI dev tools used by the checkrun test suite.
 #
 # The tests exercise real formatter and linter dispatch for the core languages
 # checkrun owns. Keep this list to portable release binaries; OS package
