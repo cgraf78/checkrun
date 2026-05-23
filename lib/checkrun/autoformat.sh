@@ -79,12 +79,12 @@ _format_sh() {
   # TOML into CLI flags when the repo has no .editorconfig, otherwise
   # the explicit flags would override the repo's local style.
   if ! _has_config "$dir" ".editorconfig" &&
-    [ -f "$AUTOFORMAT_DIR/shfmt.toml" ]; then
+    [ -f "$CHECKRUN_AUTOFORMAT_DIR/shfmt.toml" ]; then
     {
       read -r v_indent
       read -r v_sci
     } < <(
-      _toml_read_keys "$AUTOFORMAT_DIR/shfmt.toml" indent switch_case_indent
+      _toml_read_keys "$CHECKRUN_AUTOFORMAT_DIR/shfmt.toml" indent switch_case_indent
     )
     [ -n "$v_indent" ] && args+=(-i "$v_indent")
     [ "$v_sci" = "true" ] && args+=(-ci)
@@ -97,7 +97,7 @@ _format_cmake() {
   local file="$1" dir="$2" cfg args=()
   command -v cmake-format &>/dev/null || return 0
 
-  cfg=$(_find_cmake_config "$dir" "$AUTOFORMAT_DIR" 2>/dev/null || true)
+  cfg=$(_find_cmake_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config-files "$cfg")
   _run_fmt cmake-format -i "${args[@]}" "$file"
 }
@@ -106,7 +106,7 @@ _format_ruby() {
   local file="$1" dir="$2" cfg args=()
   command -v rubocop &>/dev/null || return 0
 
-  cfg=$(_find_rubocop_config "$dir" "$AUTOFORMAT_DIR" 2>/dev/null || true)
+  cfg=$(_find_rubocop_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config "$cfg")
   # Limit autoformat to RuboCop's Layout department. Full RuboCop
   # autocorrect can rewrite code semantics; layout-only keeps save-time
@@ -119,7 +119,7 @@ _format_php() {
   local file="$1" dir="$2" cfg args=()
   command -v php-cs-fixer &>/dev/null || return 0
 
-  cfg=$(_find_php_cs_fixer_config "$dir" "$AUTOFORMAT_DIR" 2>/dev/null || true)
+  cfg=$(_find_php_cs_fixer_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config "$cfg")
   _run_fmt php-cs-fixer fix --quiet --using-cache=no "${args[@]}" "$file"
 }
@@ -140,7 +140,7 @@ _format_one() {
   # Normalizing before ignore/config checks keeps hook calls, editor
   # calls, and manual relative invocations on the same policy path.
   file=$(_abs_path "$file") || return 0
-  _ignored "$file" "$AUTOFORMAT_DIR/ignore" && return 0
+  _ignored "$file" "$CHECKRUN_AUTOFORMAT_DIR/ignore" && return 0
 
   _filedir=$(dirname "$file")
   ext="${file##*.}"
@@ -177,7 +177,7 @@ _format_one() {
   #   1. `command -v <tool>` presence guard (see above).
   #   2. Per-repo config detection via `_has_config` / `_find_config`
   #      (and sometimes a `yq` walk for pyproject-style configs).
-  #   3. Fallback to `$AUTOFORMAT_DIR/<tool-config>` via a `--config`-
+  #   3. Fallback to `$CHECKRUN_AUTOFORMAT_DIR/<tool-config>` via a `--config`-
   #      like CLI flag when no per-repo config was found.
   # Each tool has a slightly different flag name and config-file set;
   # inline comments explain the quirks (e.g. taplo walks from cwd, not
@@ -194,8 +194,8 @@ _format_one() {
           has_ruff_config=1
         fi
         if [ "$has_ruff_config" -eq 0 ] &&
-          [ -f "$AUTOFORMAT_DIR/ruff.toml" ]; then
-          args=(--config "$AUTOFORMAT_DIR/ruff.toml")
+          [ -f "$CHECKRUN_AUTOFORMAT_DIR/ruff.toml" ]; then
+          args=(--config "$CHECKRUN_AUTOFORMAT_DIR/ruff.toml")
         fi
         _run_fmt ruff format --quiet "${args[@]}" "$file"
         # Also sort imports (`I` rule) as a format-adjacent fix. The
@@ -234,8 +234,8 @@ _format_one() {
         # explicitly so the style is consistent on files outside a repo.
         if ! _has_config "$_filedir" ".clang-format" &&
           ! _has_config "$_filedir" "_clang-format" &&
-          [ -f "$AUTOFORMAT_DIR/clang-format" ]; then
-          args=(-style="file:$AUTOFORMAT_DIR/clang-format")
+          [ -f "$CHECKRUN_AUTOFORMAT_DIR/clang-format" ]; then
+          args=(-style="file:$CHECKRUN_AUTOFORMAT_DIR/clang-format")
         fi
         _run_fmt clang-format -i "${args[@]}" "$file"
       fi
@@ -249,8 +249,8 @@ _format_one() {
         if ! _has_config "$_filedir" "stylua.toml" &&
           ! _has_config "$_filedir" ".stylua.toml" &&
           ! _has_config "$_filedir" ".editorconfig" &&
-          [ -f "$AUTOFORMAT_DIR/stylua.toml" ]; then
-          args=(--config-path "$AUTOFORMAT_DIR/stylua.toml")
+          [ -f "$CHECKRUN_AUTOFORMAT_DIR/stylua.toml" ]; then
+          args=(--config-path "$CHECKRUN_AUTOFORMAT_DIR/stylua.toml")
         fi
         _run_fmt stylua "${args[@]}" "$file"
       fi
@@ -269,8 +269,8 @@ _format_one() {
         # with integration defaults while leaving repo configs untouched.
         if ! _has_config "$_filedir" "rustfmt.toml" &&
           ! _has_config "$_filedir" ".rustfmt.toml" &&
-          [ -f "$AUTOFORMAT_DIR/rustfmt.toml" ]; then
-          args+=(--config-path "$AUTOFORMAT_DIR/rustfmt.toml")
+          [ -f "$CHECKRUN_AUTOFORMAT_DIR/rustfmt.toml" ]; then
+          args+=(--config-path "$CHECKRUN_AUTOFORMAT_DIR/rustfmt.toml")
         fi
         _run_fmt rustfmt "${args[@]}" "$file"
       fi
@@ -292,8 +292,8 @@ _format_one() {
           _find_config "$_filedir" ".taplo.toml" 2>/dev/null || true)
         if [ -n "$repo_cfg" ]; then
           args=(--config "$repo_cfg")
-        elif [ -f "$AUTOFORMAT_DIR/taplo.toml" ]; then
-          args=(--config "$AUTOFORMAT_DIR/taplo.toml")
+        elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/taplo.toml" ]; then
+          args=(--config "$CHECKRUN_AUTOFORMAT_DIR/taplo.toml")
         fi
         _run_fmt taplo fmt "${args[@]}" "$file"
       fi
@@ -315,9 +315,9 @@ _format_one() {
           _find_config "$_filedir" "biome.jsonc" 2>/dev/null || true)
         if [ -n "$repo_cfg" ] && [ "$repo_cfg" != "$file" ]; then
           args=(--config-path "$(dirname "$repo_cfg")")
-        elif [ -f "$AUTOFORMAT_DIR/biome.json" ] &&
-          [ "$file" != "$AUTOFORMAT_DIR/biome.json" ]; then
-          args=(--config-path "$AUTOFORMAT_DIR")
+        elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/biome.json" ] &&
+          [ "$file" != "$CHECKRUN_AUTOFORMAT_DIR/biome.json" ]; then
+          args=(--config-path "$CHECKRUN_AUTOFORMAT_DIR")
         fi
         # `biome check --write --linter-enabled=false` runs formatter +
         # assist (organize imports etc.) but skips the linter. Autolint
@@ -350,8 +350,8 @@ _format_one() {
         yamlfmt_cfg=$(_find_config "$_filedir" ".yamlfmt" 2>/dev/null || true)
         if [ -n "$yamlfmt_cfg" ]; then
           args=(-conf "$yamlfmt_cfg")
-        elif [ -f "$AUTOFORMAT_DIR/yamlfmt.yaml" ]; then
-          args=(-conf "$AUTOFORMAT_DIR/yamlfmt.yaml")
+        elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/yamlfmt.yaml" ]; then
+          args=(-conf "$CHECKRUN_AUTOFORMAT_DIR/yamlfmt.yaml")
         fi
         _run_fmt yamlfmt "${args[@]}" "$file"
       fi
@@ -369,8 +369,8 @@ _format_one() {
           ! _has_config "$_filedir" "rumdl.toml" &&
           ! _has_config "$_filedir" ".markdownlint.json" &&
           ! _has_config "$_filedir" ".markdownlint.jsonc" &&
-          [ -f "$AUTOFORMAT_DIR/rumdl.toml" ]; then
-          args=(--config "$AUTOFORMAT_DIR/rumdl.toml")
+          [ -f "$CHECKRUN_AUTOFORMAT_DIR/rumdl.toml" ]; then
+          args=(--config "$CHECKRUN_AUTOFORMAT_DIR/rumdl.toml")
         fi
         _run_fmt rumdl check --fix "${args[@]}" "$file"
       fi
@@ -405,13 +405,13 @@ _autoformat_main() {
     esac
   done
 
-  AUTOFORMAT_DIR="${AUTOFORMAT_DIR:-$HOME/.config/autoformat}"
+  CHECKRUN_AUTOFORMAT_DIR="${CHECKRUN_AUTOFORMAT_DIR:-$HOME/.config/autoformat}"
 
-  # Resolve relative AUTOFORMAT_DIR values at startup. Formatter branches
+  # Resolve relative CHECKRUN_AUTOFORMAT_DIR values at startup. Formatter branches
   # pass fallback configs directly to tools, and some tools resolve those
   # paths after changing cwd or walking from cwd instead of from the file.
-  if [ -d "$AUTOFORMAT_DIR" ]; then
-    AUTOFORMAT_DIR=$(_abs_dir "$AUTOFORMAT_DIR")
+  if [ -d "$CHECKRUN_AUTOFORMAT_DIR" ]; then
+    CHECKRUN_AUTOFORMAT_DIR=$(_abs_dir "$CHECKRUN_AUTOFORMAT_DIR")
   fi
 
   if ! command -v yq >/dev/null 2>&1; then

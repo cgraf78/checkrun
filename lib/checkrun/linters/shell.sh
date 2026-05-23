@@ -21,13 +21,13 @@ _lint_sh() {
   # ShellCheck 0.9.0 (common on older Ubuntu/WSL) does not support --rcfile, and
   # ShellCheck does not discover this XDG-style fallback path itself.
   if ! _has_config "$dir" ".shellcheckrc" &&
-    [ -f "$AUTOLINT_DIR/shellcheckrc" ]; then
+    [ -f "$CHECKRUN_AUTOLINT_DIR/shellcheckrc" ]; then
     local key val
     while IFS='=' read -r key val; do
       case "$key" in
         disable) args+=(-e "$val") ;;
       esac
-    done < <(grep -E '^[a-z-]+=' "$AUTOLINT_DIR/shellcheckrc")
+    done < <(grep -E '^[a-z-]+=' "$CHECKRUN_AUTOLINT_DIR/shellcheckrc")
   fi
   if [ "$json" -eq 1 ]; then
     local out tool_rc

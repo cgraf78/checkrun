@@ -29,8 +29,8 @@ _require_compatible_libc "autoformat-test"
 
 AUTOFORMAT="$CHECKRUN_REPO_ROOT/bin/autoformat"
 CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
-export AUTOFORMAT_DIR
-AUTOFORMAT_DIR=$(_checkrun_default_autoformat_dir)
+export CHECKRUN_AUTOFORMAT_DIR
+CHECKRUN_AUTOFORMAT_DIR=$(_checkrun_default_autoformat_dir)
 
 # ---------------------------------------------------------------------------
 # Tests: public shell API
@@ -287,7 +287,7 @@ cat >"$_td/CMakeLists.txt" <<'EOF'
 add_executable(app main.cpp)
 EOF
 set +e
-output=$(AUTOFORMAT_DIR="$_cmakefmt_cfg" PATH="$_cmakefmt_mock:$PATH" "$AUTOFORMAT" "$_td/CMakeLists.txt" 2>&1)
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cmakefmt_cfg" PATH="$_cmakefmt_mock:$PATH" "$AUTOFORMAT" "$_td/CMakeLists.txt" 2>&1)
 rc=$?
 set -e
 _assert_exit "cmake: CMakeLists.txt exits 0" 0 "$rc"
@@ -298,7 +298,7 @@ _assert_contains "cmake: fallback config passed via --config-files" \
 
 echo 'include(foo)' >"$_td/module.cmake"
 set +e
-output=$(AUTOFORMAT_DIR="$_cmakefmt_cfg" PATH="$_cmakefmt_mock:$PATH" "$AUTOFORMAT" "$_td/module.cmake" 2>&1)
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cmakefmt_cfg" PATH="$_cmakefmt_mock:$PATH" "$AUTOFORMAT" "$_td/module.cmake" 2>&1)
 rc=$?
 set -e
 _assert_exit "cmake: .cmake exits 0" 0 "$rc"
@@ -324,7 +324,7 @@ _ruby_cfg=$(_tmpdir)
 : >"$_ruby_cfg/rubocop.yml"
 echo 'puts "hi"' >"$_td/test.rb"
 set +e
-output=$(AUTOFORMAT_DIR="$_ruby_cfg" PATH="$_rubocop_fmt_mock:$PATH" "$AUTOFORMAT" "$_td/test.rb" 2>&1)
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_ruby_cfg" PATH="$_rubocop_fmt_mock:$PATH" "$AUTOFORMAT" "$_td/test.rb" 2>&1)
 rc=$?
 set -e
 _assert_exit "ruby: rubocop formatter exits 0" 0 "$rc"
@@ -349,7 +349,7 @@ cat >"$_td/test.php" <<'EOF'
 <?php echo "hi";
 EOF
 set +e
-output=$(AUTOFORMAT_DIR="$_php_cfg" PATH="$_phpcsfixer_mock:$PATH" "$AUTOFORMAT" "$_td/test.php" 2>&1)
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_php_cfg" PATH="$_phpcsfixer_mock:$PATH" "$AUTOFORMAT" "$_td/test.php" 2>&1)
 rc=$?
 set -e
 _assert_exit "php: php-cs-fixer exits 0" 0 "$rc"
@@ -611,7 +611,7 @@ edition = "2024"
 EOF
 echo 'fn main(){ }' >"$_rustfmt_project/src/main.rs"
 export MOCK_RUSTFMT_LOG="$_rustfmt_project/rustfmt.log"
-AUTOFORMAT_DIR="$_rustfmt_cfg" PATH="$_rustfmt_mock:$PATH" "$AUTOFORMAT" "$_rustfmt_project/src/main.rs"
+CHECKRUN_AUTOFORMAT_DIR="$_rustfmt_cfg" PATH="$_rustfmt_mock:$PATH" "$AUTOFORMAT" "$_rustfmt_project/src/main.rs"
 _rustfmt_args=$(cat "$MOCK_RUSTFMT_LOG")
 _assert_contains "rust: Cargo edition is passed to rustfmt" \
   "--edition 2024" "$_rustfmt_args"
@@ -656,7 +656,7 @@ EOF
 echo '{"a":1}' >"$_biome_rel/project/test.json"
 set +e
 output=$(cd "$_biome_rel/launch" &&
-  AUTOFORMAT_DIR=cfg PATH="$_biome_path_mock:$PATH" "$AUTOFORMAT" "$_biome_rel/project/test.json" 2>&1)
+  CHECKRUN_AUTOFORMAT_DIR=cfg PATH="$_biome_path_mock:$PATH" "$AUTOFORMAT" "$_biome_rel/project/test.json" 2>&1)
 rc=$?
 set -e
 _assert_exit "biome: relative fallback config dir exits 0 from another cwd" 0 "$rc"
@@ -671,7 +671,7 @@ cat >"$_biome_self/biome.json" <<'EOF'
 EOF
 set +e
 output=$(cd "$_biome_self" &&
-  AUTOFORMAT_DIR=/nonexistent PATH="$_biome_path_mock:$PATH" "$AUTOFORMAT" biome.json 2>&1)
+  CHECKRUN_AUTOFORMAT_DIR=/nonexistent PATH="$_biome_path_mock:$PATH" "$AUTOFORMAT" biome.json 2>&1)
 rc=$?
 set -e
 _assert_exit "biome: relative self config exits 0" 0 "$rc"
@@ -741,7 +741,7 @@ EOF
 echo 'k = "v"' >"$_taplo_rel/project/test.toml"
 set +e
 output=$(cd "$_taplo_rel/launch" &&
-  AUTOFORMAT_DIR=cfg PATH="$_taplo_path_mock:$PATH" "$AUTOFORMAT" "$_taplo_rel/project/test.toml" 2>&1)
+  CHECKRUN_AUTOFORMAT_DIR=cfg PATH="$_taplo_path_mock:$PATH" "$AUTOFORMAT" "$_taplo_rel/project/test.toml" 2>&1)
 rc=$?
 set -e
 _assert_exit "toml: relative fallback config exits 0 from another cwd" 0 "$rc"
@@ -1054,7 +1054,7 @@ _assert_eq "classify: binary → unknown" "unknown" "$result"
 _assert_not_contains "classify: binary emits no null-byte warning" "null byte" "$_stderr"
 
 # ---------------------------------------------------------------------------
-# Tests: ignore file ($AUTOFORMAT_DIR/ignore)
+# Tests: ignore file ($CHECKRUN_AUTOFORMAT_DIR/ignore)
 # ---------------------------------------------------------------------------
 
 echo "=== Ignore file ==="
@@ -1073,21 +1073,21 @@ _ign_py_dir=$(_tmpdir)
 cat >"$_ign_py_dir/skipme.py" <<'EOF'
 x=1
 EOF
-AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/skipme.py"
+CHECKRUN_AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/skipme.py"
 _assert_eq "ignore: glob match skips formatting" "x=1" "$(cat "$_ign_py_dir/skipme.py")"
 
 # File NOT in ignore list → formats as usual.
 cat >"$_ign_py_dir/keepme.py" <<'EOF'
 x=1
 EOF
-AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/keepme.py"
+CHECKRUN_AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/keepme.py"
 _assert_contains "ignore: non-match still formats" "x = 1" "$(cat "$_ign_py_dir/keepme.py")"
 
 # Missing ignore file → scripts proceed normally.
 cat >"$_ign_py_dir/plain.py" <<'EOF'
 x=1
 EOF
-AUTOFORMAT_DIR=/nonexistent "$AUTOFORMAT" "$_ign_py_dir/plain.py"
+CHECKRUN_AUTOFORMAT_DIR=/nonexistent "$AUTOFORMAT" "$_ign_py_dir/plain.py"
 _assert_contains "ignore: missing ignore file → normal flow" \
   "x = 1" "$(cat "$_ign_py_dir/plain.py")"
 
@@ -1100,7 +1100,7 @@ x=1
 EOF
 set +e
 output=$(cd "$_ign_rel_repo" &&
-  AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" skipme.py 2>&1)
+  CHECKRUN_AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" skipme.py 2>&1)
 rc=$?
 set -e
 _assert_exit "ignore: relative basename path exits 0" 0 "$rc"
@@ -1108,7 +1108,7 @@ _assert_eq "ignore: relative basename path still matches glob" \
   "x=1" "$(cat "$_ign_rel_repo/skipme.py")"
 set +e
 (cd "$_ign_rel_repo" &&
-  AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" keepme.py >/dev/null 2>&1)
+  CHECKRUN_AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" keepme.py >/dev/null 2>&1)
 rc=$?
 set -e
 _assert_exit "ignore: relative non-ignored basename formats" 0 "$rc"
@@ -1175,7 +1175,7 @@ cat >"$_ign_py_dir/batch-after.py" <<'EOF'
 e=5
 EOF
 set +e
-AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" \
+CHECKRUN_AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" \
   "$_ign_py_dir/batch-before.py" "$_ign_py_dir/skipme.py" "$_ign_py_dir/batch-after.py" \
   >/dev/null 2>&1
 rc=$?
@@ -1235,10 +1235,10 @@ _assert_contains "formatter failure: prints stderr" "mock shfmt parse error" "$o
 _assert_eq "formatter failure: file left unchanged" "$(cat "$_td/fail.sh.orig")" "$(cat "$_td/fail.sh")"
 
 # ---------------------------------------------------------------------------
-# Tests: AUTOFORMAT_DIR override
+# Tests: CHECKRUN_AUTOFORMAT_DIR override
 # ---------------------------------------------------------------------------
 
-echo "=== AUTOFORMAT_DIR override ==="
+echo "=== CHECKRUN_AUTOFORMAT_DIR override ==="
 
 _custom_cfg=$(_tmpdir)
 cat >"$_custom_cfg/shfmt.toml" <<'EOF'
@@ -1250,7 +1250,7 @@ if true; then
 echo "hello"
 fi
 EOF
-AUTOFORMAT_DIR="$_custom_cfg" "$AUTOFORMAT" "$_td/custom.sh"
+CHECKRUN_AUTOFORMAT_DIR="$_custom_cfg" "$AUTOFORMAT" "$_td/custom.sh"
 _assert_contains "custom config dir: 4-space" "    echo" "$(cat "$_td/custom.sh")"
 
 # ---------------------------------------------------------------------------
@@ -1265,7 +1265,7 @@ if true; then
 echo "hello"
 fi
 EOF
-AUTOFORMAT_DIR="/nonexistent/path" "$AUTOFORMAT" "$_td/noconfig.sh"
+CHECKRUN_AUTOFORMAT_DIR="/nonexistent/path" "$AUTOFORMAT" "$_td/noconfig.sh"
 # shfmt default is tabs when no config
 _assert_contains "no config dir: shfmt uses tabs" "	echo" "$(cat "$_td/noconfig.sh")"
 

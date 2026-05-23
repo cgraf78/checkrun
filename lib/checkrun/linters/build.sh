@@ -66,8 +66,8 @@ _lint_checkmake() {
   repo_cfg=$(_find_config "$dir" "checkmake.ini" 2>/dev/null || true)
   if [ -n "$repo_cfg" ]; then
     args=(--config "$repo_cfg")
-  elif [ -f "$AUTOLINT_DIR/checkmake.ini" ]; then
-    args=(--config "$AUTOLINT_DIR/checkmake.ini")
+  elif [ -f "$CHECKRUN_AUTOLINT_DIR/checkmake.ini" ]; then
+    args=(--config "$CHECKRUN_AUTOLINT_DIR/checkmake.ini")
   fi
 
   if [ "$json" -eq 1 ]; then
@@ -95,7 +95,7 @@ _lint_cmake() {
   local file="$1" dir="$2" cfg args=()
   command -v cmake-lint &>/dev/null || return 0
 
-  cfg=$(_find_cmake_config "$dir" "$AUTOLINT_DIR" 2>/dev/null || true)
+  cfg=$(_find_cmake_config "$dir" "$CHECKRUN_AUTOLINT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config-files "$cfg")
   _lint_text_command "cmake-lint" "$file" cmake-lint "${args[@]}" "$file"
 }
@@ -108,8 +108,8 @@ _lint_dockerfile() {
   # hadolint does not look in the global fallback directory on its own, but a
   # repo .hadolint.yaml should always win over the personal fallback.
   if ! _has_config "$dir" ".hadolint.yaml" &&
-    [ -f "$AUTOLINT_DIR/hadolint.yaml" ]; then
-    args=(-c "$AUTOLINT_DIR/hadolint.yaml")
+    [ -f "$CHECKRUN_AUTOLINT_DIR/hadolint.yaml" ]; then
+    args=(-c "$CHECKRUN_AUTOLINT_DIR/hadolint.yaml")
   fi
 
   if [ "$json" -eq 1 ]; then

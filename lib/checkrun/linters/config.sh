@@ -104,15 +104,15 @@ _lint_taplo() {
   local args=()
 
   command -v taplo &>/dev/null || return 0
-  # Three-tier: per-repo .taplo.toml -> $AUTOLINT_DIR/taplo.toml -> --no-schema.
+  # Three-tier: per-repo .taplo.toml -> $CHECKRUN_AUTOLINT_DIR/taplo.toml -> --no-schema.
   # --no-schema avoids taplo fetching the remote schema catalog on locked-down
   # hosts and on TOMLs that do not declare a schema anyway.
   repo_cfg=$(_find_config "$dir" ".taplo.toml" 2>/dev/null ||
     _find_config "$dir" "taplo.toml" 2>/dev/null || true)
   if [ -n "$repo_cfg" ]; then
     args=(--config "$repo_cfg")
-  elif [ -f "$AUTOLINT_DIR/taplo.toml" ]; then
-    args=(--config "$AUTOLINT_DIR/taplo.toml")
+  elif [ -f "$CHECKRUN_AUTOLINT_DIR/taplo.toml" ]; then
+    args=(--config "$CHECKRUN_AUTOLINT_DIR/taplo.toml")
   else
     args=(--no-schema)
   fi

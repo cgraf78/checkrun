@@ -75,9 +75,10 @@ and consumers decide when to invoke it.
 ## Configs
 
 Global fallback configs live under `~/.config/autoformat` by default. Set
-`AUTOFORMAT_DIR` or `AUTOLINT_DIR` to override the config root for a run. The
-single config root is intentional: several backends, including Ruff, Biome,
-Rubocop, Rumdl, and Taplo, use one policy file for both formatting and linting.
+`CHECKRUN_AUTOFORMAT_DIR` or `CHECKRUN_AUTOLINT_DIR` to override the config
+root for a run. The single config root is intentional: several backends,
+including Ruff, Biome, Rubocop, Rumdl, and Taplo, use one policy file for both
+formatting and linting.
 
 Schema association policy defaults to `~/.config/checkrun/associations.json`.
 Set `CHECKRUN_SCHEMA_ASSOCIATIONS` to point at a different policy file for a

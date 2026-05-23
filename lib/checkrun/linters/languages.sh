@@ -9,7 +9,7 @@ _lint_ruby() {
   local file="$1" dir="$2" cfg args=()
   command -v rubocop &>/dev/null || return 0
 
-  cfg=$(_find_rubocop_config "$dir" "$AUTOLINT_DIR" 2>/dev/null || true)
+  cfg=$(_find_rubocop_config "$dir" "$CHECKRUN_AUTOLINT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config "$cfg")
   if [ "$fix" -eq 1 ]; then
     _lint_text_command "rubocop" "$file" rubocop --autocorrect \
@@ -118,8 +118,8 @@ _lint_go() {
     has_gc_config=1
   fi
   if [ "$has_gc_config" -eq 0 ] &&
-    [ -f "$AUTOLINT_DIR/golangci-lint.yml" ]; then
-    args=(--config "$AUTOLINT_DIR/golangci-lint.yml")
+    [ -f "$CHECKRUN_AUTOLINT_DIR/golangci-lint.yml" ]; then
+    args=(--config "$CHECKRUN_AUTOLINT_DIR/golangci-lint.yml")
   fi
 
   # golangci-lint expects package paths, not single files. Run from the file's
@@ -166,8 +166,8 @@ _lint_ruff() {
     has_ruff_config=1
   fi
   if [ "$has_ruff_config" -eq 0 ] &&
-    [ -f "$AUTOLINT_DIR/ruff.toml" ]; then
-    args=(--config "$AUTOLINT_DIR/ruff.toml")
+    [ -f "$CHECKRUN_AUTOLINT_DIR/ruff.toml" ]; then
+    args=(--config "$CHECKRUN_AUTOLINT_DIR/ruff.toml")
   fi
 
   if [ "$json" -eq 1 ]; then
@@ -207,8 +207,8 @@ _lint_selene() {
     _find_config "$dir" ".selene.toml" 2>/dev/null || true)
   if [ -n "$selene_cfg" ]; then
     args=(--config "$selene_cfg")
-  elif [ -f "$AUTOLINT_DIR/selene.toml" ]; then
-    args=(--config "$AUTOLINT_DIR/selene.toml")
+  elif [ -f "$CHECKRUN_AUTOLINT_DIR/selene.toml" ]; then
+    args=(--config "$CHECKRUN_AUTOLINT_DIR/selene.toml")
   fi
 
   if [ "$json" -eq 1 ]; then

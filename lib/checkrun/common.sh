@@ -288,10 +288,9 @@ _walk_config_with_key() {
 #
 # Both autoformat and autolint call this at the top of dispatch so the
 # decision applies to formatting and linting uniformly. The default
-# location is shared: `$AUTOFORMAT_DIR/ignore` on the format side,
-# `$AUTOLINT_DIR/ignore` on the lint side — since AUTOLINT_DIR defaults
-# to AUTOFORMAT_DIR, both resolve to `~/.config/autoformat/ignore`
-# unless overridden for tests.
+# location is shared: `$CHECKRUN_AUTOFORMAT_DIR/ignore` on the format side,
+# `$CHECKRUN_AUTOLINT_DIR/ignore` on the lint side. Both default to
+# `~/.config/autoformat/ignore` unless overridden for tests.
 #
 # Pattern semantics: plain bash globs — `*`, `?`, `[...]` — matched
 # against the absolute file path. No `**`, no negations, no

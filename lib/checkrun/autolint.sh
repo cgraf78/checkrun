@@ -143,7 +143,7 @@ _lint_one() {
 
   # Per-language dispatch. Each arm mirrors autoformat's three-step
   # shape (tool-present guard → per-repo config detection → fallback
-  # via `$AUTOLINT_DIR`). Exceptions:
+  # via `$CHECKRUN_AUTOLINT_DIR`). Exceptions:
   #   - `zsh` has no config mechanism; we just run `zsh -n`.
   #   - `yml/yaml` is scoped to `*/.github/workflows/*` — actionlint
   #     and zizmor are workflow-specific and would be noisy on arbitrary yamls.
@@ -319,14 +319,14 @@ _autolint_main() {
 
   # Fallback-config dir. Defaults to the same dir autoformat uses because
   # several backends share one policy file for formatting and linting. Can be
-  # overridden independently via AUTOLINT_DIR.
-  AUTOLINT_DIR="${AUTOLINT_DIR:-$HOME/.config/autoformat}"
+  # overridden independently via CHECKRUN_AUTOLINT_DIR.
+  CHECKRUN_AUTOLINT_DIR="${CHECKRUN_AUTOLINT_DIR:-$HOME/.config/autoformat}"
 
-  # Resolve relative AUTOLINT_DIR values before any linter-specific cwd
+  # Resolve relative CHECKRUN_AUTOLINT_DIR values before any linter-specific cwd
   # changes. Config paths passed on the CLI should name the same file
   # regardless of where the backend command eventually runs.
-  if [ -d "$AUTOLINT_DIR" ]; then
-    AUTOLINT_DIR=$(_abs_dir "$AUTOLINT_DIR")
+  if [ -d "$CHECKRUN_AUTOLINT_DIR" ]; then
+    CHECKRUN_AUTOLINT_DIR=$(_abs_dir "$CHECKRUN_AUTOLINT_DIR")
   fi
 
   for file in "${file_args[@]}"; do
@@ -358,7 +358,7 @@ _autolint_main() {
       _lint_one "$file" || rc=$?
     done
   else
-    jobs=${AUTOLINT_JOBS:-$(_autolint_default_jobs)}
+    jobs=${CHECKRUN_AUTOLINT_JOBS:-$(_autolint_default_jobs)}
     case "$jobs" in
       '' | *[!0-9]*) jobs=1 ;;
     esac

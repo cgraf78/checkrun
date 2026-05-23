@@ -16,9 +16,9 @@ _lint_biome() {
     _find_config "$dir" "biome.jsonc" 2>/dev/null || true)
   if [ -n "$repo_cfg" ] && [ "$repo_cfg" != "$file" ]; then
     args=(--config-path "$(dirname "$repo_cfg")")
-  elif [ -f "$AUTOLINT_DIR/biome.json" ] &&
-    [ "$file" != "$AUTOLINT_DIR/biome.json" ]; then
-    args=(--config-path "$AUTOLINT_DIR")
+  elif [ -f "$CHECKRUN_AUTOLINT_DIR/biome.json" ] &&
+    [ "$file" != "$CHECKRUN_AUTOLINT_DIR/biome.json" ]; then
+    args=(--config-path "$CHECKRUN_AUTOLINT_DIR")
   fi
   if [ "$json" -eq 1 ]; then
     local out tool_rc

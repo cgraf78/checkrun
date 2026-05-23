@@ -15,8 +15,8 @@ _lint_typos() {
     _find_config "$dir" "typos.toml" 2>/dev/null || true)
   if [ -n "$repo_cfg" ]; then
     args=(--config "$repo_cfg")
-  elif [ -f "$AUTOLINT_DIR/typos.toml" ]; then
-    args=(--config "$AUTOLINT_DIR/typos.toml")
+  elif [ -f "$CHECKRUN_AUTOLINT_DIR/typos.toml" ]; then
+    args=(--config "$CHECKRUN_AUTOLINT_DIR/typos.toml")
   fi
 
   if [ "$json" -eq 1 ]; then
@@ -66,8 +66,8 @@ _lint_rumdl() {
     ! _has_config "$dir" "rumdl.toml" &&
     ! _has_config "$dir" ".markdownlint.json" &&
     ! _has_config "$dir" ".markdownlint.jsonc" &&
-    [ -f "$AUTOLINT_DIR/rumdl.toml" ]; then
-    args=(--config "$AUTOLINT_DIR/rumdl.toml")
+    [ -f "$CHECKRUN_AUTOLINT_DIR/rumdl.toml" ]; then
+    args=(--config "$CHECKRUN_AUTOLINT_DIR/rumdl.toml")
   fi
 
   if [ "$json" -eq 1 ]; then

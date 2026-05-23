@@ -26,7 +26,7 @@ _lintable_path() {
   # Normalize before ignore checks so editor, hook, and CLI callers all apply
   # the same absolute-path policy even when they pass relative filenames.
   file=$(_abs_path "$file") || return 1
-  _ignored "$file" "$AUTOLINT_DIR/ignore" && return 1
+  _ignored "$file" "$CHECKRUN_AUTOLINT_DIR/ignore" && return 1
 
   printf '%s\n' "$file"
 }
