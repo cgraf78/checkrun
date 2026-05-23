@@ -109,6 +109,20 @@ jobs:
       - name: Mark workspace as safe for git
         run: git config --global --add safe.directory "$(pwd)"
 
+      - name: Cache checkrun dev tools
+        if: matrix.name != 'Alpine'
+        # actions/cache v4.2.4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: |
+            .local/share/mise
+            .cache/mise
+            .cache/aqua
+            .cache/ubi
+          key: checkrun-dev-tools-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('.github/mise/checkrun-ci.toml') }}
+          restore-keys: |
+            checkrun-dev-tools-${{ runner.os }}-${{ matrix.name }}-
+
       - name: Install checkrun dev tools
         if: matrix.name != 'Alpine'
         shell: bash
@@ -116,6 +130,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          retry() {
+            local attempt rc delay
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+
+              rc=$?
+              if [ "$attempt" -eq 3 ]; then
+                return "$rc"
+              fi
+
+              delay=$((attempt * 15))
+              echo "$* failed (attempt $attempt/3, exit $rc); retrying in ${delay}s..." >&2
+              sleep "$delay"
+            done
+          }
 
           curl https://mise.run | sh
           export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
@@ -127,7 +159,7 @@ jobs:
           export MISE_GLOBAL_CONFIG_FILE="$PWD/.github/mise/checkrun-ci.toml"
           echo "MISE_GLOBAL_CONFIG_FILE=$MISE_GLOBAL_CONFIG_FILE" >> "$GITHUB_ENV"
           mise trust "$MISE_GLOBAL_CONFIG_FILE" >/dev/null || true
-          mise install
+          retry mise install
 
           python3 -m venv "$HOME/.venv"
           "$HOME/.venv/bin/python" -m pip install --upgrade pip
