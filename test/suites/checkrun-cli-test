@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# checkrun-cli-test — unit tests for the top-level checkrun command.
+#
+# Usage: checkrun-cli-test
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "checkrun-cli-test"
+
+CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
+
+echo "=== checkrun: top-level help ==="
+
+output=$("$CHECKRUN" --help 2>&1)
+rc=$?
+_assert_exit "help: --help exits 0" 0 "$rc"
+_assert_contains "help: lists capabilities command" "capabilities" "$output"
+_assert_contains "help: lists explain command" "explain" "$output"
+
+echo "=== checkrun: capabilities ==="
+
+output=$("$CHECKRUN" capabilities --json 2>&1)
+rc=$?
+_assert_exit "capabilities: --json exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+assert data["version"] == 1
+assert "python" in data["sley"]["formatFiletypes"]
+assert "systemd" in data["sley"]["lintExtraFiletypes"]
+assert any(item["id"] == "web" for item in data["selectors"])
+'
+_assert_exit "capabilities: emits supported filetype metadata" 0 "$?"
+
+echo "=== checkrun: explain ==="
+
+_td=$(_tmpdir)
+_cfg="$_td/cfg"
+_policy="$_td/associations.json"
+mkdir -p "$_cfg" "$_td/.config/example"
+cat >"$_cfg/format-ignore" <<EOF
+*/skip.py
+EOF
+cat >"$_cfg/tool-ignore" <<EOF
+*/biome.json
+EOF
+cat >"$_policy" <<'JSON'
+{
+  "version": 1,
+  "associations": [
+    {
+      "name": "Example config",
+      "format": "json",
+      "schema": "example.schema.json",
+      "matches": [".config/example/*.json"],
+      "enforce": true
+    }
+  ]
+}
+JSON
+touch "$_td/keep.py" "$_td/skip.py" "$_td/biome.json" "$_td/.config/example/settings.json"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/keep.py" 2>&1)
+rc=$?
+_assert_exit "explain: python exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)[0]
+assert item["filetype"] == "python"
+assert item["format"]["tools"][0]["tool"] == "ruff"
+assert item["lint"]["tools"][0]["tool"] == "ruff"
+assert item["format"]["ignored"] is False
+'
+_assert_exit "explain: reports python formatter and linter" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/skip.py" 2>&1)
+rc=$?
+_assert_exit "explain: ignored format exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)[0]
+assert item["format"]["ignored"] is True
+assert item["format"]["ignore"]["pattern"] == "*/skip.py"
+assert item["lint"]["tools"][0]["tool"] == "ruff"
+'
+_assert_exit "explain: reports phase-specific format ignore" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/biome.json" 2>&1)
+rc=$?
+_assert_exit "explain: tool-ignore exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)[0]
+assert item["filetype"] == "json"
+assert item["lint"]["phases"]["tool"]["ignored"] is True
+assert item["lint"]["tools"] == []
+'
+_assert_exit "explain: reports backend tool ignore separately" 0 "$?"
+
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$CHECKRUN" explain --json "$_td/.config/example/settings.json" 2>&1)
+rc=$?
+_assert_exit "explain: schema association exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)[0]
+assert item["lint"]["schemas"][0]["name"] == "Example config"
+assert item["lint"]["schemas"][0]["enforce"] is True
+'
+_assert_exit "explain: reports matching schema association" 0 "$?"

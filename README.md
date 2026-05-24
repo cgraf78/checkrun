@@ -12,6 +12,8 @@ CLIs as their formatting and linting policy surface.
 ## CLIs
 
 ```text
+checkrun capabilities --json
+checkrun explain [--json] FILE [FILE...]
 checkrun format FILE [FILE...]
 checkrun lint [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
@@ -28,6 +30,12 @@ findings exist.
 Both commands ignore missing, deleted, or explicitly ignored files. Missing
 language tools are treated as graceful no-ops so a host without a language
 toolchain does not break unrelated workflows.
+
+`checkrun capabilities --json` emits machine-readable filetype and tool
+metadata for editor integrations. `checkrun explain` reports the normalized
+path, inferred filetype, phase-specific ignore decisions, candidate
+formatter/linter tools, fallback config names, and matching schema associations
+for selected files.
 
 ## Dependencies
 
@@ -53,6 +61,8 @@ own toolchain through the host environment or integration layer.
 
 - `bin/checkrun`, `bin/autoformat`, and `bin/autolint` are the PATH-visible
   CLIs.
+- `share/checkrun/capabilities.json` is the shared capability metadata used by
+  `checkrun capabilities`, `checkrun explain`, and editor integrations.
 - `lib/checkrun/schemas/schema_policy.py` is the schema association API shared
   by editors and linting. Associations may set `"dependency": "owner/repo"` and
   a repo-relative `"schema"` path when a schema is public API owned by a

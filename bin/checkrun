@@ -31,6 +31,9 @@ _usage() {
 Usage: checkrun COMMAND [ARGS...]
 
 Commands:
+  capabilities
+            print Checkrun capability metadata
+  explain   explain formatter/linter/schema policy for files
   format    run autoformat compatibility entry point
   lint      run autolint compatibility entry point
   check     alias for lint
@@ -39,6 +42,23 @@ EOF
 
 cmd="${1:-}"
 case "$cmd" in
+  capabilities)
+    shift
+    case "${1:-}" in
+      --json | "")
+        [ "${1:-}" = "--json" ] && shift
+        exec "$_bin_dir/../lib/checkrun/explain.py" --capabilities "$@"
+        ;;
+      *)
+        printf 'checkrun capabilities: unknown option: %s\n' "$1" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  explain)
+    shift
+    exec "$_bin_dir/../lib/checkrun/explain.py" "$@"
+    ;;
   format | fmt)
     shift
     exec "$_bin_dir/autoformat" "$@"
