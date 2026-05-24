@@ -89,15 +89,19 @@ _lint_one() {
   _filedir=$(dirname "$file")
   ext="${file##*.}"
 
-  # Spell checking is cross-cutting rather than extension-owned. Run it
-  # before language dispatch so docs, comments, configs, and scripts get
-  # the same typo policy without duplicating branches below.
-  _lint_typos "$file" "$_filedir" || rc=$?
+  # Spell checking is cross-cutting rather than extension-owned. Keep its ignore
+  # decision separate from schema/language linting so vendored config payloads
+  # can skip prose noise without losing structural validation.
+  if ! _ignored_for spell "$file" "$CHECKRUN_AUTOLINT_DIR"; then
+    _lint_typos "$file" "$_filedir" || rc=$?
+  fi
 
   # Schema validation is policy-driven rather than extension-owned. Run it
   # once near the top so editor, hook, and CLI callers all share the same
   # public-schema checks for dotfile-specific config names.
-  _lint_schema "$file" || rc=$?
+  if ! _ignored_for schema "$file" "$CHECKRUN_AUTOLINT_DIR"; then
+    _lint_schema "$file" || rc=$?
+  fi
 
   # Basename dispatch for files where the name — not extension — indicates
   # the language (Dockerfiles, Starlark build files). Runs before extension

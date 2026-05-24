@@ -140,7 +140,7 @@ _format_one() {
   # Normalizing before ignore/config checks keeps hook calls, editor
   # calls, and manual relative invocations on the same policy path.
   file=$(_abs_path "$file") || return 0
-  _ignored "$file" "$CHECKRUN_AUTOFORMAT_DIR/ignore" && return 0
+  _ignored_for format "$file" "$CHECKRUN_AUTOFORMAT_DIR" && return 0
 
   _filedir=$(dirname "$file")
   ext="${file##*.}"

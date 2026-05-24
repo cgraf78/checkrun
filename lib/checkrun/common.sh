@@ -281,16 +281,9 @@ _walk_config_with_key() {
   return 1
 }
 
-# Check whether a file is listed in the user's ignore file. Returns 0
-# (ignored) if any non-blank non-comment line in the ignore file is a
-# bash glob pattern that matches the file path. Returns 1 otherwise
-# (including when the ignore file doesn't exist).
-#
-# Both autoformat and autolint call this at the top of dispatch so the
-# decision applies to formatting and linting uniformly. The default
-# location is shared: `$CHECKRUN_AUTOFORMAT_DIR/ignore` on the format side,
-# `$CHECKRUN_AUTOLINT_DIR/ignore` on the lint side. Both default to
-# `~/.config/autoformat/ignore` unless overridden for tests.
+# Check whether a file is listed in an ignore file. Returns 0 (ignored) if any
+# non-blank non-comment line is a bash glob pattern that matches the file path.
+# Returns 1 otherwise, including when the ignore file doesn't exist.
 #
 # Pattern semantics: plain bash globs — `*`, `?`, `[...]` — matched
 # against the absolute file path. No `**`, no negations, no
@@ -307,4 +300,24 @@ _ignored() {
     [[ "$file" == $pattern ]] && return 0
   done <"$ignorefile"
   return 1
+}
+
+# Phase-specific ignore files let policy say "do not format" or "do not
+# spellcheck" without accidentally suppressing schema validation. The legacy
+# `ignore` file remains an all-phase skip for compatibility with existing
+# installs and test fixtures.
+_ignored_for() {
+  local phase="$1" file="$2" config_dir="$3" phase_file
+
+  _ignored "$file" "$config_dir/ignore" && return 0
+
+  case "$phase" in
+    format) phase_file="format-ignore" ;;
+    lint) phase_file="lint-ignore" ;;
+    spell) phase_file="spell-ignore" ;;
+    schema) phase_file="schema-ignore" ;;
+    *) phase_file="$phase-ignore" ;;
+  esac
+
+  _ignored "$file" "$config_dir/$phase_file"
 }

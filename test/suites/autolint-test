@@ -1972,6 +1972,86 @@ rc=$?
 set -e
 _assert_exit "ignore: relative non-ignored path still lints" 1 "$rc"
 
+_phase_ign_dir=$(_tmpdir)
+_phase_ign_tgt=$(_tmpdir)
+_phase_ign_bin=$(_mock_bin)
+cat >"$_phase_ign_bin/yq" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_phase_ign_bin/typos" <<'EOF'
+#!/usr/bin/env bash
+echo "typos ran for ${*: -1}"
+exit 1
+EOF
+chmod +x "$_phase_ign_bin/yq" "$_phase_ign_bin/typos"
+cat >"$_phase_ign_tgt/schema-only.json" <<'EOF'
+{ "enabled": "yes" }
+EOF
+cat >"$_phase_ign_tgt/schema-skipped.json" <<'EOF'
+{ "enabled": "yes" }
+EOF
+cat >"$_phase_ign_tgt/all-lint-skipped.json" <<'EOF'
+{ "enabled": "yes" }
+EOF
+cat >"$_phase_ign_dir/spell-ignore" <<'EOF'
+*/schema-only.json
+*/schema-skipped.json
+*/all-lint-skipped.json
+EOF
+cat >"$_phase_ign_dir/schema-ignore" <<'EOF'
+*/schema-skipped.json
+EOF
+cat >"$_phase_ign_dir/lint-ignore" <<'EOF'
+*/all-lint-skipped.json
+EOF
+_phase_schema_validator=$_phase_ign_tgt/schema-validator
+cat >"$_phase_schema_validator" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --json)
+    shift
+    printf '{"path":"%s","line":1,"col":1,"severity":"error","message":"schema failed","source":"json-schema"}\n' "$1"
+    ;;
+  *)
+    echo "schema failed: $1"
+    ;;
+esac
+exit 1
+EOF
+chmod +x "$_phase_schema_validator"
+
+set +e
+output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" \
+  CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
+  CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
+  "$AUTOLINT" "$_phase_ign_tgt/schema-only.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "spell-ignore: schema validation still runs" 1 "$rc"
+_assert_contains "spell-ignore: schema diagnostic is visible" "schema failed" "$output"
+_assert_not_contains "spell-ignore: typo checker is skipped" "typos ran" "$output"
+
+set +e
+output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" \
+  CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
+  CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
+  "$AUTOLINT" "$_phase_ign_tgt/schema-skipped.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "schema-ignore: schema and spell phases can both be skipped" 0 "$rc"
+_assert_eq "schema-ignore: no phase output when both are skipped" "" "$output"
+
+set +e
+output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" \
+  CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
+  CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
+  "$AUTOLINT" "$_phase_ign_tgt/all-lint-skipped.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "lint-ignore: skips every lint phase" 0 "$rc"
+_assert_eq "lint-ignore: emits no output" "" "$output"
+
 # ---------------------------------------------------------------------------
 # Tests: no-op for missing/empty input
 # ---------------------------------------------------------------------------

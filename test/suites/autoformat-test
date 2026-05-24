@@ -1085,6 +1085,16 @@ EOF
 CHECKRUN_AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/keepme.py"
 _assert_contains "ignore: non-match still formats" "x = 1" "$(cat "$_ign_py_dir/keepme.py")"
 
+cat >"$_ign_dir/format-ignore" <<'EOF'
+*/format-only.py
+EOF
+cat >"$_ign_py_dir/format-only.py" <<'EOF'
+x=1
+EOF
+CHECKRUN_AUTOFORMAT_DIR="$_ign_dir" "$AUTOFORMAT" "$_ign_py_dir/format-only.py"
+_assert_eq "format-ignore: phase-specific file skips formatting" \
+  "x=1" "$(cat "$_ign_py_dir/format-only.py")"
+
 # Missing ignore file → scripts proceed normally.
 cat >"$_ign_py_dir/plain.py" <<'EOF'
 x=1
