@@ -1984,7 +1984,12 @@ cat >"$_phase_ign_bin/typos" <<'EOF'
 echo "typos ran for ${*: -1}"
 exit 1
 EOF
-chmod +x "$_phase_ign_bin/yq" "$_phase_ign_bin/typos"
+cat >"$_phase_ign_bin/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+echo "SC2154 backend linter ran"
+exit 1
+EOF
+chmod +x "$_phase_ign_bin/yq" "$_phase_ign_bin/typos" "$_phase_ign_bin/shellcheck"
 cat >"$_phase_ign_tgt/schema-only.json" <<'EOF'
 { "enabled": "yes" }
 EOF
@@ -1993,6 +1998,10 @@ cat >"$_phase_ign_tgt/schema-skipped.json" <<'EOF'
 EOF
 cat >"$_phase_ign_tgt/all-lint-skipped.json" <<'EOF'
 { "enabled": "yes" }
+EOF
+cat >"$_phase_ign_tgt/tool-skipped.sh" <<'EOF'
+#!/usr/bin/env bash
+echo $undefined
 EOF
 cat >"$_phase_ign_dir/spell-ignore" <<'EOF'
 */schema-only.json
@@ -2004,6 +2013,9 @@ cat >"$_phase_ign_dir/schema-ignore" <<'EOF'
 EOF
 cat >"$_phase_ign_dir/lint-ignore" <<'EOF'
 */all-lint-skipped.json
+EOF
+cat >"$_phase_ign_dir/tool-ignore" <<'EOF'
+*/tool-skipped.sh
 EOF
 _phase_schema_validator=$_phase_ign_tgt/schema-validator
 cat >"$_phase_schema_validator" <<'EOF'
@@ -2051,6 +2063,16 @@ rc=$?
 set -e
 _assert_exit "lint-ignore: skips every lint phase" 0 "$rc"
 _assert_eq "lint-ignore: emits no output" "" "$output"
+
+set +e
+output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" CHECKRUN_AUTOLINT_JOBS=1 \
+  PATH="$_phase_ign_bin:/usr/bin:/bin" \
+  "$AUTOLINT" "$_phase_ign_tgt/tool-skipped.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "tool-ignore: skips backend linter only" 1 "$rc"
+_assert_contains "tool-ignore: spelling phase still runs" "typos ran" "$output"
+_assert_not_contains "tool-ignore: shellcheck is skipped" "SC2154" "$output"
 
 # ---------------------------------------------------------------------------
 # Tests: no-op for missing/empty input

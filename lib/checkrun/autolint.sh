@@ -103,6 +103,11 @@ _lint_one() {
     _lint_schema "$file" || rc=$?
   fi
 
+  # Backend/tool linting is the language- or filetype-specific phase below
+  # (ruff, biome, rumdl, shellcheck, etc.). Keep it skippable independently so
+  # generated or tool-owned files can still receive schema/spelling checks.
+  _ignored_for tool "$file" "$CHECKRUN_AUTOLINT_DIR" && return "$rc"
+
   # Basename dispatch for files where the name — not extension — indicates
   # the language (Dockerfiles, Starlark build files). Runs before extension
   # dispatch and exits on match so neither path can fire for the same file.

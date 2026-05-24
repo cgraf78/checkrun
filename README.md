@@ -92,9 +92,10 @@ formatting and linting.
 
 Ignore policy can be phase-specific. `ignore` remains the backward-compatible
 all-phase skip. Use `format-ignore` to skip formatting only, `lint-ignore` to
-skip every lint phase, `spell-ignore` to skip only `typos`, and
-`schema-ignore` to skip only schema validation. This lets vendored config data
-avoid formatting or spelling churn while still receiving structural validation.
+skip every lint phase, `spell-ignore` to skip only `typos`, `schema-ignore` to
+skip only schema validation, and `tool-ignore` to skip only the language- or
+filetype-specific backend linter. This lets vendored config data avoid
+formatting or spelling churn while still receiving structural validation.
 
 Schema association policy defaults to `~/.config/checkrun/associations.json`.
 Set `CHECKRUN_SCHEMA_ASSOCIATIONS` to point at a different policy file for a

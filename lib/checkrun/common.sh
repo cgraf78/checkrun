@@ -302,10 +302,10 @@ _ignored() {
   return 1
 }
 
-# Phase-specific ignore files let policy say "do not format" or "do not
-# spellcheck" without accidentally suppressing schema validation. The legacy
-# `ignore` file remains an all-phase skip for compatibility with existing
-# installs and test fixtures.
+# Phase-specific ignore files let policy say "do not format", "do not
+# spellcheck", or "do not run the language/backend linter" without accidentally
+# suppressing schema validation. The legacy `ignore` file remains an all-phase
+# skip for compatibility with existing installs and test fixtures.
 _ignored_for() {
   local phase="$1" file="$2" config_dir="$3" phase_file
 
@@ -316,6 +316,7 @@ _ignored_for() {
     lint) phase_file="lint-ignore" ;;
     spell) phase_file="spell-ignore" ;;
     schema) phase_file="schema-ignore" ;;
+    tool) phase_file="tool-ignore" ;;
     *) phase_file="$phase-ignore" ;;
   esac
 
