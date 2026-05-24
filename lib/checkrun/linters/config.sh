@@ -120,7 +120,7 @@ _lint_taplo() {
   if [ "$json" -eq 1 ]; then
     # taplo has no structured output. Synthesize a minimal file-level error
     # when it reports non-zero so JSON mode still surfaces broken files.
-    err=$(RUST_LOG=error taplo check "${args[@]}" "$file" 2>&1 1>/dev/null)
+    err=$(RUST_LOG=error taplo check ${args[@]+"${args[@]}"} "$file" 2>&1 1>/dev/null)
     tool_rc=$?
     if [ "$tool_rc" -ne 0 ]; then
       msg=${err:-"taplo check failed"}
@@ -128,7 +128,7 @@ _lint_taplo() {
       rc=$tool_rc
     fi
   else
-    RUST_LOG=error taplo check "${args[@]}" "$file" || rc=$?
+    RUST_LOG=error taplo check ${args[@]+"${args[@]}"} "$file" || rc=$?
   fi
 
   return "$rc"

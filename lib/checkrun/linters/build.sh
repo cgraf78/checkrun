@@ -72,7 +72,7 @@ _lint_checkmake() {
 
   if [ "$json" -eq 1 ]; then
     local out tool_rc
-    out=$(cd "$dir" && checkmake --output json "${args[@]}" "$file" 2>/dev/null)
+    out=$(cd "$dir" && checkmake --output json ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" '.[]? | {
@@ -88,7 +88,7 @@ _lint_checkmake() {
     return "$tool_rc"
   fi
 
-  (cd "$dir" && checkmake "${args[@]}" "$file")
+  (cd "$dir" && checkmake ${args[@]+"${args[@]}"} "$file")
 }
 
 _lint_cmake() {
@@ -97,7 +97,7 @@ _lint_cmake() {
 
   cfg=$(_find_cmake_config "$dir" "$CHECKRUN_AUTOLINT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config-files "$cfg")
-  _lint_text_command "cmake-lint" "$file" cmake-lint "${args[@]}" "$file"
+  _lint_text_command "cmake-lint" "$file" cmake-lint ${args[@]+"${args[@]}"} "$file"
 }
 
 _lint_dockerfile() {
@@ -113,7 +113,7 @@ _lint_dockerfile() {
   fi
 
   if [ "$json" -eq 1 ]; then
-    out=$(hadolint --format=json "${args[@]}" "$file" 2>/dev/null)
+    out=$(hadolint --format=json ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ] && [ "$out" != "[]" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
@@ -129,7 +129,7 @@ _lint_dockerfile() {
     fi
     [ "$tool_rc" -ne 0 ] && rc=$tool_rc
   else
-    hadolint "${args[@]}" "$file" || rc=$?
+    hadolint ${args[@]+"${args[@]}"} "$file" || rc=$?
   fi
 
   return "$rc"

@@ -22,7 +22,7 @@ _lint_biome() {
   fi
   if [ "$json" -eq 1 ]; then
     local out tool_rc
-    out=$(biome lint --reporter=json "${args[@]}" "$file" 2>/dev/null)
+    out=$(biome lint --reporter=json ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
@@ -41,9 +41,9 @@ _lint_biome() {
     return "$tool_rc"
   fi
   if [ "$fix" -eq 1 ]; then
-    biome lint --write "${args[@]}" "$file"
+    biome lint --write ${args[@]+"${args[@]}"} "$file"
   else
-    biome lint "${args[@]}" "$file"
+    biome lint ${args[@]+"${args[@]}"} "$file"
   fi
 }
 

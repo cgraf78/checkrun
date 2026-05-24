@@ -21,7 +21,7 @@ _lint_typos() {
 
   if [ "$json" -eq 1 ]; then
     local out tool_rc
-    out=$(typos --format json "${args[@]}" "$file" 2>/dev/null)
+    out=$(typos --format json ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" '
@@ -49,9 +49,9 @@ _lint_typos() {
   fi
 
   if [ "$fix" -eq 1 ]; then
-    typos --write-changes "${args[@]}" "$file"
+    typos --write-changes ${args[@]+"${args[@]}"} "$file"
   else
-    typos "${args[@]}" "$file"
+    typos ${args[@]+"${args[@]}"} "$file"
   fi
 }
 
@@ -71,7 +71,7 @@ _lint_rumdl() {
   fi
 
   if [ "$json" -eq 1 ]; then
-    out=$(rumdl check --output json "${args[@]}" "$file" 2>/dev/null)
+    out=$(rumdl check --output json ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
@@ -87,9 +87,9 @@ _lint_rumdl() {
     fi
     [ "$tool_rc" -ne 0 ] && rc=$tool_rc
   elif [ "$fix" -eq 1 ]; then
-    rumdl check --fix "${args[@]}" "$file" || rc=$?
+    rumdl check --fix ${args[@]+"${args[@]}"} "$file" || rc=$?
   else
-    rumdl check --quiet "${args[@]}" "$file" || rc=$?
+    rumdl check --quiet ${args[@]+"${args[@]}"} "$file" || rc=$?
   fi
 
   return "$rc"

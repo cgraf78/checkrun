@@ -31,7 +31,7 @@ _lint_sh() {
   fi
   if [ "$json" -eq 1 ]; then
     local out tool_rc
-    out=$(shellcheck -f json1 "${args[@]}" "$file" 2>/dev/null)
+    out=$(shellcheck -f json1 ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
@@ -49,7 +49,7 @@ _lint_sh() {
     fi
     return "$tool_rc"
   fi
-  shellcheck "${args[@]}" "$file"
+  shellcheck ${args[@]+"${args[@]}"} "$file"
 }
 
 _lint_zsh() {

@@ -90,7 +90,7 @@ _format_sh() {
     [ "$v_sci" = "true" ] && args+=(-ci)
   fi
 
-  _run_fmt shfmt "${args[@]}" -w "$file"
+  _run_fmt shfmt ${args[@]+"${args[@]}"} -w "$file"
 }
 
 _format_cmake() {
@@ -99,7 +99,7 @@ _format_cmake() {
 
   cfg=$(_find_cmake_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config-files "$cfg")
-  _run_fmt cmake-format -i "${args[@]}" "$file"
+  _run_fmt cmake-format -i ${args[@]+"${args[@]}"} "$file"
 }
 
 _format_ruby() {
@@ -112,7 +112,7 @@ _format_ruby() {
   # autocorrect can rewrite code semantics; layout-only keeps save-time
   # formatting predictable while autolint handles broader diagnostics.
   _run_fmt rubocop --autocorrect --only Layout --format quiet \
-    "${args[@]}" "$file"
+    ${args[@]+"${args[@]}"} "$file"
 }
 
 _format_php() {
@@ -121,7 +121,7 @@ _format_php() {
 
   cfg=$(_find_php_cs_fixer_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
   [ -n "$cfg" ] && args=(--config "$cfg")
-  _run_fmt php-cs-fixer fix --quiet --using-cache=no "${args[@]}" "$file"
+  _run_fmt php-cs-fixer fix --quiet --using-cache=no ${args[@]+"${args[@]}"} "$file"
 }
 
 _format_java() {
@@ -197,12 +197,12 @@ _format_one() {
           [ -f "$CHECKRUN_AUTOFORMAT_DIR/ruff.toml" ]; then
           args=(--config "$CHECKRUN_AUTOFORMAT_DIR/ruff.toml")
         fi
-        _run_fmt ruff format --quiet "${args[@]}" "$file"
+        _run_fmt ruff format --quiet ${args[@]+"${args[@]}"} "$file"
         # Also sort imports (`I` rule) as a format-adjacent fix. The
         # full lint rule set runs via autolint --fix; scoping here to
         # imports-only keeps autoformat's behavior deterministic and
         # unsurprising on save.
-        _run_fmt ruff check --quiet --fix --select=I "${args[@]}" "$file"
+        _run_fmt ruff check --quiet --fix --select=I ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     go)
@@ -237,7 +237,7 @@ _format_one() {
           [ -f "$CHECKRUN_AUTOFORMAT_DIR/clang-format" ]; then
           args=(-style="file:$CHECKRUN_AUTOFORMAT_DIR/clang-format")
         fi
-        _run_fmt clang-format -i "${args[@]}" "$file"
+        _run_fmt clang-format -i ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     lua)
@@ -252,7 +252,7 @@ _format_one() {
           [ -f "$CHECKRUN_AUTOFORMAT_DIR/stylua.toml" ]; then
           args=(--config-path "$CHECKRUN_AUTOFORMAT_DIR/stylua.toml")
         fi
-        _run_fmt stylua "${args[@]}" "$file"
+        _run_fmt stylua ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     rs)
@@ -272,7 +272,7 @@ _format_one() {
           [ -f "$CHECKRUN_AUTOFORMAT_DIR/rustfmt.toml" ]; then
           args+=(--config-path "$CHECKRUN_AUTOFORMAT_DIR/rustfmt.toml")
         fi
-        _run_fmt rustfmt "${args[@]}" "$file"
+        _run_fmt rustfmt ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     rb)
@@ -295,7 +295,7 @@ _format_one() {
         elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/taplo.toml" ]; then
           args=(--config "$CHECKRUN_AUTOFORMAT_DIR/taplo.toml")
         fi
-        _run_fmt taplo fmt "${args[@]}" "$file"
+        _run_fmt taplo fmt ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     css | js | jsx | json | jsonc | ts | tsx)
@@ -325,7 +325,7 @@ _format_one() {
         # autoformat-on-save never applies a behavior-changing lint fix
         # behind the user's back.
         _run_fmt biome check --write --linter-enabled=false \
-          "${args[@]}" "$file"
+          ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     htm | html)
@@ -353,7 +353,7 @@ _format_one() {
         elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/yamlfmt.yaml" ]; then
           args=(-conf "$CHECKRUN_AUTOFORMAT_DIR/yamlfmt.yaml")
         fi
-        _run_fmt yamlfmt "${args[@]}" "$file"
+        _run_fmt yamlfmt ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     md)
@@ -372,7 +372,7 @@ _format_one() {
           [ -f "$CHECKRUN_AUTOFORMAT_DIR/rumdl.toml" ]; then
           args=(--config "$CHECKRUN_AUTOFORMAT_DIR/rumdl.toml")
         fi
-        _run_fmt rumdl check --fix "${args[@]}" "$file"
+        _run_fmt rumdl check --fix ${args[@]+"${args[@]}"} "$file"
       fi
       ;;
     *)

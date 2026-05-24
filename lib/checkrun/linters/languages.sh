@@ -13,9 +13,9 @@ _lint_ruby() {
   [ -n "$cfg" ] && args=(--config "$cfg")
   if [ "$fix" -eq 1 ]; then
     _lint_text_command "rubocop" "$file" rubocop --autocorrect \
-      "${args[@]}" "$file"
+      ${args[@]+"${args[@]}"} "$file"
   else
-    _lint_text_command "rubocop" "$file" rubocop "${args[@]}" "$file"
+    _lint_text_command "rubocop" "$file" rubocop ${args[@]+"${args[@]}"} "$file"
   fi
 }
 
@@ -127,7 +127,7 @@ _lint_go() {
   gc_dir=$(dirname "$file")
   gc_base=$(basename "$file")
   if [ "$json" -eq 1 ]; then
-    out=$(cd "$gc_dir" && golangci-lint run --output-format=json "${args[@]}" ./... 2>/dev/null)
+    out=$(cd "$gc_dir" && golangci-lint run --output-format=json ${args[@]+"${args[@]}"} ./... 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" --arg base "$gc_base" "$_JQ_SEVLIB"'
@@ -143,9 +143,9 @@ _lint_go() {
     fi
     [ "$tool_rc" -ne 0 ] && rc=$tool_rc
   elif [ "$fix" -eq 1 ]; then
-    (cd "$gc_dir" && golangci-lint run --fix "${args[@]}" ./...) || rc=$?
+    (cd "$gc_dir" && golangci-lint run --fix ${args[@]+"${args[@]}"} ./...) || rc=$?
   else
-    (cd "$gc_dir" && golangci-lint run "${args[@]}" ./...) || rc=$?
+    (cd "$gc_dir" && golangci-lint run ${args[@]+"${args[@]}"} ./...) || rc=$?
   fi
 
   return "$rc"
@@ -171,7 +171,7 @@ _lint_ruff() {
   fi
 
   if [ "$json" -eq 1 ]; then
-    out=$(ruff check --output-format=json-lines "${args[@]}" "$file" 2>/dev/null)
+    out=$(ruff check --output-format=json-lines ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
@@ -189,9 +189,9 @@ _lint_ruff() {
     fi
     [ "$tool_rc" -ne 0 ] && rc=$tool_rc
   elif [ "$fix" -eq 1 ]; then
-    ruff check --fix "${args[@]}" "$file" || rc=$?
+    ruff check --fix ${args[@]+"${args[@]}"} "$file" || rc=$?
   else
-    ruff check "${args[@]}" "$file" || rc=$?
+    ruff check ${args[@]+"${args[@]}"} "$file" || rc=$?
   fi
 
   return "$rc"
@@ -212,7 +212,7 @@ _lint_selene() {
   fi
 
   if [ "$json" -eq 1 ]; then
-    out=$(selene --display-style=json2 "${args[@]}" "$file" 2>/dev/null)
+    out=$(selene --display-style=json2 ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
       # selene emits Diagnostic and Summary records; keep diagnostics and shift
@@ -232,7 +232,7 @@ _lint_selene() {
     fi
     [ "$tool_rc" -ne 0 ] && rc=$tool_rc
   else
-    selene "${args[@]}" "$file" || rc=$?
+    selene ${args[@]+"${args[@]}"} "$file" || rc=$?
   fi
 
   return "$rc"
