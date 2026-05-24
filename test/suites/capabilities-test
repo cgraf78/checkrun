@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# capabilities-test — verify Checkrun capability metadata stays aligned with
+# the dispatch contract that editor and explain integrations consume.
+#
+# Usage: capabilities-test
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "capabilities-test"
+
+CAPABILITIES="$CHECKRUN_REPO_ROOT/share/checkrun/capabilities.json"
+
+echo "=== checkrun: capability metadata ==="
+
+python3 - "$CAPABILITIES" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as file:
+    data = json.load(file)
+
+selectors = {item["id"]: item for item in data["selectors"]}
+
+
+def tools(selector: str, phase: str) -> list[str]:
+    return [item["tool"] for item in selectors[selector].get(phase, [])]
+
+
+def configs(selector: str, phase: str, tool: str) -> list[str]:
+    for item in selectors[selector].get(phase, []):
+        if item["tool"] == tool:
+            return item.get("configs", [])
+    raise AssertionError(f"missing {selector}.{phase}.{tool}")
+
+
+assert tools("java", "lint") == ["google-java-format"]
+assert ".golangci.toml" in configs("go", "lint", "golangci-lint")
+assert ".golangci.json" in configs("go", "lint", "golangci-lint")
+assert ".typos.toml" in configs("markdown", "lint", "typos")
+
+yaml_lint = selectors["yaml"]["lint"]
+assert [item["tool"] for item in yaml_lint] == ["actionlint", "zizmor"]
+for item in yaml_lint:
+    assert item["pathPatterns"] == ["*/.github/workflows/*.yml", "*/.github/workflows/*.yaml"]
+PY
+_assert_exit "capabilities: metadata matches dispatch contract" 0 "$?"
+
+_test_summary

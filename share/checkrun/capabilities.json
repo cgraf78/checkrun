@@ -144,6 +144,8 @@
           "configs": [
             ".golangci.yml",
             ".golangci.yaml",
+            ".golangci.toml",
+            ".golangci.json",
             "golangci-lint.yml",
             "golangci-lint.yaml",
             "$CHECKRUN_AUTOLINT_DIR/golangci-lint.yml"
@@ -193,7 +195,10 @@
         }
       ],
       "lint": [
-        { "tool": "typos", "configs": ["typos.toml", "$CHECKRUN_AUTOLINT_DIR/typos.toml"] },
+        {
+          "tool": "typos",
+          "configs": [".typos.toml", "typos.toml", "$CHECKRUN_AUTOLINT_DIR/typos.toml"]
+        },
         {
           "tool": "rumdl",
           "configs": [
@@ -301,7 +306,7 @@
       "filetypes": ["java"],
       "extensions": ["java"],
       "format": [{ "tool": "google-java-format" }],
-      "lint": [{ "tool": "javac" }]
+      "lint": [{ "tool": "google-java-format" }]
     },
     {
       "id": "ruby",

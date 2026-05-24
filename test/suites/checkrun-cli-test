@@ -67,7 +67,14 @@ cat >"$_policy" <<'JSON'
   ]
 }
 JSON
-touch "$_td/keep.py" "$_td/skip.py" "$_td/biome.json" "$_td/.config/example/settings.json"
+mkdir -p "$_td/.github/workflows"
+touch \
+  "$_td/keep.py" \
+  "$_td/skip.py" \
+  "$_td/biome.json" \
+  "$_td/plain.yaml" \
+  "$_td/.github/workflows/build.yml" \
+  "$_td/.config/example/settings.json"
 
 output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/keep.py" 2>&1)
 rc=$?
@@ -111,6 +118,33 @@ assert item["lint"]["phases"]["tool"]["ignored"] is True
 assert item["lint"]["tools"] == []
 '
 _assert_exit "explain: reports backend tool ignore separately" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/plain.yaml" 2>&1)
+rc=$?
+_assert_exit "explain: generic yaml exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)[0]
+assert item["filetype"] == "yaml"
+assert [tool["tool"] for tool in item["format"]["tools"]] == ["yamlfmt"]
+assert item["lint"]["tools"] == []
+'
+_assert_exit "explain: generic yaml omits workflow-only linters" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/.github/workflows/build.yml" 2>&1)
+rc=$?
+_assert_exit "explain: workflow yaml exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)[0]
+assert item["filetype"] == "yaml"
+assert [tool["tool"] for tool in item["lint"]["tools"]] == ["actionlint", "zizmor"]
+'
+_assert_exit "explain: workflow yaml includes workflow-only linters" 0 "$?"
 
 output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$CHECKRUN" explain --json "$_td/.config/example/settings.json" 2>&1)
 rc=$?

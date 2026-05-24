@@ -93,6 +93,23 @@ def path_matches(path: Path, selector: dict[str, Any]) -> bool:
     return any(fnmatch.fnmatchcase(name, pattern) for pattern in selector.get("patterns", []))
 
 
+def path_pattern_matches(path: Path, patterns: list[str]) -> bool:
+    if not patterns:
+        return True
+
+    candidates = {path.as_posix(), path.name}
+    try:
+        candidates.add(path.relative_to(Path.cwd()).as_posix())
+    except ValueError:
+        pass
+
+    return any(
+        fnmatch.fnmatchcase(candidate, pattern)
+        for candidate in candidates
+        for pattern in patterns
+    )
+
+
 def infer_filetype(path: Path, capabilities: dict[str, Any]) -> str | None:
     name = path.name
     ext = extension(path)
@@ -158,7 +175,11 @@ def selector_tools(path: Path, capabilities: dict[str, Any], phase: str) -> list
     tools: list[dict[str, Any]] = []
     for selector in capabilities.get("selectors", []):
         if path_matches(path, selector):
-            tools.extend(selector.get(phase, []))
+            tools.extend(
+                tool
+                for tool in selector.get(phase, [])
+                if path_pattern_matches(path, tool.get("pathPatterns", []))
+            )
     return tools
 
 
