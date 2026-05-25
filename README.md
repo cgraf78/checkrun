@@ -61,8 +61,12 @@ own toolchain through the host environment or integration layer.
 
 - `bin/checkrun`, `bin/autoformat`, and `bin/autolint` are the PATH-visible
   CLIs.
-- `share/checkrun/capabilities.json` is the shared capability metadata used by
-  `checkrun capabilities`, `checkrun explain`, and editor integrations.
+- `share/checkrun/registry.json` is the shared tooling registry. It drives
+  filetype inference, formatter/linter selection, `checkrun plan`,
+  `checkrun explain`, and the derived `checkrun capabilities --json` output.
+- `share/checkrun/schemas/registry.schema.json` validates the registry shape;
+  `lib/checkrun/registry.py` enforces cross-object invariants that JSON Schema
+  cannot express cleanly.
 - `lib/checkrun/schemas/schema_policy.py` is the schema association API shared
   by editors and linting. Associations may set `"dependency": "owner/repo"` and
   a repo-relative `"schema"` path when a schema is public API owned by a
@@ -80,6 +84,7 @@ dependency manager's contract:
 ```bash
 . "$(shdeps dep-file cgraf78/checkrun share/checkrun/shell.sh)"
 python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --nvim
+checkrun capabilities --json
 ```
 
 ## Editor And Hook Flow
