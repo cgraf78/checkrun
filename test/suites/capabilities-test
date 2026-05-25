@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# capabilities-test — verify Checkrun capability metadata stays aligned with
-# the dispatch contract that editor and explain integrations consume.
+# capabilities-test — verify derived Checkrun capabilities stay aligned with
+# the registry contract that editor integrations consume.
 #
 # Usage: capabilities-test
 
@@ -15,41 +15,55 @@ CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
 
 _require_compatible_libc "capabilities-test"
 
-CAPABILITIES="$CHECKRUN_REPO_ROOT/share/checkrun/capabilities.json"
+CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
 
 echo "=== checkrun: capability metadata ==="
 
-python3 - "$CAPABILITIES" <<'PY'
+output=$("$CHECKRUN" capabilities --json 2>&1)
+rc=$?
+_assert_exit "capabilities: command exits 0" 0 "$rc"
+
+printf '%s\n' "$output" | python3 -c '
 import json
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as file:
-    data = json.load(file)
+data = json.load(sys.stdin)
+filetypes = data["filetypes"]
 
+assert data["version"] == 2
+assert "sley" not in data
+assert "python" in filetypes["format"]
+assert "systemd" in filetypes["lint"]
+assert "text" in filetypes["lint"]
+assert "c" in filetypes["format"]
+assert "c" in filetypes["lint"]
+assert filetypes["custom"]["filename"]["Dockerfile"] == "dockerfile"
+assert filetypes["custom"]["filename"]["CMakeLists.txt"] == "cmake"
+assert filetypes["custom"]["extension"]["service"] == "systemd"
+
+patterns = filetypes["custom"]["patterns"]
+assert any(item["pattern"] == "agent-hook-*" and item["filetype"] == "sh" for item in patterns)
+assert patterns == sorted(patterns, key=lambda item: item["pattern"])
+assert filetypes["format"] == sorted(filetypes["format"])
+assert filetypes["lint"] == sorted(filetypes["lint"])
+'
+_assert_exit "capabilities: emits generic registry-derived metadata" 0 "$?"
+
+output=$("$CHECKRUN" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: command exits 0" 0 "$rc"
+
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
 selectors = {item["id"]: item for item in data["selectors"]}
-
-
-def tools(selector: str, phase: str) -> list[str]:
-    return [item["tool"] for item in selectors[selector].get(phase, [])]
-
-
-def configs(selector: str, phase: str, tool: str) -> list[str]:
-    for item in selectors[selector].get(phase, []):
-        if item["tool"] == tool:
-            return item.get("configs", [])
-    raise AssertionError(f"missing {selector}.{phase}.{tool}")
-
-
-assert tools("java", "lint") == ["google-java-format"]
-assert ".golangci.toml" in configs("go", "lint", "golangci-lint")
-assert ".golangci.json" in configs("go", "lint", "golangci-lint")
-assert ".typos.toml" in configs("markdown", "lint", "typos")
-
-yaml_lint = selectors["yaml"]["lint"]
-assert [item["tool"] for item in yaml_lint] == ["actionlint", "zizmor"]
-for item in yaml_lint:
-    assert item["pathPatterns"] == ["*/.github/workflows/*.yml", "*/.github/workflows/*.yaml"]
-PY
-_assert_exit "capabilities: metadata matches dispatch contract" 0 "$?"
+assert data["version"] == 1
+assert "sley" not in data
+assert selectors["c-family"].get("lint", []) == []
+assert [item["tool"] for item in selectors["yaml"]["lint"]] == ["actionlint", "zizmor"]
+'
+_assert_exit "registry: emits raw registry data" 0 "$?"
 
 _test_summary

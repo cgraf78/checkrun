@@ -31,8 +31,11 @@ _usage() {
 Usage: checkrun COMMAND [ARGS...]
 
 Commands:
+  registry
+            print raw Checkrun registry data
   capabilities
             print Checkrun capability metadata
+  plan      emit formatter/linter execution plans
   explain   explain formatter/linter/schema policy for files
   format    run autoformat compatibility entry point
   lint      run autolint compatibility entry point
@@ -42,18 +45,35 @@ EOF
 
 cmd="${1:-}"
 case "$cmd" in
+  registry)
+    shift
+    case "${1:-}" in
+      --json)
+        shift
+        exec "$_bin_dir/../lib/checkrun/registry.py" registry --json "$@"
+        ;;
+      *)
+        printf 'checkrun registry: expected --json\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
   capabilities)
     shift
     case "${1:-}" in
       --json | "")
         [ "${1:-}" = "--json" ] && shift
-        exec "$_bin_dir/../lib/checkrun/explain.py" --capabilities "$@"
+        exec "$_bin_dir/../lib/checkrun/registry.py" capabilities --json "$@"
         ;;
       *)
         printf 'checkrun capabilities: unknown option: %s\n' "$1" >&2
         exit 2
         ;;
     esac
+    ;;
+  plan)
+    shift
+    exec "$_bin_dir/../lib/checkrun/registry.py" plan "$@"
     ;;
   explain)
     shift

@@ -22,6 +22,8 @@ output=$("$CHECKRUN" --help 2>&1)
 rc=$?
 _assert_exit "help: --help exits 0" 0 "$rc"
 _assert_contains "help: lists capabilities command" "capabilities" "$output"
+_assert_contains "help: lists registry command" "registry" "$output"
+_assert_contains "help: lists plan command" "plan" "$output"
 _assert_contains "help: lists explain command" "explain" "$output"
 
 echo "=== checkrun: capabilities ==="
@@ -34,12 +36,27 @@ import json
 import sys
 
 data = json.load(sys.stdin)
-assert data["version"] == 1
-assert "python" in data["sley"]["formatFiletypes"]
-assert "systemd" in data["sley"]["lintExtraFiletypes"]
-assert any(item["id"] == "web" for item in data["selectors"])
+assert data["version"] == 2
+assert "sley" not in data
+assert "python" in data["filetypes"]["format"]
+assert "systemd" in data["filetypes"]["lint"]
+assert data["filetypes"]["custom"]["filename"]["Dockerfile"] == "dockerfile"
 '
 _assert_exit "capabilities: emits supported filetype metadata" 0 "$?"
+
+output=$("$CHECKRUN" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: --json exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+assert data["version"] == 1
+assert "sley" not in data
+assert any(item["id"] == "web" for item in data["selectors"])
+'
+_assert_exit "registry: emits raw registry metadata" 0 "$?"
 
 echo "=== checkrun: explain ==="
 
