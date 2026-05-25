@@ -72,6 +72,7 @@ _run_fmt() {
 _format_sh() {
   local file="$1" dir="$2" lang="${3:-}" config_source="${4:-}" config_path="${5:-}"
   local args=() v_indent="" v_sci=""
+  command -v shfmt &>/dev/null || return 0
 
   [ -n "$lang" ] && args+=("-ln=$lang")
 
@@ -295,11 +296,15 @@ _format_dispatch() {
     superhtml-format) _format_superhtml "$file" "$dir" "$config_source" "$config_path" ;;
     taplo-format) _format_taplo "$file" "$dir" "$config_source" "$config_path" ;;
     yamlfmt) _format_yamlfmt "$file" "$dir" "$config_source" "$config_path" ;;
+    *)
+      echo "autoformat: unknown formatter adapter: $adapter" >&2
+      return 125
+      ;;
   esac
 }
 
 _format_one() {
-  local file="$1" plan row path filetype _phase adapter config_source config_path rc
+  local file="$1" plan_file path filetype _phase adapter config_source config_path rc dispatch_rc
 
   [ -z "$file" ] && return 0
 
@@ -307,26 +312,46 @@ _format_one() {
   # ignore files, and config-policy discovery are allowed to interact. Keeping
   # that work out of shell dispatch prevents the old metadata-vs-execution
   # drift from returning in a second table.
-  plan=$(_checkrun_registry shell-plan --phase format -- "$file")
+  plan_file=$(_checkrun_tempfile) || {
+    echo "autoformat: could not create registry plan temp file" >&2
+    return 1
+  }
+  _checkrun_registry shell-plan --phase format -- "$file" >"$plan_file"
   rc=$?
-  [ "$rc" -ne 0 ] && return "$rc"
+  if [ "$rc" -ne 0 ]; then
+    _checkrun_remove "$plan_file"
+    return "$rc"
+  fi
 
-  [ -n "$plan" ] || return 0
-  while IFS= read -r row || [ -n "$row" ]; do
-    IFS=$'\t' read -r path filetype _phase adapter config_source config_path <<EOF
-$row
-EOF
+  [ -s "$plan_file" ] || {
+    _checkrun_remove "$plan_file"
+    return 0
+  }
+  while IFS= read -r -d '' path &&
+    IFS= read -r -d '' filetype &&
+    IFS= read -r -d '' _phase &&
+    IFS= read -r -d '' adapter &&
+    IFS= read -r -d '' config_source &&
+    IFS= read -r -d '' config_path; do
     # Formatter failures are advisory by design: `_run_fmt` surfaces useful
-    # stderr, and the save hook continues with exit 0. Registry failures above
-    # are different and propagate because they mean Checkrun itself is invalid.
-    _format_dispatch "$adapter" "$path" "$filetype" "$config_source" "$config_path" || true
-  done <<<"$plan"
+    # stderr, and the save hook continues with exit 0. Unknown adapter ids are
+    # different from backend failures: they mean Checkrun's registry and shell
+    # boundary drifted. Use a private sentinel instead of 127 so a missing
+    # backend command cannot be mistaken for a broken registry.
+    _format_dispatch "$adapter" "$path" "$filetype" "$config_source" "$config_path"
+    dispatch_rc=$?
+    if [ "$dispatch_rc" -eq 125 ]; then
+      break
+    fi
+  done <"$plan_file"
 
+  _checkrun_remove "$plan_file"
+  [ "${dispatch_rc:-0}" -eq 125 ] && return "$dispatch_rc"
   return 0
 }
 
 _autoformat_main() {
-  local arg file
+  local arg file rc=0
 
   for arg in "$@"; do
     case "$arg" in
@@ -352,8 +377,8 @@ _autoformat_main() {
   fi
 
   for file in "$@"; do
-    _format_one "$file"
+    _format_one "$file" || rc=$?
   done
 
-  return 0
+  return "$rc"
 }

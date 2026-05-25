@@ -13,21 +13,25 @@ _shellcheck_lang_hint() {
 }
 
 _lint_sh() {
-  local file="$1" dir="$2" lang="${3:-}"
+  local file="$1" lang="${3:-}" config_source="${4:-}" config_path="${5:-}"
   local args=()
   command -v shellcheck &>/dev/null || return 0
   [ -n "$lang" ] && args+=(-s "$lang")
+
   # Apply the global shellcheckrc by translating its directives to CLI flags.
   # ShellCheck 0.9.0 (common on older Ubuntu/WSL) does not support --rcfile, and
   # ShellCheck does not discover this XDG-style fallback path itself.
-  if ! _has_config "$dir" ".shellcheckrc" &&
-    [ -f "$CHECKRUN_AUTOLINT_DIR/shellcheckrc" ]; then
+  #
+  # Project `.shellcheckrc` is still left to ShellCheck's native discovery, but
+  # the decision to suppress the fallback comes from the registry plan. That
+  # keeps `checkrun plan`, explain output, and execution on the same policy path.
+  if [ "$config_source" = "fallback" ] && [ -f "$config_path" ]; then
     local key val
     while IFS='=' read -r key val; do
       case "$key" in
         disable) args+=(-e "$val") ;;
       esac
-    done < <(grep -E '^[a-z-]+=' "$CHECKRUN_AUTOLINT_DIR/shellcheckrc")
+    done < <(grep -E '^[a-z-]+=' "$config_path")
   fi
   if [ "$json" -eq 1 ]; then
     local out tool_rc

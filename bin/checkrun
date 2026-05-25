@@ -25,6 +25,19 @@ _bin_dir=$(_script_dir "${BASH_SOURCE[0]}") || {
   echo "checkrun: cannot resolve executable path" >&2
   exit 2
 }
+CHECKRUN_LIB_DIR="$_bin_dir/../lib/checkrun"
+
+# shellcheck source=../lib/checkrun/common.sh
+. "$CHECKRUN_LIB_DIR/common.sh"
+
+_run_registry() {
+  local python
+  python=$(_checkrun_python) || {
+    echo "checkrun: python3 is required for registry planning" >&2
+    exit 127
+  }
+  exec "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"
+}
 
 _usage() {
   cat <<'EOF'
@@ -50,7 +63,7 @@ case "$cmd" in
     case "${1:-}" in
       --json)
         shift
-        exec "$_bin_dir/../lib/checkrun/registry.py" registry --json "$@"
+        _run_registry registry --json "$@"
         ;;
       *)
         printf 'checkrun registry: expected --json\n' >&2
@@ -63,7 +76,7 @@ case "$cmd" in
     case "${1:-}" in
       --json | "")
         [ "${1:-}" = "--json" ] && shift
-        exec "$_bin_dir/../lib/checkrun/registry.py" capabilities --json "$@"
+        _run_registry capabilities --json "$@"
         ;;
       *)
         printf 'checkrun capabilities: unknown option: %s\n' "$1" >&2
@@ -73,11 +86,11 @@ case "$cmd" in
     ;;
   plan)
     shift
-    exec "$_bin_dir/../lib/checkrun/registry.py" plan "$@"
+    _run_registry plan "$@"
     ;;
   explain)
     shift
-    exec "$_bin_dir/../lib/checkrun/registry.py" explain "$@"
+    _run_registry explain "$@"
     ;;
   format | fmt)
     shift

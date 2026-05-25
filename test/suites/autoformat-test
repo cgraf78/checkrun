@@ -1145,6 +1145,55 @@ rc=0
 "$AUTOFORMAT" || rc=$?
 _assert_exit "no args: exits 0" 0 "$rc"
 
+cat >"$_td/registry-format.py" <<'EOF'
+x=1
+EOF
+
+printf '{not-json' >"$_td/bad-registry.json"
+set +e
+output=$(CHECKRUN_REGISTRY="$_td/bad-registry.json" "$AUTOFORMAT" "$_td/registry-format.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "invalid registry: autoformat exits non-zero" 2 "$rc"
+_assert_contains "invalid registry: autoformat reports registry error" "invalid JSON" "$output"
+
+cp "$CHECKRUN_REPO_ROOT/share/checkrun/registry.json" "$_td/unknown-format-registry.json"
+python3 - "$_td/unknown-format-registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["ghost-format"] = {"kind": "shell-function", "function": "_format_ruff"}
+data["selectors"][0]["format"][0]["adapter"] = "ghost-format"
+path.write_text(json.dumps(data))
+PY
+set +e
+output=$(CHECKRUN_REGISTRY="$_td/unknown-format-registry.json" "$AUTOFORMAT" "$_td/registry-format.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "undispatched adapter: autoformat exits non-zero" 2 "$rc"
+_assert_contains "undispatched adapter: autoformat reports adapter id" "not dispatched" "$output"
+
+_no_shfmt_bin=$(_mock_bin)
+for _tool in bash dirname mktemp python3 rm yq; do
+  ln -s "$(command -v "$_tool")" "$_no_shfmt_bin/$_tool"
+done
+cat >"$_td/no-shfmt.sh" <<'EOF'
+if [ 1 ]; then
+echo hi
+fi
+EOF
+set +e
+output=$(PATH="$_no_shfmt_bin" "$AUTOFORMAT" "$_td/no-shfmt.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "missing shfmt: shell formatter skips gracefully" 0 "$rc"
+_assert_eq "missing shfmt: file unchanged" \
+  $'if [ 1 ]; then\necho hi\nfi' "$(cat "$_td/no-shfmt.sh")"
+_assert_eq "missing shfmt: no command-not-found noise" "" "$output"
+
 # Multi-file invocation: every file should be formatted.
 cat >"$_td/a.py" <<'EOF'
 x=1
@@ -1199,6 +1248,22 @@ _assert_eq "multi-file ignored path: leaves ignored file unchanged" \
   "d=4" "$(cat "$_ign_py_dir/skipme.py")"
 _assert_contains "multi-file ignored path: formats later file" \
   "e = 5" "$(cat "$_ign_py_dir/batch-after.py")"
+
+_weird_dir="$_td/weird-paths"
+mkdir -p "$_weird_dir"
+_weird_shell=$_weird_dir/$'tab\tand\nnewline.sh'
+cat >"$_weird_shell" <<'EOF'
+if true; then
+echo hi
+fi
+EOF
+set +e
+"$AUTOFORMAT" "$_weird_shell" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "hostile filename: tab/newline shell path exits 0" 0 "$rc"
+_assert_contains "hostile filename: tab/newline shell path formats" \
+  "  echo hi" "$(cat "$_weird_shell")"
 
 # ---------------------------------------------------------------------------
 # Tests: required tools

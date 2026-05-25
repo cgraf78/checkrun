@@ -252,6 +252,7 @@
     },
     "shellcheck": {
       "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [{ "file": ".shellcheckrc" }],
       "fallback": { "file": "shellcheckrc" }
     },
     "shfmt": {
@@ -341,31 +342,24 @@
     {
       "id": "python",
       "filetypes": ["python"],
-      "extensions": ["py"],
       "format": [{ "tool": "ruff", "adapter": "ruff-format", "config": "ruff-format" }],
       "lint": [{ "tool": "ruff", "adapter": "ruff-lint", "config": "ruff-lint" }]
     },
     {
       "id": "bash-shell",
       "filetypes": ["bash", "sh"],
-      "extensions": ["bash", "sh"],
-      "filenames": [".bash_profile", ".bashrc", ".envrc", ".profile", "envrc"],
-      "patterns": ["envrc-*", "agent-hook-*"],
       "format": [{ "tool": "shfmt", "adapter": "shfmt", "config": "shfmt" }],
       "lint": [{ "tool": "shellcheck", "adapter": "shellcheck", "config": "shellcheck" }]
     },
     {
       "id": "zsh-shell",
       "filetypes": ["zsh"],
-      "extensions": ["zsh"],
-      "filenames": [".zlogin", ".zlogout", ".zprofile", ".zshenv", ".zshrc"],
       "format": [{ "tool": "shfmt", "adapter": "shfmt-zsh", "config": "shfmt" }],
       "lint": [{ "tool": "zsh", "adapter": "zsh-lint" }]
     },
     {
       "id": "go",
       "filetypes": ["go"],
-      "extensions": ["go"],
       "format": [
         { "tool": "goimports", "adapter": "goimports" },
         { "tool": "gofumpt", "adapter": "gofumpt" }
@@ -383,21 +377,18 @@
         "typescript",
         "typescriptreact"
       ],
-      "extensions": ["css", "js", "jsx", "json", "jsonc", "ts", "tsx"],
       "format": [{ "tool": "biome", "adapter": "biome-format", "config": "biome-format" }],
       "lint": [{ "tool": "biome", "adapter": "biome-lint", "config": "biome-lint" }]
     },
     {
       "id": "markdown",
       "filetypes": ["markdown"],
-      "extensions": ["md"],
       "format": [{ "tool": "rumdl", "adapter": "rumdl-format", "config": "rumdl-format" }],
       "lint": [{ "tool": "rumdl", "adapter": "rumdl-lint", "config": "rumdl-lint" }]
     },
     {
       "id": "yaml",
       "filetypes": ["yaml"],
-      "extensions": ["yaml", "yml"],
       "format": [{ "tool": "yamlfmt", "adapter": "yamlfmt", "config": "yamlfmt" }],
       "lint": [
         {
@@ -415,118 +406,86 @@
     {
       "id": "toml",
       "filetypes": ["toml"],
-      "extensions": ["toml"],
       "format": [{ "tool": "taplo", "adapter": "taplo-format", "config": "taplo-format" }],
       "lint": [{ "tool": "taplo", "adapter": "taplo-lint", "config": "taplo-lint" }]
     },
     {
       "id": "lua",
       "filetypes": ["lua"],
-      "extensions": ["lua"],
       "format": [{ "tool": "stylua", "adapter": "stylua", "config": "stylua" }],
       "lint": [{ "tool": "selene", "adapter": "selene", "config": "selene" }]
     },
     {
       "id": "rust",
       "filetypes": ["rust"],
-      "extensions": ["rs"],
       "format": [{ "tool": "rustfmt", "adapter": "rustfmt", "config": "rustfmt" }],
       "lint": [{ "tool": "cargo", "adapter": "rust-clippy" }]
     },
     {
       "id": "c-family",
       "filetypes": ["c", "cpp"],
-      "extensions": ["c", "cc", "cpp", "cxx", "h", "hpp", "hxx"],
       "format": [{ "tool": "clang-format", "adapter": "clang-format", "config": "clang-format" }]
     },
     {
       "id": "html",
       "filetypes": ["html"],
-      "extensions": ["htm", "html"],
       "format": [{ "tool": "superhtml", "adapter": "superhtml-format" }],
       "lint": [{ "tool": "superhtml", "adapter": "superhtml-lint" }]
     },
     {
       "id": "java",
       "filetypes": ["java"],
-      "extensions": ["java"],
       "format": [{ "tool": "google-java-format", "adapter": "google-java-format" }],
       "lint": [{ "tool": "google-java-format", "adapter": "google-java-format-lint" }]
     },
     {
       "id": "ruby",
       "filetypes": ["ruby"],
-      "extensions": ["rb"],
       "format": [{ "tool": "rubocop", "adapter": "rubocop-format", "config": "rubocop-format" }],
       "lint": [{ "tool": "rubocop", "adapter": "rubocop-lint", "config": "rubocop-lint" }]
     },
     {
       "id": "php",
       "filetypes": ["php"],
-      "extensions": ["php"],
       "format": [{ "tool": "php-cs-fixer", "adapter": "php-cs-fixer", "config": "php-cs-fixer" }],
       "lint": [{ "tool": "php", "adapter": "php" }]
     },
     {
       "id": "cmake",
       "filetypes": ["cmake"],
-      "filenames": ["CMakeLists.txt"],
-      "extensions": ["cmake"],
       "format": [{ "tool": "cmake-format", "adapter": "cmake-format", "config": "cmake-format" }],
       "lint": [{ "tool": "cmake-lint", "adapter": "cmake-lint", "config": "cmake-lint" }]
     },
     {
       "id": "build",
       "filetypes": ["bzl", "starlark"],
-      "filenames": ["BUCK", "BUILD", "MODULE.bazel", "TARGETS", "WORKSPACE"],
-      "patterns": ["BUCK.*", "BUILD.*", "TARGETS.*", "WORKSPACE.*"],
-      "extensions": ["bzl", "star"],
       "format": [{ "tool": "buildifier", "adapter": "buildifier-format" }],
       "lint": [{ "tool": "buildifier", "adapter": "buildifier-lint" }]
     },
     {
       "id": "container",
       "filetypes": ["dockerfile"],
-      "filenames": ["Containerfile", "Dockerfile"],
-      "patterns": ["Containerfile.*", "Dockerfile.*"],
       "format": [{ "tool": "dockerfmt", "adapter": "dockerfmt" }],
       "lint": [{ "tool": "hadolint", "adapter": "hadolint", "config": "hadolint" }]
     },
     {
       "id": "make",
       "filetypes": ["make"],
-      "filenames": ["GNUmakefile", "Makefile", "makefile"],
-      "extensions": ["mk"],
       "lint": [{ "tool": "checkmake", "adapter": "checkmake", "config": "checkmake" }]
     },
     {
       "id": "systemd",
       "filetypes": ["systemd"],
-      "extensions": [
-        "automount",
-        "device",
-        "mount",
-        "path",
-        "scope",
-        "service",
-        "slice",
-        "socket",
-        "swap",
-        "target",
-        "timer"
-      ],
       "lint": [{ "tool": "systemd-analyze", "adapter": "systemd-analyze" }]
     },
     {
       "id": "editorconfig",
       "filetypes": ["editorconfig"],
-      "filenames": [".editorconfig"],
       "lint": [{ "tool": "editorconfig-checker", "adapter": "editorconfig-checker" }]
     },
     {
       "id": "gitconfig",
       "filetypes": ["gitconfig"],
-      "filenames": [".gitconfig", "config"],
       "lint": [
         {
           "tool": "git config",
@@ -538,20 +497,16 @@
     {
       "id": "crontab",
       "filetypes": ["crontab"],
-      "filenames": ["cron", "crontab"],
-      "extensions": ["cron"],
       "lint": [{ "tool": "crontab", "adapter": "crontab" }]
     },
     {
       "id": "tmux",
       "filetypes": ["tmux"],
-      "filenames": ["tmux.conf"],
       "lint": [{ "tool": "tmux", "adapter": "tmux" }]
     },
     {
       "id": "text",
-      "filetypes": ["text"],
-      "extensions": ["txt"]
+      "filetypes": ["text"]
     }
   ]
 }

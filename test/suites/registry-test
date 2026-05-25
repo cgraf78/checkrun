@@ -97,6 +97,103 @@ assert "zizmor" not in plain_adapters
 binary = tmp / "registry-test-binary"
 binary.write_bytes(b"\0\1\2")
 assert registry_mod.infer_filetype(binary, registry) is None
+
+format_dispatch = (root / "lib/checkrun/autoformat.sh").read_text(encoding="utf-8")
+lint_dispatch = (root / "lib/checkrun/autolint.sh").read_text(encoding="utf-8")
+
+
+def dispatch_arms(source: str, function: str) -> set[str]:
+    start = source.index(function)
+    end = source.index("\n}", start)
+    block = source[start:end]
+    return {
+        line.strip().split(")", 1)[0]
+        for line in block.splitlines()
+        if line.startswith("    ") and ")" in line and not line.lstrip().startswith("*")
+    }
+
+
+selected_format = {
+    step["adapter"]
+    for selector in registry["selectors"]
+    for step in selector.get("format", [])
+}
+selected_lint = {
+    step["adapter"]
+    for selector in registry["selectors"]
+    for step in selector.get("lint", [])
+}
+selected_lint.update(step["adapter"] for step in registry["crossCutting"]["lint"])
+assert selected_format <= dispatch_arms(format_dispatch, "_format_dispatch()")
+assert selected_lint <= dispatch_arms(lint_dispatch, "_lint_dispatch()")
+
+matrix = {
+    "app.py": (["ruff-format"], ["typos", "schema-lint", "ruff-lint"]),
+    "main.go": (["goimports", "gofumpt"], ["typos", "schema-lint", "golangci-lint"]),
+    "script.sh": (["shfmt"], ["typos", "schema-lint", "shellcheck"]),
+    ".zshrc": (["shfmt-zsh"], ["typos", "schema-lint", "zsh-lint"]),
+    "Dockerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
+    "CMakeLists.txt": (["cmake-format"], ["typos", "schema-lint", "cmake-lint"]),
+    "Makefile": ([], ["typos", "schema-lint", "checkmake"]),
+    "service.service": ([], ["typos", "schema-lint", "systemd-analyze"]),
+    "README.md": (["rumdl-format"], ["typos", "schema-lint", "rumdl-lint"]),
+    "plain.yaml": (["yamlfmt"], ["typos", "schema-lint"]),
+    ".github/workflows/ci.yml": (["yamlfmt"], ["typos", "schema-lint", "actionlint", "zizmor"]),
+    "biome.json": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "app.js": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "component.tsx": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "style.css": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "data.jsonc": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "main.c": (["clang-format"], ["typos", "schema-lint"]),
+    "main.cpp": (["clang-format"], ["typos", "schema-lint"]),
+    "init.lua": (["stylua"], ["typos", "schema-lint", "selene"]),
+    "main.rs": (["rustfmt"], ["typos", "schema-lint", "rust-clippy"]),
+    "Main.java": (["google-java-format"], ["typos", "schema-lint", "google-java-format-lint"]),
+    "index.php": (["php-cs-fixer"], ["typos", "schema-lint", "php"]),
+    "app.rb": (["rubocop-format"], ["typos", "schema-lint", "rubocop-lint"]),
+    "index.html": (["superhtml-format"], ["typos", "schema-lint", "superhtml-lint"]),
+    "config.toml": (["taplo-format"], ["typos", "schema-lint", "taplo-lint"]),
+    "BUILD": (["buildifier-format"], ["typos", "schema-lint", "buildifier-lint"]),
+    "rules.bzl": (["buildifier-format"], ["typos", "schema-lint", "buildifier-lint"]),
+    "Containerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
+    ".editorconfig": ([], ["typos", "schema-lint", "editorconfig-checker"]),
+    ".gitconfig": ([], ["typos", "schema-lint", "git-config"]),
+    "crontab": ([], ["typos", "schema-lint", "crontab"]),
+    "tmux.conf": ([], ["typos", "schema-lint", "tmux"]),
+    "envrc-prod": (["shfmt"], ["typos", "schema-lint", "shellcheck"]),
+    "agent-hook-pre-bash-work": (["shfmt"], ["typos", "schema-lint", "shellcheck"]),
+    "envrc-prod.txt": ([], ["typos", "schema-lint"]),
+    "agent-hook-pre-bash-work.py": (["ruff-format"], ["typos", "schema-lint", "ruff-lint"]),
+}
+
+for relative, (expected_format, expected_lint) in matrix.items():
+    target = tmp / "matrix" / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("", encoding="utf-8")
+    format_steps = registry_mod.plan(registry, [str(target)], "format")["files"][0]["format"]["steps"]
+    lint_steps = registry_mod.plan(registry, [str(target)], "lint")["files"][0]["lint"]["steps"]
+    assert [step["adapter"] for step in format_steps] == expected_format, relative
+    assert [step["adapter"] for step in lint_steps] == expected_lint, relative
+
+dedupe = json.loads(json.dumps(registry))
+dedupe["selectors"].append(
+    {
+        "id": "python-overlap",
+        "filetypes": ["python"],
+        "lint": [
+            {"tool": "ruff", "adapter": "ruff-lint", "config": "ruff-lint"},
+            {"phase": "lint", "tool": "ruff", "adapter": "ruff-lint", "config": "ruff-lint"},
+            {"tool": "extra", "adapter": "ruff-lint", "config": "ruff-lint"},
+        ],
+    }
+)
+registry_mod.validate_invariants(dedupe)
+target = tmp / "dedupe.py"
+target.touch(exist_ok=True)
+dedupe_steps = registry_mod.plan(dedupe, [str(target)], "lint")["files"][0]["lint"]["steps"]
+dedupe_keys = [(step["tool"], step["adapter"]) for step in dedupe_steps]
+assert dedupe_keys.count(("ruff", "ruff-lint")) == 1
+assert dedupe_keys[-1] == ("extra", "ruff-lint")
 PY
 _assert_exit "registry: interpreter derives capabilities and plans" 0 "$?"
 
@@ -145,6 +242,40 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 data = json.loads(path.read_text())
+del data["selectors"][0]["filetypes"]
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: selector filetypes are required" 2 "$rc"
+_assert_contains "registry: missing selector filetypes reports error" "missing required key" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"][0]["filetypes"] = []
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: selector filetypes cannot be empty" 2 "$rc"
+_assert_contains "registry: empty selector filetypes reports error" "at least one filetype" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
 data["selectors"][0]["format"][0]["adapter"] = "missing-adapter"
 path.write_text(json.dumps(data))
 PY
@@ -153,5 +284,290 @@ output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2
 rc=$?
 _assert_exit "registry: missing adapter exits non-zero" 2 "$rc"
 _assert_contains "registry: missing adapter reports error" "unknown adapter" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["ghost-lint"] = {"kind": "shell-function", "function": "_lint_ruff"}
+data["selectors"][0]["lint"][0]["adapter"] = "ghost-lint"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: undispatched adapter exits non-zero" 2 "$rc"
+_assert_contains "registry: undispatched adapter reports error" "not dispatched" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["ruff-lint"]["function"] = "_lint_go"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: dispatch function mismatch exits non-zero" 2 "$rc"
+_assert_contains "registry: dispatch function mismatch reports error" "function mismatch" "$output"
+
+python3 - "$CHECKRUN_REPO_ROOT" "$REGISTRY" "$_td/unknown-dispatch.sh" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+registry_path = Path(sys.argv[2])
+dispatch_path = Path(sys.argv[3])
+
+# The production shell files should never contain an unknown dispatch arm, so use
+# a tiny fixture to exercise the invariant directly instead of weakening the
+# check by making it depend on today's concrete adapter list.
+dispatch_path.write_text(
+    """
+_format_dispatch() {
+  local adapter="$1"
+  case "$adapter" in
+    ruff-format) _format_ruff "$file" "$dir" "$config_source" "$config_path" ;;
+  esac
+}
+
+_run_lint_step() {
+  local adapter="$1"
+  case "$adapter" in
+    missing-lint) _lint_ruff "$file" "$dir" "$config_source" "$config_path" ;;
+  esac
+}
+""",
+    encoding="utf-8",
+)
+
+spec = importlib.util.spec_from_file_location(
+    "checkrun_registry", root / "lib/checkrun/registry.py"
+)
+registry_mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(registry_mod)
+registry_mod.SHELL_DISPATCH = {
+    "format": (dispatch_path, "_format_dispatch()"),
+    "lint": (dispatch_path, "_run_lint_step()"),
+}
+
+try:
+    registry_mod.load_registry(registry_path)
+except registry_mod.RegistryError as error:
+    assert "unknown registry adapters" in str(error), str(error)
+else:
+    raise AssertionError("unknown shell dispatch adapter was accepted")
+PY
+_assert_exit "registry: unknown shell dispatch adapter is rejected" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"][0]["format"][0]["phase"] = "lint"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: format step phase mismatch exits non-zero" 2 "$rc"
+_assert_contains "registry: format step phase mismatch reports error" "invalid step phase" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"][0]["lint"][0]["phase"] = "format"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: lint step phase mismatch exits non-zero" 2 "$rc"
+_assert_contains "registry: lint step phase mismatch reports error" "invalid step phase" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["internal-lint"] = {"kind": "internal"}
+data["selectors"][0]["lint"][0]["adapter"] = "internal-lint"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: selected internal adapter exits non-zero" 2 "$rc"
+_assert_contains "registry: selected internal adapter reports error" "not executable" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["ruff-lint"]["kind"] = "internal"
+for selector in data["selectors"]:
+    selector["lint"] = [
+        step for step in selector.get("lint", []) if step["adapter"] != "ruff-lint"
+    ]
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: dispatched internal adapter exits non-zero" 2 "$rc"
+_assert_contains "registry: dispatched internal adapter reports error" "non-shell adapters" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["unused-lint"] = {"kind": "shell-function", "function": "_lint_ruff"}
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: unused adapter exits non-zero" 2 "$rc"
+_assert_contains "registry: unused adapter reports error" "unused shell-function adapters" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"][0]["format"][0]["config"] = "missing-config-policy"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: missing config policy exits non-zero" 2 "$rc"
+_assert_contains "registry: missing config policy reports error" "unknown config policy" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["ruff-format"]["function"] = "_missing_format_function"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: missing adapter function exits non-zero" 2 "$rc"
+_assert_contains "registry: missing adapter function reports error" "not implemented" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"][0]["unknownConsumerField"] = True
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: unknown selector field exits non-zero" 2 "$rc"
+_assert_contains "registry: unknown selector field reports error" "unknown key" "$output"
+
+python3 - "$CHECKRUN_REPO_ROOT" "$REGISTRY" "$_td" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+registry_path = Path(sys.argv[2])
+tmp = Path(sys.argv[3])
+
+spec = importlib.util.spec_from_file_location(
+    "checkrun_registry", root / "lib/checkrun/registry.py"
+)
+registry_mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(registry_mod)
+
+for key, value in {
+    "extensions": ["py"],
+    "filenames": ["script.py"],
+    "patterns": ["*.py"],
+}.items():
+    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    data["selectors"][0][key] = value
+    path = tmp / f"selector-{key}.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    try:
+        registry_mod.load_registry(path)
+    except registry_mod.RegistryError as error:
+        assert "unknown key" in str(error), str(error)
+    else:
+        raise AssertionError(f"selector-local {key} matcher was accepted")
+PY
+_assert_exit "registry: selector-local path matchers are rejected" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"][0]["format"][0]["selection"] = "first-available"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: unsupported selection field exits non-zero" 2 "$rc"
+_assert_contains "registry: unsupported selection field reports error" "unknown key" "$output"
+
+printf '{not-json' >"$_td/malformed.json"
+output=$(CHECKRUN_REGISTRY="$_td/malformed.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: malformed json exits non-zero" 2 "$rc"
+_assert_contains "registry: malformed json reports error" "invalid JSON" "$output"
 
 _test_summary

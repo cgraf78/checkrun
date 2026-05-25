@@ -100,20 +100,17 @@ _lint_schema() {
 }
 
 _lint_taplo() {
-  local file="$1" dir="$2" rc=0 repo_cfg err tool_rc msg
+  local file="$1" config_source="${3:-}" config_path="${4:-}" rc=0 err tool_rc msg
   local args=()
 
   command -v taplo &>/dev/null || return 0
   # Three-tier: per-repo .taplo.toml -> $CHECKRUN_AUTOLINT_DIR/taplo.toml -> --no-schema.
   # --no-schema avoids taplo fetching the remote schema catalog on locked-down
-  # hosts and on TOMLs that do not declare a schema anyway.
-  repo_cfg=$(_find_config "$dir" ".taplo.toml" 2>/dev/null ||
-    _find_config "$dir" "taplo.toml" 2>/dev/null || true)
-  if [ -n "$repo_cfg" ]; then
-    args=(--config "$repo_cfg")
-  elif [ -f "$CHECKRUN_AUTOLINT_DIR/taplo.toml" ]; then
-    args=(--config "$CHECKRUN_AUTOLINT_DIR/taplo.toml")
-  else
+  # hosts and on TOMLs that do not declare a schema anyway. The registry tells us
+  # which tier applied; the adapter only spells the taplo CLI flags.
+  if [ -n "$config_path" ]; then
+    args=(--config "$config_path")
+  elif [ "$config_source" = "none" ]; then
     args=(--no-schema)
   fi
 

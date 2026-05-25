@@ -95,8 +95,8 @@ Validation:
 - fixture tests proving the seeded registry matches current intended
   autoformat/autolint behavior for every documented filetype
 - invalid fixture tests for unknown fields, duplicate selector ids, missing
-  adapters, missing config policies, invalid phases, invalid selection modes,
-  and downstream-specific keys
+  adapters, missing config policies, invalid phases, unsupported preference
+  fields, and downstream-specific keys
 - invalid runtime registry tests proving Checkrun commands fail loudly instead of
   silently treating all files as unsupported
 
@@ -112,7 +112,7 @@ Work:
 - load registry
 - validate required registry invariants
 - infer filetype by filename, extension, pattern, and shebang
-- match selectors and path patterns
+- match selectors by normalized filetype and apply step-level path patterns
 - derive generic capabilities
 - expose a focused test helper for registry fixtures
 

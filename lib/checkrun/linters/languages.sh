@@ -6,11 +6,10 @@
 # flags instead of maintaining their own global option state.
 
 _lint_ruby() {
-  local file="$1" dir="$2" cfg args=()
+  local file="$1" config_path="${4:-}" args=()
   command -v rubocop &>/dev/null || return 0
 
-  cfg=$(_find_rubocop_config "$dir" "$CHECKRUN_AUTOLINT_DIR" 2>/dev/null || true)
-  [ -n "$cfg" ] && args=(--config "$cfg")
+  [ -n "$config_path" ] && args=(--config "$config_path")
   if [ "$fix" -eq 1 ]; then
     _lint_text_command "rubocop" "$file" rubocop --autocorrect \
       ${args[@]+"${args[@]}"} "$file"
@@ -106,21 +105,11 @@ _lint_rust() {
 }
 
 _lint_go() {
-  local file="$1" dir="$2" rc=0 out tool_rc gc_dir gc_base
+  local file="$1" config_path="${4:-}" rc=0 out tool_rc gc_dir gc_base
   local args=()
-  local has_gc_config=0
 
   command -v golangci-lint &>/dev/null || return 0
-  if _has_config "$dir" ".golangci.yml" ||
-    _has_config "$dir" ".golangci.yaml" ||
-    _has_config "$dir" ".golangci.toml" ||
-    _has_config "$dir" ".golangci.json"; then
-    has_gc_config=1
-  fi
-  if [ "$has_gc_config" -eq 0 ] &&
-    [ -f "$CHECKRUN_AUTOLINT_DIR/golangci-lint.yml" ]; then
-    args=(--config "$CHECKRUN_AUTOLINT_DIR/golangci-lint.yml")
-  fi
+  [ -n "$config_path" ] && args=(--config "$config_path")
 
   # golangci-lint expects package paths, not single files. Run from the file's
   # directory on ./... and filter JSON results back to this file.
@@ -152,23 +141,15 @@ _lint_go() {
 }
 
 _lint_ruff() {
-  local file="$1" dir="$2" rc=0 out tool_rc
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" rc=0 out tool_rc
   local args=()
-  local has_ruff_config=0
 
   command -v ruff &>/dev/null || return 0
-  # pyproject.toml[tool.ruff] counts as repo policy so ruff's own resolution is
-  # not silently replaced by the personal fallback.
-  if _has_config "$dir" "ruff.toml" ||
-    _has_config "$dir" ".ruff.toml" ||
-    _walk_config_with_key "$dir" pyproject.toml toml \
-      '.tool.ruff // .tool.ruff.lint'; then
-    has_ruff_config=1
-  fi
-  if [ "$has_ruff_config" -eq 0 ] &&
-    [ -f "$CHECKRUN_AUTOLINT_DIR/ruff.toml" ]; then
-    args=(--config "$CHECKRUN_AUTOLINT_DIR/ruff.toml")
-  fi
+  # Project Ruff config is intentionally left native so relative paths inside
+  # pyproject/ruff.toml are interpreted the same way Ruff would interpret them
+  # from a manual run. The registry still owns the decision: only a selected
+  # fallback path is translated into an explicit --config.
+  [ "$config_source" = "fallback" ] && [ -n "$config_path" ] && args=(--config "$config_path")
 
   if [ "$json" -eq 1 ]; then
     out=$(ruff check --output-format=json-lines ${args[@]+"${args[@]}"} "$file" 2>/dev/null)
@@ -198,18 +179,12 @@ _lint_ruff() {
 }
 
 _lint_selene() {
-  local file="$1" dir="$2" rc=0 selene_cfg out tool_rc
+  local file="$1" config_path="${4:-}" rc=0 out tool_rc
   local args=()
 
   command -v selene &>/dev/null || return 0
   # selene discovery is cwd-sensitive, so pass the selected config explicitly.
-  selene_cfg=$(_find_config "$dir" "selene.toml" 2>/dev/null ||
-    _find_config "$dir" ".selene.toml" 2>/dev/null || true)
-  if [ -n "$selene_cfg" ]; then
-    args=(--config "$selene_cfg")
-  elif [ -f "$CHECKRUN_AUTOLINT_DIR/selene.toml" ]; then
-    args=(--config "$CHECKRUN_AUTOLINT_DIR/selene.toml")
-  fi
+  [ -n "$config_path" ] && args=(--config "$config_path")
 
   if [ "$json" -eq 1 ]; then
     out=$(selene --display-style=json2 ${args[@]+"${args[@]}"} "$file" 2>/dev/null)

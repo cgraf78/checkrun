@@ -56,19 +56,14 @@ _lint_buildifier() {
 }
 
 _lint_checkmake() {
-  local file="$1" dir="$2"
+  local file="$1" dir="$2" config_path="${4:-}"
   command -v checkmake &>/dev/null || return 0
 
   local args=()
-  local repo_cfg
   # Run from the Makefile directory so include paths and target names match a
-  # developer's manual invocation. Config paths must be absolute before the cd.
-  repo_cfg=$(_find_config "$dir" "checkmake.ini" 2>/dev/null || true)
-  if [ -n "$repo_cfg" ]; then
-    args=(--config "$repo_cfg")
-  elif [ -f "$CHECKRUN_AUTOLINT_DIR/checkmake.ini" ]; then
-    args=(--config "$CHECKRUN_AUTOLINT_DIR/checkmake.ini")
-  fi
+  # developer's manual invocation. Config paths are resolved by the registry
+  # before this adapter changes cwd.
+  [ -n "$config_path" ] && args=(--config "$config_path")
 
   if [ "$json" -eq 1 ]; then
     local out tool_rc
@@ -92,25 +87,23 @@ _lint_checkmake() {
 }
 
 _lint_cmake() {
-  local file="$1" dir="$2" cfg args=()
+  local file="$1" config_path="${4:-}" args=()
   command -v cmake-lint &>/dev/null || return 0
 
-  cfg=$(_find_cmake_config "$dir" "$CHECKRUN_AUTOLINT_DIR" 2>/dev/null || true)
-  [ -n "$cfg" ] && args=(--config-files "$cfg")
+  [ -n "$config_path" ] && args=(--config-files "$config_path")
   _lint_text_command "cmake-lint" "$file" cmake-lint ${args[@]+"${args[@]}"} "$file"
 }
 
 _lint_dockerfile() {
-  local file="$1" dir="$2" rc=0 out tool_rc
+  local file="$1" config_path="${4:-}" rc=0 out tool_rc
   local args=()
 
   command -v hadolint &>/dev/null || return 0
   # hadolint does not look in the global fallback directory on its own, but a
-  # repo .hadolint.yaml should always win over the personal fallback.
-  if ! _has_config "$dir" ".hadolint.yaml" &&
-    [ -f "$CHECKRUN_AUTOLINT_DIR/hadolint.yaml" ]; then
-    args=(-c "$CHECKRUN_AUTOLINT_DIR/hadolint.yaml")
-  fi
+  # repo .hadolint.yaml should always win over the personal fallback. The
+  # registry owns that choice now; the adapter only translates it to hadolint's
+  # CLI flag.
+  [ -n "$config_path" ] && args=(-c "$config_path")
 
   if [ "$json" -eq 1 ]; then
     out=$(hadolint --format=json ${args[@]+"${args[@]}"} "$file" 2>/dev/null)

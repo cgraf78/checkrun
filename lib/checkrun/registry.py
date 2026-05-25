@@ -7,6 +7,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import sys
 from json import JSONDecodeError
 from pathlib import Path
@@ -17,6 +18,7 @@ import tomllib
 CHECKRUN_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = CHECKRUN_ROOT / "share/checkrun/registry.json"
 REGISTRY_SCHEMA_PATH = CHECKRUN_ROOT / "share/checkrun/schemas/registry.schema.json"
+LINTER_ADAPTER_DIR = CHECKRUN_ROOT / "lib/checkrun/linters"
 
 # Keep phase names centralized because the registry is now the contract shared by
 # shell hooks, CLI explainability, and editor integrations. If a new phase is
@@ -32,10 +34,85 @@ PHASE_IGNORE_FILES = {
     "schema": "schema-ignore",
     "tool": "tool-ignore",
 }
+SHELL_ADAPTER_SOURCES = (
+    CHECKRUN_ROOT / "lib/checkrun/autoformat.sh",
+    CHECKRUN_ROOT / "lib/checkrun/autolint.sh",
+    CHECKRUN_ROOT / "lib/checkrun/common.sh",
+)
+SHELL_DISPATCH = {
+    "format": (CHECKRUN_ROOT / "lib/checkrun/autoformat.sh", "_format_dispatch()"),
+    "lint": (CHECKRUN_ROOT / "lib/checkrun/autolint.sh", "_lint_dispatch()"),
+}
 
 
 class RegistryError(RuntimeError):
     """Raised when the registry cannot be loaded or validated."""
+
+
+def shell_functions() -> set[str]:
+    """Return shell functions available to registry-declared adapters."""
+
+    # Adapter existence is an interpreter invariant, not just a test nicety:
+    # once the registry drives execution, a typo in `adapters.*.function` would
+    # otherwise make metadata look valid while shell dispatch can never run it.
+    # A small static scan is enough here because Checkrun adapters are ordinary
+    # top-level shell functions, and scanning avoids sourcing hook code during
+    # registry load.
+    functions: set[str] = set()
+    pattern = re.compile(r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*\{")
+    # Top-level entry libraries are explicit, while linter domains are globbed
+    # so adding a new `linters/*.sh` file does not create a second maintenance
+    # point in the registry validator.
+    sources = sorted((*SHELL_ADAPTER_SOURCES, *LINTER_ADAPTER_DIR.glob("*.sh")))
+    for source in sources:
+        try:
+            lines = source.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise RegistryError(f"adapter source unavailable: {source}: {exc}") from exc
+        for line in lines:
+            match = pattern.match(line)
+            if match:
+                functions.add(match.group(1))
+    return functions
+
+
+def shell_dispatch_functions(phase: str) -> dict[str, str]:
+    """Return adapter ids and shell functions accepted by one dispatcher."""
+
+    # The registry can only be authoritative if a selected adapter is known to
+    # cross the Python-to-shell boundary. Function existence alone is not enough:
+    # a custom registry can point at a real helper such as `_lint_ruff`, but the
+    # shell entrypoint still needs an adapter arm that calls that same helper with
+    # the right arguments. This narrow parser intentionally supports Checkrun's
+    # one-line dispatch arms instead of trying to understand arbitrary shell.
+    try:
+        source, function = SHELL_DISPATCH[phase]
+    except KeyError as exc:
+        raise RegistryError(f"unknown dispatch phase: {phase}") from exc
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RegistryError(f"dispatch source unavailable: {source}: {exc}") from exc
+
+    in_function = False
+    dispatch: dict[str, str] = {}
+    arm = re.compile(r"^\s+([A-Za-z0-9_.+-]+)\)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+    for line in lines:
+        if not in_function:
+            stripped = line.strip()
+            if stripped.startswith(function) or stripped.startswith(
+                function.replace("()", "") + "()"
+            ):
+                in_function = True
+            continue
+        if line == "}":
+            break
+        match = arm.match(line)
+        if match and match.group(1) != "*":
+            dispatch[match.group(1)] = match.group(2)
+    if not dispatch:
+        raise RegistryError(f"{phase}: dispatch adapter table could not be read")
+    return dispatch
 
 
 def load_json(path: Path) -> Any:
@@ -164,9 +241,51 @@ def validate_invariants(registry: dict[str, Any]) -> None:
     declared_filetypes.update(item["filetype"] for item in registry["filetypes"]["patterns"])
     declared_filetypes.update(item["filetype"] for item in registry["filetypes"]["shebangs"])
 
-    selectors_seen: set[str] = set()
     adapters = registry["adapters"]
     config_policies = registry["configPolicies"]
+    dispatch_functions = {phase: shell_dispatch_functions(phase) for phase in PLAN_PHASES}
+    dispatch_adapter_ids = {
+        adapter_id for dispatch in dispatch_functions.values() for adapter_id in dispatch
+    }
+    unknown_dispatch = dispatch_adapter_ids.difference(adapters)
+    if unknown_dispatch:
+        names = ", ".join(sorted(unknown_dispatch))
+        raise RegistryError(f"shell dispatch references unknown registry adapters: {names}")
+    # Dispatch arms are executable shell behavior. If the registry marks an
+    # adapter as internal-only, allowing a shell arm for it would create a hidden
+    # second source of truth even when no selector currently chooses that adapter.
+    non_shell_dispatch = {
+        adapter_id
+        for adapter_id in dispatch_adapter_ids
+        if adapters[adapter_id].get("kind") != "shell-function"
+    }
+    if non_shell_dispatch:
+        names = ", ".join(sorted(non_shell_dispatch))
+        raise RegistryError(f"shell dispatch references non-shell adapters: {names}")
+
+    implemented_functions = shell_functions()
+    for adapter_id, adapter in adapters.items():
+        if adapter.get("kind") == "shell-function" and not adapter.get("function"):
+            raise RegistryError(f"{adapter_id}: shell-function adapter requires function")
+        if (
+            adapter.get("kind") == "shell-function"
+            and adapter["function"] not in implemented_functions
+        ):
+            raise RegistryError(
+                f"{adapter_id}: shell-function adapter is not implemented: {adapter['function']}"
+            )
+        for phase, dispatch in dispatch_functions.items():
+            if adapter_id in dispatch and adapter.get("kind") == "shell-function":
+                dispatch_function = dispatch[adapter_id]
+                if adapter["function"] != dispatch_function:
+                    raise RegistryError(
+                        f"{adapter_id}: adapter dispatch function mismatch in {phase}: "
+                        f"registry declares {adapter['function']}, "
+                        f"shell dispatch calls {dispatch_function}"
+                    )
+
+    selectors_seen: set[str] = set()
+    selected_adapters: set[str] = set()
     for selector in registry["selectors"]:
         selector_id = selector["id"]
         if selector_id in selectors_seen:
@@ -175,12 +294,23 @@ def validate_invariants(registry: dict[str, Any]) -> None:
         if DOWNSTREAM_KEYS.intersection(selector):
             keys = ", ".join(sorted(DOWNSTREAM_KEYS.intersection(selector)))
             raise RegistryError(f"{selector_id}: downstream-specific keys are not allowed: {keys}")
+        if not selector.get("filetypes"):
+            raise RegistryError(f"{selector_id}: selector requires at least one filetype")
         for filetype in selector.get("filetypes", []):
             if filetype not in declared_filetypes:
                 raise RegistryError(f"{selector_id}: undeclared filetype: {filetype}")
         for phase in ("format", "lint"):
             for step in selector.get(phase, []):
-                validate_step(step, phase, selector_id, adapters, config_policies)
+                selected_adapters.add(step["adapter"])
+                validate_step(
+                    step,
+                    phase,
+                    selector_id,
+                    adapters,
+                    config_policies,
+                    dispatch_functions[phase],
+                    {"format"} if phase == "format" else {"lint", "tool"},
+                )
 
     for phase, steps in registry.get("crossCutting", {}).items():
         if phase not in PLAN_PHASES:
@@ -189,16 +319,30 @@ def validate_invariants(registry: dict[str, Any]) -> None:
             step_phase = str(step.get("phase", phase))
             if step_phase not in PHASES:
                 raise RegistryError(f"unknown step phase: {step_phase}")
-            validate_step(step, step_phase, f"crossCutting.{phase}", adapters, config_policies)
+            selected_adapters.add(step["adapter"])
+            validate_step(
+                step,
+                phase,
+                f"crossCutting.{phase}",
+                adapters,
+                config_policies,
+                dispatch_functions[phase],
+                {"spell", "schema"},
+            )
+
+    unused_adapters = {
+        adapter_id
+        for adapter_id, adapter in adapters.items()
+        if adapter.get("kind") != "internal" and adapter_id not in selected_adapters
+    }
+    if unused_adapters:
+        names = ", ".join(sorted(unused_adapters))
+        raise RegistryError(f"unused shell-function adapters are not allowed: {names}")
 
     for name, policy in config_policies.items():
         env_root = policy.get("envRoot")
         if env_root is not None and env_root not in ENV_ROOTS:
             raise RegistryError(f"{name}: unknown env root: {env_root}")
-
-    for adapter_id, adapter in adapters.items():
-        if adapter.get("kind") == "shell-function" and not adapter.get("function"):
-            raise RegistryError(f"{adapter_id}: shell-function adapter requires function")
 
     for item in registry["filetypes"]["shebangs"]:
         has_contains = "contains" in item
@@ -213,14 +357,37 @@ def validate_step(
     owner: str,
     adapters: dict[str, Any],
     config_policies: dict[str, Any],
+    dispatch_functions: dict[str, str],
+    allowed_step_phases: set[str],
 ) -> None:
     adapter = step["adapter"]
+    step_phase = str(step.get("phase", phase))
     if adapter not in adapters:
         raise RegistryError(f"{owner}.{phase}: unknown adapter: {adapter}")
+    if adapters[adapter].get("kind") != "shell-function":
+        raise RegistryError(
+            f"{owner}.{phase}: adapter is not executable by shell dispatch: {adapter}"
+        )
+    if adapter not in dispatch_functions:
+        raise RegistryError(
+            f"{owner}.{phase}: adapter is not dispatched by shell entrypoint: {adapter}"
+        )
+    declared_function = str(adapters[adapter]["function"])
+    dispatch_function = dispatch_functions[adapter]
+    if declared_function != dispatch_function:
+        raise RegistryError(
+            f"{owner}.{phase}: adapter dispatch function mismatch for {adapter}: "
+            f"registry declares {declared_function}, shell dispatch calls {dispatch_function}"
+        )
     if "config" in step and step["config"] not in config_policies:
         raise RegistryError(f"{owner}.{phase}: unknown config policy: {step['config']}")
-    if step.get("phase", phase) not in PHASES:
+    if step_phase not in PHASES:
         raise RegistryError(f"{owner}.{phase}: unknown phase: {step.get('phase')}")
+    if step_phase not in allowed_step_phases:
+        expected = ", ".join(sorted(allowed_step_phases))
+        raise RegistryError(
+            f"{owner}.{phase}: invalid step phase {step_phase!r}; expected one of {expected}"
+        )
 
 
 def load_registry(path: Path | None = None) -> dict[str, Any]:
@@ -322,15 +489,19 @@ def path_pattern_matches(path: Path, patterns: list[str]) -> bool:
 
 
 def selector_matches(path: Path, filetype: str | None, selector: dict[str, Any]) -> bool:
-    name = path.name
-    ext = extension(path)
-    if filetype and filetype in selector.get("filetypes", []):
-        return True
-    if name in selector.get("filenames", []):
-        return True
-    if ext and ext in selector.get("extensions", []):
-        return True
-    return any(fnmatch.fnmatchcase(name, pattern) for pattern in selector.get("patterns", []))
+    # Filetype inference is the only path-to-language decision point. Selectors
+    # intentionally consume that normalized answer instead of carrying their own
+    # filename/extension/pattern matchers, which would let execution drift from
+    # editor capabilities and `checkrun explain`.
+    return bool(filetype and filetype in selector.get("filetypes", []))
+
+
+def _skip(step: dict[str, Any], reason: str, **details: Any) -> dict[str, Any]:
+    skipped = dict(step)
+    skipped["skipped"] = True
+    skipped["reason"] = reason
+    skipped.update(details)
+    return skipped
 
 
 def config_root(env_name: str) -> Path:
@@ -480,9 +651,13 @@ def schema_associations(path: Path) -> list[dict[str, Any]]:
     return result
 
 
-def _step_key(step: dict[str, Any]) -> tuple[Any, ...]:
+def _step_key(step: dict[str, Any], default_phase: str) -> tuple[Any, ...]:
+    # A missing `phase` means "the phase of the selector that contained this
+    # step." Dedupe has to compare that normalized meaning, not the raw JSON
+    # spelling, otherwise an explicit `"phase": "lint"` copy can run beside an
+    # implicit lint step.
     return (
-        step.get("phase"),
+        str(step.get("phase", default_phase)),
         step.get("tool"),
         step.get("adapter"),
         step.get("config"),
@@ -508,21 +683,22 @@ def _planned_step(
     return planned
 
 
-def selected_steps(
+def collect_steps(
     registry: dict[str, Any],
     path: Path,
     filetype: str | None,
     phase: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     # Cross-cutting lint steps intentionally precede backend tool lint so
     # spelling/schema behavior remains independent of language-specific ignores.
     # Exact duplicate dedupe lets overlapping selectors compose without running
     # the same adapter twice, while distinct steps remain visible in order.
     steps: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     if phase == "lint":
         for step in registry.get("crossCutting", {}).get("lint", []):
-            key = _step_key(step)
+            key = _step_key(step, "lint")
             if key not in seen:
                 steps.append(_planned_step(registry, path, step, "lint"))
                 seen.add(key)
@@ -531,12 +707,29 @@ def selected_steps(
             continue
         for step in selector.get(phase, []):
             if not path_pattern_matches(path, step.get("pathPatterns", [])):
+                skipped.append(
+                    _skip(
+                        _planned_step(registry, path, step, phase),
+                        "path-pattern",
+                        patterns=list(step.get("pathPatterns", [])),
+                    )
+                )
                 continue
-            key = _step_key(step)
+            key = _step_key(step, phase)
             if key in seen:
                 continue
             steps.append(_planned_step(registry, path, step, phase))
             seen.add(key)
+    return steps, skipped
+
+
+def selected_steps(
+    registry: dict[str, Any],
+    path: Path,
+    filetype: str | None,
+    phase: str,
+) -> list[dict[str, Any]]:
+    steps, _skipped = collect_steps(registry, path, filetype, phase)
     return steps
 
 
@@ -556,15 +749,21 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
         if plan_phase == "format":
             config = config_root("CHECKRUN_AUTOFORMAT_DIR")
             ignored = ignore_match(path, config, "format")
-            steps = (
-                []
-                if ignored["ignored"] or not path.is_file()
-                else selected_steps(registry, path, filetype, "format")
+            candidate_steps, skipped = (
+                collect_steps(registry, path, filetype, "format") if path.is_file() else ([], [])
             )
+            if ignored["ignored"]:
+                steps = []
+                skipped.extend(
+                    _skip(step, "phase-ignore", ignore=ignored) for step in candidate_steps
+                )
+            else:
+                steps = candidate_steps
             item["format"] = {
                 "ignored": ignored["ignored"],
                 "ignore": ignored if ignored["ignored"] else None,
                 "steps": steps,
+                "skipped": skipped,
                 "configDir": str(config),
             }
         elif plan_phase == "lint":
@@ -573,23 +772,21 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
             spell_ignore = ignore_match(path, config, "spell")
             schema_ignore = ignore_match(path, config, "schema")
             tool_ignore = ignore_match(path, config, "tool")
-            all_steps = (
-                []
-                if lint_ignore["ignored"] or not path.is_file()
-                else selected_steps(registry, path, filetype, "lint")
+            all_steps, skipped = (
+                collect_steps(registry, path, filetype, "lint") if path.is_file() else ([], [])
             )
-            steps = [
-                step
-                for step in all_steps
-                if not (
-                    step["phase"] == "spell"
-                    and spell_ignore["ignored"]
-                    or step["phase"] == "schema"
-                    and schema_ignore["ignored"]
-                    or step["phase"] in {"lint", "tool"}
-                    and tool_ignore["ignored"]
-                )
-            ]
+            steps = []
+            for step in all_steps:
+                if lint_ignore["ignored"]:
+                    skipped.append(_skip(step, "lint-ignore", ignore=lint_ignore))
+                elif step["phase"] == "spell" and spell_ignore["ignored"]:
+                    skipped.append(_skip(step, "phase-ignore", ignore=spell_ignore))
+                elif step["phase"] == "schema" and schema_ignore["ignored"]:
+                    skipped.append(_skip(step, "phase-ignore", ignore=schema_ignore))
+                elif step["phase"] in {"lint", "tool"} and tool_ignore["ignored"]:
+                    skipped.append(_skip(step, "phase-ignore", ignore=tool_ignore))
+                else:
+                    steps.append(step)
             schemas = (
                 []
                 if schema_ignore["ignored"] or lint_ignore["ignored"] or not path.is_file()
@@ -613,6 +810,7 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
                     },
                 },
                 "steps": steps,
+                "skipped": skipped,
                 "schemas": schemas,
                 "configDir": str(config),
             }
@@ -739,7 +937,13 @@ def print_shell_plan(registry: dict[str, Any], phase: str, files: list[str]) -> 
                 config.get("source", ""),
                 config.get("path", ""),
             ]
-            print("\t".join(str(field) for field in fields))
+            # This private shell protocol is NUL-delimited because paths can
+            # legally contain spaces, tabs, or newlines. The shell callers read
+            # directly from a temp file instead of command substitution, because
+            # Bash variables cannot safely carry NUL bytes.
+            for field in fields:
+                sys.stdout.buffer.write(str(field).encode("utf-8", "surrogateescape"))
+                sys.stdout.buffer.write(b"\0")
 
 
 def main(argv: list[str] | None = None) -> int:

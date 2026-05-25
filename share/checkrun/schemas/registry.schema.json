@@ -122,23 +122,12 @@
     "selector": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id"],
+      "required": ["id", "filetypes"],
       "properties": {
         "id": { "type": "string" },
         "filetypes": {
           "type": "array",
-          "items": { "type": "string" }
-        },
-        "extensions": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "filenames": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "patterns": {
-          "type": "array",
+          "minItems": 1,
           "items": { "type": "string" }
         },
         "format": {
@@ -176,8 +165,7 @@
         "pathPatterns": {
           "type": "array",
           "items": { "type": "string" }
-        },
-        "selection": { "enum": ["run-all", "first-available"] }
+        }
       }
     }
   }

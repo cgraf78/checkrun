@@ -6,18 +6,13 @@
 # flags instead of maintaining their own global option state.
 
 _lint_typos() {
-  local file="$1" dir="$2"
+  local file="$1" config_path="${4:-}"
   command -v typos &>/dev/null || return 0
 
   local args=()
-  local repo_cfg
-  repo_cfg=$(_find_config "$dir" ".typos.toml" 2>/dev/null ||
-    _find_config "$dir" "typos.toml" 2>/dev/null || true)
-  if [ -n "$repo_cfg" ]; then
-    args=(--config "$repo_cfg")
-  elif [ -f "$CHECKRUN_AUTOLINT_DIR/typos.toml" ]; then
-    args=(--config "$CHECKRUN_AUTOLINT_DIR/typos.toml")
-  fi
+  # The registry selects project or fallback spelling policy once. Typos accepts
+  # both through the same flag, so execution should not repeat its own walk.
+  [ -n "$config_path" ] && args=(--config "$config_path")
 
   if [ "$json" -eq 1 ]; then
     local out tool_rc
@@ -56,19 +51,14 @@ _lint_typos() {
 }
 
 _lint_rumdl() {
-  local file="$1" dir="$2" rc=0 out tool_rc
+  local file="$1" config_path="${4:-}" rc=0 out tool_rc
   local args=()
 
   command -v rumdl &>/dev/null || return 0
   # rumdl reads markdownlint configs for compatibility, so both naming families
-  # count as repo-owned policy and suppress the personal fallback.
-  if ! _has_config "$dir" ".rumdl.toml" &&
-    ! _has_config "$dir" "rumdl.toml" &&
-    ! _has_config "$dir" ".markdownlint.json" &&
-    ! _has_config "$dir" ".markdownlint.jsonc" &&
-    [ -f "$CHECKRUN_AUTOLINT_DIR/rumdl.toml" ]; then
-    args=(--config "$CHECKRUN_AUTOLINT_DIR/rumdl.toml")
-  fi
+  # are registered in the policy. Use the registry-selected path directly so
+  # plan/explain and execution cannot choose different config files.
+  [ -n "$config_path" ] && args=(--config "$config_path")
 
   if [ "$json" -eq 1 ]; then
     out=$(rumdl check --output json ${args[@]+"${args[@]}"} "$file" 2>/dev/null)

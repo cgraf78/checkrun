@@ -6,19 +6,16 @@
 # flags instead of maintaining their own global option state.
 
 _lint_biome() {
-  local file="$1" dir="$2"
+  local file="$1" config_source="${3:-}" config_path="${4:-}"
   command -v biome &>/dev/null || return 0
+
   # Biome handles format and lint from one config. Pass the selected root
   # explicitly because discovery starts from the process cwd, not from $file.
+  # The registry has already decided project vs fallback vs self-config-native;
+  # re-walking here would make `checkrun plan` and execution disagree again.
   local args=()
-  local repo_cfg
-  repo_cfg=$(_find_config "$dir" "biome.json" 2>/dev/null ||
-    _find_config "$dir" "biome.jsonc" 2>/dev/null || true)
-  if [ -n "$repo_cfg" ] && [ "$repo_cfg" != "$file" ]; then
-    args=(--config-path "$(dirname "$repo_cfg")")
-  elif [ -f "$CHECKRUN_AUTOLINT_DIR/biome.json" ] &&
-    [ "$file" != "$CHECKRUN_AUTOLINT_DIR/biome.json" ]; then
-    args=(--config-path "$CHECKRUN_AUTOLINT_DIR")
+  if [ "$config_source" != "native" ] && [ -n "$config_path" ]; then
+    args=(--config-path "$(dirname "$config_path")")
   fi
   if [ "$json" -eq 1 ]; then
     local out tool_rc

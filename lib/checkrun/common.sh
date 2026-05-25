@@ -86,6 +86,42 @@ _checkrun_registry() {
   "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"
 }
 
+_checkrun_tempfile() {
+  local tmp i
+
+  if command -v mktemp >/dev/null 2>&1; then
+    mktemp "${TMPDIR:-/tmp}/checkrun-plan.XXXXXX"
+    return $?
+  fi
+
+  # Some tests and hook launchers deliberately constrain PATH to only the tool
+  # being exercised. Registry execution still needs a scratch file so callers
+  # can capture Python's exit status before reading the NUL-delimited plan. Use
+  # Bash's noclobber mode as a mktemp fallback instead of making minimal PATHs
+  # fail only because the temp-file helper is missing.
+  for i in {1..20}; do
+    tmp="${TMPDIR:-/tmp}/checkrun-plan.$$.$RANDOM.$i"
+    if (
+      set -C
+      : >"$tmp"
+    ) 2>/dev/null; then
+      printf '%s\n' "$tmp"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+_checkrun_remove() {
+  # Cleanup should never become user-visible lint noise. Minimal PATH tests may
+  # omit `rm` on purpose, and a stale private temp file is less harmful than
+  # printing an infrastructure error after a deliberately skipped lint plan.
+  if command -v rm >/dev/null 2>&1; then
+    rm -f "$@"
+  fi
+}
+
 # Walk up from the file's directory looking for a config file. `$root`
 # is an inclusive stop point: configs at `$root/$name` still count.
 # Tracks `prev` so the loop terminates even when `dir` is relative

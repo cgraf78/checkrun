@@ -18,9 +18,9 @@ files own style/rule settings such as `ruff.toml`, `biome.json`, `taplo.toml`,
 and ignore files. Checkrun owns the behavior model: file matching, tool
 selection, phase ordering, dispatch semantics, and explainability.
 
-## Current State
+## Previous State Before This Refactor
 
-The current architecture is useful but split-brained:
+The architecture before this registry work was useful but split-brained:
 
 - `share/checkrun/capabilities.json` describes filetypes, selectors, tools, and
   integration metadata.
@@ -31,7 +31,7 @@ The current architecture is useful but split-brained:
 - Dotfiles Neovim config consumes the metadata, but the metadata still exposes a
   downstream-specific `sley` key.
 
-This creates drift risk. A new tool or selector can be added to shell dispatch
+That created drift risk. A new tool or selector could be added to shell dispatch
 without updating the metadata, or the metadata can describe behavior that the
 shell dispatch does not actually run.
 
@@ -133,12 +133,14 @@ cross-object invariants that are awkward in JSON Schema:
 - every selected config policy exists
 - every config policy references a known environment root
 - every phase name is known
-- every filetype named in selectors is declared or intentionally external
+- every selector declares at least one normalized filetype
+- every filetype named in selectors is declared
+- selector-local filename, extension, and pattern matchers are rejected
 - every adapter implementation exists, or is explicitly marked `internal`
 - no top-level or selector-level downstream keys such as `sley` or `nvim` exist
 
-The seeded registry must resolve current metadata drift before it becomes
-authoritative. For example, current metadata advertises C/C++ linting via
+The seeded registry must resolve pre-existing metadata drift before it becomes
+authoritative. For example, the old metadata advertised C/C++ linting via
 `clang-tidy`, while shell dispatch does not run a C/C++ linter today. The new
 registry should either model the actual supported behavior or intentionally add
 the adapter and tests. It must not preserve metadata-only tools that execution
@@ -190,14 +192,15 @@ consumer logic.
 
 ### Selectors
 
-Selectors describe which tools apply to a filetype, extension, filename, or path
-pattern.
+Selectors describe which tools apply to normalized filetypes. Filename,
+extension, pattern, and shebang matching belong only in the top-level `filetypes`
+table, so editor capabilities and shell execution consume the same path-to-type
+answer.
 
 ```json
 {
   "id": "python",
   "filetypes": ["python"],
-  "extensions": ["py"],
   "format": [
     {
       "tool": "ruff",
@@ -225,18 +228,15 @@ deduplicated by phase, tool, adapter, config policy, and path pattern. Similar
 but non-identical steps should remain visible rather than being collapsed by
 clever inference.
 
-Future alternative tools can use explicit selection semantics:
+Selectors must not carry their own `extensions`, `filenames`, or `patterns`
+matchers. Step-level `pathPatterns` are the only selector-adjacent path matcher,
+and they narrow an already selected filetype-specific step instead of creating a
+second filetype inference table.
 
-```json
-{
-  "tool": "black",
-  "adapter": "black-format",
-  "selection": "first-available"
-}
-```
-
-Do not add preference machinery until there is a real second tool for the same
-phase and filetype.
+Future alternative-tool preference is intentionally out of scope for the first
+registry cutover. Do not add preference or `first-available` machinery until
+there is a real second tool for the same phase and filetype; accepting schema
+fields before the interpreter implements them would create a new drift surface.
 
 ### Phases
 
@@ -281,7 +281,6 @@ linting is the current important example:
 {
   "id": "yaml",
   "filetypes": ["yaml"],
-  "extensions": ["yaml", "yml"],
   "format": [
     { "tool": "yamlfmt", "adapter": "yamlfmt", "config": "yamlfmt" }
   ],

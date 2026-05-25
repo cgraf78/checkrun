@@ -115,6 +115,27 @@ _assert_eq "linter sources: every adapter file is loaded" \
 _assert_eq "linter sources: shared core loads before adapters" \
   "$_linter_dir/core.sh" "$_first_linter_source"
 
+set +e
+output=$(bash -c '. "$1"; _autolint_merge_rc "$2" "$3"' _ "$_autolint_impl" 1 125)
+rc=$?
+set -e
+_assert_exit "exit merge: unknown adapter sentinel is preserved" 0 "$rc"
+_assert_eq "exit merge: 125 dominates lint findings" "125" "$output"
+
+set +e
+output=$(bash -c '. "$1"; _autolint_merge_rc "$2" "$3"' _ "$_autolint_impl" 125 1)
+rc=$?
+set -e
+_assert_exit "exit merge: prior sentinel is preserved" 0 "$rc"
+_assert_eq "exit merge: prior 125 dominates lint findings" "125" "$output"
+
+set +e
+output=$(bash -c '. "$1"; _autolint_merge_rc "$2" "$3"' _ "$_autolint_impl" 1 2)
+rc=$?
+set -e
+_assert_exit "exit merge: registry errors are preserved" 0 "$rc"
+_assert_eq "exit merge: 2 dominates lint findings" "2" "$output"
+
 # ---------------------------------------------------------------------------
 # Tests: dispatch by extension — errors detected
 # ---------------------------------------------------------------------------
@@ -2122,6 +2143,37 @@ rc=0
 "$AUTOLINT" || rc=$?
 _assert_exit "no args: exits 0" 0 "$rc"
 
+cat >"$_td/registry-clean.py" <<'EOF'
+x = 1
+EOF
+
+printf '{not-json' >"$_td/bad-registry.json"
+set +e
+output=$(CHECKRUN_REGISTRY="$_td/bad-registry.json" "$AUTOLINT" "$_td/registry-clean.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "invalid registry: autolint exits non-zero" 2 "$rc"
+_assert_contains "invalid registry: autolint reports registry error" "invalid JSON" "$output"
+
+cp "$CHECKRUN_TEST_ROOT/share/checkrun/registry.json" "$_td/unknown-lint-registry.json"
+python3 - "$_td/unknown-lint-registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["ghost-lint"] = {"kind": "shell-function", "function": "_lint_ruff"}
+data["selectors"][0]["lint"][0]["adapter"] = "ghost-lint"
+path.write_text(json.dumps(data))
+PY
+set +e
+output=$(CHECKRUN_REGISTRY="$_td/unknown-lint-registry.json" "$AUTOLINT" "$_td/registry-clean.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "undispatched adapter: autolint exits non-zero" 2 "$rc"
+_assert_contains "undispatched adapter: autolint reports adapter id" "not dispatched" "$output"
+
 # Multi-file invocation: every file should be linted and failures
 # should be aggregated into the final exit code.
 cat >"$_td/a.sh" <<'EOF'
@@ -2171,6 +2223,19 @@ set -e
 _assert_exit "multi-file args with --fix: exits 0 after fixing" 0 "$rc"
 _assert_not_contains "multi-file --fix: fixes first file" "import os" "$(cat "$_td/fix-a.py")"
 _assert_not_contains "multi-file --fix: fixes second file" "import sys" "$(cat "$_td/fix-b.py")"
+
+_weird_dir="$_td/weird-paths"
+mkdir -p "$_weird_dir"
+_weird_shell=$_weird_dir/$'tab\tand\nnewline.sh'
+cat >"$_weird_shell" <<'EOF'
+#!/bin/bash
+echo "ok"
+EOF
+set +e
+"$AUTOLINT" "$_weird_shell" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "hostile filename: tab/newline shell path lints" 0 "$rc"
 
 # ---------------------------------------------------------------------------
 # Tests: graceful skip when linter not installed

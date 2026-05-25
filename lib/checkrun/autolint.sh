@@ -83,38 +83,62 @@ _autolint_usage() {
 }
 
 _lint_one() {
-  local file="$1" plan row path filetype step_phase adapter config_source config_path
-  local rc=0 tool_rc dir
+  local file="$1" path filetype step_phase adapter config_source config_path
+  local rc=0 tool_rc dir plan_file
 
   # The registry planner is the policy boundary for linting: it owns matching,
   # cross-cutting spell/schema ordering, path-scoped workflow tools, and every
   # phase-specific ignore file. Shell code below only translates adapter ids
   # into concrete tool invocations.
-  plan=$(_checkrun_registry shell-plan --phase lint -- "$file")
+  plan_file=$(_checkrun_tempfile) || {
+    echo "autolint: could not create registry plan temp file" >&2
+    return 1
+  }
+  _checkrun_registry shell-plan --phase lint -- "$file" >"$plan_file"
   tool_rc=$?
-  [ "$tool_rc" -ne 0 ] && return "$tool_rc"
-  [ -n "$plan" ] || return 0
+  if [ "$tool_rc" -ne 0 ]; then
+    _checkrun_remove "$plan_file"
+    return "$tool_rc"
+  fi
+  [ -s "$plan_file" ] || {
+    _checkrun_remove "$plan_file"
+    return 0
+  }
 
   # yq/jq remain execution dependencies, not planning dependencies. Check them
   # only after the registry says at least one lint step will run, so missing or
   # ignored files keep the same graceful skip behavior as before.
   if ! command -v yq >/dev/null 2>&1; then
     echo "autolint: yq is required" >&2
+    _checkrun_remove "$plan_file"
     return 1
   fi
   if [ "$json" -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
     echo "autolint: jq is required for --json" >&2
+    _checkrun_remove "$plan_file"
     return 1
   fi
 
-  while IFS= read -r row || [ -n "$row" ]; do
-    IFS=$'\t' read -r path filetype step_phase adapter config_source config_path <<EOF
-$row
-EOF
+  while IFS= read -r -d '' path &&
+    IFS= read -r -d '' filetype &&
+    IFS= read -r -d '' step_phase &&
+    IFS= read -r -d '' adapter &&
+    IFS= read -r -d '' config_source &&
+    IFS= read -r -d '' config_path; do
     dir=$(dirname "$path")
-    _lint_dispatch "$adapter" "$path" "$filetype" "$step_phase" "$config_source" "$config_path" "$dir" || rc=$?
-  done <<<"$plan"
+    _lint_dispatch "$adapter" "$path" "$filetype" "$step_phase" "$config_source" "$config_path" "$dir"
+    tool_rc=$?
+    # A missing adapter is a Checkrun integrity failure, not a lint diagnostic.
+    # Preserve that private sentinel instead of allowing a later ordinary lint
+    # finding to overwrite it with exit 1.
+    if [ "$tool_rc" -eq 125 ]; then
+      rc=$tool_rc
+      break
+    fi
+    [ "$tool_rc" -ne 0 ] && rc=$tool_rc
+  done <"$plan_file"
 
+  _checkrun_remove "$plan_file"
   return "$rc"
 }
 
@@ -151,6 +175,10 @@ _lint_dispatch() {
     typos) _lint_typos "$file" "$dir" "$config_source" "$config_path" ;;
     zizmor) _lint_zizmor "$file" ;;
     zsh-lint) _lint_zsh "$file" ;;
+    *)
+      echo "autolint: unknown linter adapter: $adapter" >&2
+      return 125
+      ;;
   esac
 }
 
@@ -175,6 +203,27 @@ _autolint_default_jobs() {
     printf '1\n'
   else
     printf '%s\n' "$cores"
+  fi
+}
+
+_autolint_merge_rc() {
+  local current="$1" incoming="$2"
+
+  # Ordinary lint findings use exit 1, while registry/plumbing failures use
+  # stronger codes such as 2 or the private unknown-adapter sentinel 125. In a
+  # multi-file run those structural failures must survive later lint findings so
+  # CI points at the broken Checkrun contract instead of looking like normal
+  # source diagnostics.
+  if [ "$incoming" -eq 0 ]; then
+    printf '%s\n' "$current"
+  elif [ "$current" -eq 125 ] || [ "$incoming" -eq 125 ]; then
+    printf '125\n'
+  elif [ "$current" -eq 2 ] || [ "$incoming" -eq 2 ]; then
+    printf '2\n'
+  elif [ "$current" -ne 0 ]; then
+    printf '%s\n' "$current"
+  else
+    printf '%s\n' "$incoming"
   fi
 }
 
@@ -207,7 +256,7 @@ _autolint_run_file_batch() {
     [ -s "$stdout_file" ] && cat "$stdout_file"
     [ -s "$stderr_file" ] && cat "$stderr_file" >&2
     rm -f "$stdout_file" "$stderr_file"
-    [ "$file_rc" -ne 0 ] && rc=$file_rc
+    rc=$(_autolint_merge_rc "$rc" "$file_rc")
   done
 
   return "$rc"
@@ -256,7 +305,8 @@ _autolint_main() {
     # scope even when they receive one file, so parallel fixes can race on shared
     # source files or tool caches. Read-only linting below is safe to overlap.
     for file in "${lint_files[@]}"; do
-      _lint_one "$file" || rc=$?
+      _lint_one "$file"
+      rc=$(_autolint_merge_rc "$rc" "$?")
     done
   else
     jobs=${CHECKRUN_AUTOLINT_JOBS:-$(_autolint_default_jobs)}
@@ -272,11 +322,13 @@ _autolint_main() {
       # backend being exercised. In that mode correctness is more important than
       # concurrency, so fall back to the historical no-temp-file execution path.
       for file in "${lint_files[@]}"; do
-        _lint_one "$file" || rc=$?
+        _lint_one "$file"
+        rc=$(_autolint_merge_rc "$rc" "$?")
       done
     else
       for ((start = 0; start < ${#lint_files[@]}; start += jobs)); do
-        _autolint_run_file_batch "${lint_files[@]:start:jobs}" || rc=$?
+        _autolint_run_file_batch "${lint_files[@]:start:jobs}"
+        rc=$(_autolint_merge_rc "$rc" "$?")
       done
     fi
   fi

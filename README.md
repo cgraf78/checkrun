@@ -31,8 +31,8 @@ Both commands ignore missing, deleted, or explicitly ignored files. Missing
 language tools are treated as graceful no-ops so a host without a language
 toolchain does not break unrelated workflows.
 
-`checkrun capabilities --json` emits machine-readable filetype and tool
-metadata for editor integrations. `checkrun explain` reports the normalized
+`checkrun capabilities --json` emits machine-readable filetype metadata for
+editor integrations. `checkrun explain` reports the normalized
 path, inferred filetype, phase-specific ignore decisions, candidate
 formatter/linter tools, fallback config names, and matching schema associations
 for selected files.
@@ -120,11 +120,11 @@ that with `schemaDataDir`.
 
 ## Implementation Layout
 
-- `common.sh` owns shared path normalization, config walking, shell
-  classification, TOML reads, and ignore matching.
-- `autoformat.sh` owns formatter CLI behavior and formatter dispatch.
+- `common.sh` owns shared path normalization and shell helpers that adapters
+  still need at execution time.
+- `autoformat.sh` owns formatter CLI behavior and adapter-id dispatch.
 - `autolint.sh` owns linter CLI behavior, diagnostic normalization, linter
-  routing, and read-only batching.
+  adapter-id dispatch, and read-only batching.
 - `linters/*.sh` owns the linter backend adapters grouped by domain:
   `shell`, `web`, `build`, `config`, `languages`, `docs`, and
   `github-actions`.
@@ -133,11 +133,23 @@ that with `schemaDataDir`.
 entry points resolve their dependency libraries without relying on consumer
 wrapper scripts.
 
-To add a linter, place its adapter in the narrowest existing `linters/*.sh`
-domain file, or add a new domain file only when the existing groups are a poor
-fit. Adapter helpers should return 0 when the underlying tool is missing, use
-the current invocation's dynamically scoped `fix` and `json` flags, and route
-from `_lint_one` in `autolint.sh`.
+To add a formatter or linter, update the registry first:
+
+1. Add or reuse filetype inference under `filetypes`.
+2. Add a selector for the normalized filetype, then add a step with the tool
+   name, adapter id, and config policy when the tool has Checkrun-owned config
+   discovery. Use step-level `pathPatterns` only to narrow a tool within an
+   already inferred filetype.
+3. Add the adapter id under `adapters` and implement the named shell function.
+4. Dispatch that adapter id from `autoformat.sh` or `autolint.sh`.
+5. Add registry-plan coverage plus adapter behavior tests.
+
+Do not add a second filename or extension decision table in selectors or shell.
+The top-level `filetypes` table answers what the file is; selectors answer which
+tools apply to that normalized filetype; shell adapters only answer how to invoke
+that tool. Adapter helpers should return 0 when the underlying tool is missing,
+keep formatter failures advisory where appropriate, and preserve `autolint`'s
+dynamically scoped `fix` and `json` behavior.
 
 ## Supported Tools
 

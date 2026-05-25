@@ -44,6 +44,23 @@ assert data["filetypes"]["custom"]["filename"]["Dockerfile"] == "dockerfile"
 '
 _assert_exit "capabilities: emits supported filetype metadata" 0 "$?"
 
+_minimal_path_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_minimal_path_bin/bash"
+set +e
+output=$(PATH="$_minimal_path_bin" "$CHECKRUN" capabilities --json 2>&1)
+rc=$?
+set -e
+_assert_exit "capabilities: minimal PATH still finds python" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+assert data["version"] == 2
+assert "python" in data["filetypes"]["format"]
+'
+_assert_exit "capabilities: minimal PATH emits JSON" 0 "$?"
+
 output=$("$CHECKRUN" registry --json 2>&1)
 rc=$?
 _assert_exit "registry: --json exits 0" 0 "$rc"
@@ -196,6 +213,30 @@ assert steps[-1]["adapter"] == "ruff-lint"
 '
 _assert_exit "plan: lint phase includes registry-selected steps" 0 "$?"
 
+_sc_cfg=$(_tmpdir)
+_sc_repo=$(_tmpdir)
+cat >"$_sc_cfg/shellcheckrc" <<'EOF'
+disable=SC1091
+EOF
+touch "$_sc_repo/.shellcheckrc"
+cat >"$_sc_repo/script.sh" <<'EOF'
+#!/bin/bash
+echo ok
+EOF
+output=$(CHECKRUN_AUTOLINT_DIR="$_sc_cfg" "$CHECKRUN" plan --json --phase lint "$_sc_repo/script.sh" 2>&1)
+rc=$?
+_assert_exit "plan: shellcheck project config exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)["files"][0]
+shellcheck = [step for step in item["lint"]["steps"] if step["adapter"] == "shellcheck"][0]
+assert shellcheck["config"]["source"] == "project"
+assert shellcheck["config"]["path"].endswith("/.shellcheckrc")
+'
+_assert_exit "plan: shellcheck project config suppresses fallback" 0 "$?"
+
 output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
 rc=$?
 _assert_exit "plan: format phase exits 0" 0 "$rc"
@@ -234,6 +275,15 @@ steps = json.load(sys.stdin)["files"][0]["lint"]["steps"]
 assert [step["adapter"] for step in steps] == ["typos", "schema-lint"]
 '
 _assert_exit "plan: generic yaml omits workflow-only linters" 0 "$?"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+skipped = json.load(sys.stdin)["files"][0]["lint"]["skipped"]
+assert [step["adapter"] for step in skipped] == ["actionlint", "zizmor"]
+assert all(step["reason"] == "path-pattern" for step in skipped)
+'
+_assert_exit "plan: generic yaml explains workflow-only skips" 0 "$?"
 
 output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/.github/workflows/build.yml" 2>&1)
 rc=$?
@@ -248,8 +298,10 @@ assert [step["adapter"] for step in steps] == ["typos", "schema-lint", "actionli
 _assert_exit "plan: workflow yaml includes scoped linters" 0 "$?"
 
 missing_registry="$_td/missing-registry.json"
+set +e
 output=$(CHECKRUN_REGISTRY="$missing_registry" "$CHECKRUN" plan --json --phase lint "$_td/keep.py" 2>&1)
 rc=$?
+set -e
 _assert_exit "plan: missing registry exits non-zero" 2 "$rc"
 _assert_contains "plan: missing registry reports error" "registry file not found" "$output"
 
