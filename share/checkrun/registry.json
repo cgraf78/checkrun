@@ -1,0 +1,526 @@
+{
+  "version": 1,
+  "filetypes": {
+    "extension": {
+      "automount": "systemd",
+      "bash": "bash",
+      "bzl": "bzl",
+      "c": "c",
+      "cc": "cpp",
+      "cmake": "cmake",
+      "cpp": "cpp",
+      "cron": "crontab",
+      "css": "css",
+      "cxx": "cpp",
+      "device": "systemd",
+      "go": "go",
+      "h": "c",
+      "hpp": "cpp",
+      "htm": "html",
+      "html": "html",
+      "hxx": "cpp",
+      "java": "java",
+      "js": "javascript",
+      "json": "json",
+      "jsonc": "jsonc",
+      "jsx": "javascriptreact",
+      "lua": "lua",
+      "md": "markdown",
+      "mk": "make",
+      "mount": "systemd",
+      "path": "systemd",
+      "php": "php",
+      "py": "python",
+      "rb": "ruby",
+      "rs": "rust",
+      "scope": "systemd",
+      "service": "systemd",
+      "sh": "sh",
+      "slice": "systemd",
+      "socket": "systemd",
+      "star": "starlark",
+      "swap": "systemd",
+      "target": "systemd",
+      "timer": "systemd",
+      "toml": "toml",
+      "ts": "typescript",
+      "tsx": "typescriptreact",
+      "txt": "text",
+      "yaml": "yaml",
+      "yml": "yaml",
+      "zsh": "zsh"
+    },
+    "filename": {
+      ".bash_profile": "bash",
+      ".bashrc": "bash",
+      ".editorconfig": "editorconfig",
+      ".envrc": "bash",
+      ".gitconfig": "gitconfig",
+      ".profile": "bash",
+      ".zlogin": "zsh",
+      ".zlogout": "zsh",
+      ".zprofile": "zsh",
+      ".zshenv": "zsh",
+      ".zshrc": "zsh",
+      "BUCK": "bzl",
+      "BUILD": "bzl",
+      "CMakeLists.txt": "cmake",
+      "Containerfile": "dockerfile",
+      "Dockerfile": "dockerfile",
+      "GNUmakefile": "make",
+      "MODULE.bazel": "bzl",
+      "Makefile": "make",
+      "TARGETS": "bzl",
+      "WORKSPACE": "bzl",
+      "cron": "crontab",
+      "crontab": "crontab",
+      "envrc": "bash",
+      "makefile": "make",
+      "tmux.conf": "tmux"
+    },
+    "patterns": [
+      { "pattern": "BUCK.*", "filetype": "bzl" },
+      { "pattern": "BUILD.*", "filetype": "bzl" },
+      { "pattern": "Containerfile.*", "filetype": "dockerfile" },
+      { "pattern": "Dockerfile.*", "filetype": "dockerfile" },
+      { "pattern": "TARGETS.*", "filetype": "bzl" },
+      { "pattern": "WORKSPACE.*", "filetype": "bzl" },
+      { "pattern": "agent-hook-*", "filetype": "sh", "extensionlessOnly": true },
+      { "pattern": "envrc-*", "filetype": "bash", "extensionlessOnly": true }
+    ],
+    "shebangs": [
+      { "contains": "zsh", "filetype": "zsh" },
+      { "containsAny": ["bash", "/sh"], "filetype": "bash" }
+    ]
+  },
+  "crossCutting": {
+    "lint": [
+      {
+        "phase": "spell",
+        "tool": "typos",
+        "adapter": "typos",
+        "config": "typos"
+      },
+      {
+        "phase": "schema",
+        "tool": "schema-lint",
+        "adapter": "schema-lint"
+      }
+    ]
+  },
+  "configPolicies": {
+    "biome-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": "biome.json" }, { "file": "biome.jsonc" }],
+      "fallback": { "file": "biome.json" },
+      "selfConfigGuard": true
+    },
+    "biome-lint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [{ "file": "biome.json" }, { "file": "biome.jsonc" }],
+      "fallback": { "file": "biome.json" },
+      "selfConfigGuard": true
+    },
+    "checkmake": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [{ "file": "checkmake.ini" }],
+      "fallback": { "file": "checkmake.ini" }
+    },
+    "clang-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": ".clang-format" }, { "file": "_clang-format" }],
+      "fallback": { "file": "clang-format" }
+    },
+    "cmake-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [
+        { "file": ".cmake-format.py" },
+        { "file": "cmake-format.py" },
+        { "file": ".cmake-format.yaml" },
+        { "file": "cmake-format.yaml" },
+        { "file": ".cmake-format.json" },
+        { "file": "cmake-format.json" }
+      ],
+      "fallback": { "file": "cmake-format.py" }
+    },
+    "cmake-lint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [
+        { "file": ".cmake-format.py" },
+        { "file": "cmake-format.py" },
+        { "file": ".cmake-format.yaml" },
+        { "file": "cmake-format.yaml" },
+        { "file": ".cmake-format.json" },
+        { "file": "cmake-format.json" }
+      ],
+      "fallback": { "file": "cmake-format.py" }
+    },
+    "golangci-lint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [
+        { "file": ".golangci.yml" },
+        { "file": ".golangci.yaml" },
+        { "file": ".golangci.toml" },
+        { "file": ".golangci.json" }
+      ],
+      "fallback": { "file": "golangci-lint.yml" }
+    },
+    "hadolint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [{ "file": ".hadolint.yaml" }],
+      "fallback": { "file": "hadolint.yaml" }
+    },
+    "php-cs-fixer": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": ".php-cs-fixer.php" }, { "file": ".php-cs-fixer.dist.php" }],
+      "fallback": { "file": "php-cs-fixer.php" }
+    },
+    "rubocop-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [
+        { "file": ".rubocop.yml" },
+        { "file": ".rubocop.yaml" },
+        { "file": "rubocop.yml" },
+        { "file": "rubocop.yaml" }
+      ],
+      "fallback": { "file": "rubocop.yml" }
+    },
+    "rubocop-lint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [
+        { "file": ".rubocop.yml" },
+        { "file": ".rubocop.yaml" },
+        { "file": "rubocop.yml" },
+        { "file": "rubocop.yaml" }
+      ],
+      "fallback": { "file": "rubocop.yml" }
+    },
+    "ruff-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [
+        { "file": "ruff.toml" },
+        { "file": ".ruff.toml" },
+        {
+          "file": "pyproject.toml",
+          "contains": { "format": "toml", "query": ["tool", "ruff"] }
+        }
+      ],
+      "fallback": { "file": "ruff.toml" }
+    },
+    "ruff-lint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [
+        { "file": "ruff.toml" },
+        { "file": ".ruff.toml" },
+        {
+          "file": "pyproject.toml",
+          "contains": { "format": "toml", "query": ["tool", "ruff"] }
+        }
+      ],
+      "fallback": { "file": "ruff.toml" }
+    },
+    "rumdl-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [
+        { "file": ".rumdl.toml" },
+        { "file": "rumdl.toml" },
+        { "file": ".markdownlint.json" },
+        { "file": ".markdownlint.jsonc" }
+      ],
+      "fallback": { "file": "rumdl.toml" }
+    },
+    "rumdl-lint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [
+        { "file": ".rumdl.toml" },
+        { "file": "rumdl.toml" },
+        { "file": ".markdownlint.json" },
+        { "file": ".markdownlint.jsonc" }
+      ],
+      "fallback": { "file": "rumdl.toml" }
+    },
+    "rustfmt": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": "rustfmt.toml" }, { "file": ".rustfmt.toml" }],
+      "fallback": { "file": "rustfmt.toml" }
+    },
+    "selene": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [{ "file": "selene.toml" }, { "file": ".selene.toml" }],
+      "fallback": { "file": "selene.toml" }
+    },
+    "shellcheck": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "fallback": { "file": "shellcheckrc" }
+    },
+    "shfmt": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": ".editorconfig" }],
+      "fallback": { "file": "shfmt.toml" }
+    },
+    "stylua": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": "stylua.toml" }, { "file": ".stylua.toml" }, { "file": ".editorconfig" }],
+      "fallback": { "file": "stylua.toml" }
+    },
+    "taplo-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": "taplo.toml" }, { "file": ".taplo.toml" }],
+      "fallback": { "file": "taplo.toml" }
+    },
+    "taplo-lint": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [{ "file": "taplo.toml" }, { "file": ".taplo.toml" }],
+      "fallback": { "file": "taplo.toml" },
+      "native": "none"
+    },
+    "typos": {
+      "envRoot": "CHECKRUN_AUTOLINT_DIR",
+      "project": [{ "file": ".typos.toml" }, { "file": "typos.toml" }],
+      "fallback": { "file": "typos.toml" }
+    },
+    "yamlfmt": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [{ "file": ".yamlfmt" }],
+      "fallback": { "file": "yamlfmt.yaml" }
+    }
+  },
+  "adapters": {
+    "actionlint": { "kind": "shell-function", "function": "_lint_actionlint" },
+    "biome-format": { "kind": "shell-function", "function": "_format_biome" },
+    "biome-lint": { "kind": "shell-function", "function": "_lint_biome" },
+    "buildifier-format": { "kind": "shell-function", "function": "_format_buildifier" },
+    "buildifier-lint": { "kind": "shell-function", "function": "_lint_buildifier" },
+    "checkmake": { "kind": "shell-function", "function": "_lint_checkmake" },
+    "clang-format": { "kind": "shell-function", "function": "_format_clang" },
+    "cmake-format": { "kind": "shell-function", "function": "_format_cmake" },
+    "cmake-lint": { "kind": "shell-function", "function": "_lint_cmake" },
+    "crontab": { "kind": "shell-function", "function": "_lint_crontab" },
+    "dockerfmt": { "kind": "shell-function", "function": "_format_dockerfmt" },
+    "editorconfig-checker": { "kind": "shell-function", "function": "_lint_editorconfig" },
+    "git-config": { "kind": "shell-function", "function": "_lint_git_config" },
+    "gofumpt": { "kind": "shell-function", "function": "_format_gofumpt" },
+    "goimports": { "kind": "shell-function", "function": "_format_goimports" },
+    "golangci-lint": { "kind": "shell-function", "function": "_lint_go" },
+    "google-java-format": { "kind": "shell-function", "function": "_format_java" },
+    "google-java-format-lint": { "kind": "shell-function", "function": "_lint_java" },
+    "hadolint": { "kind": "shell-function", "function": "_lint_dockerfile" },
+    "php": { "kind": "shell-function", "function": "_lint_php" },
+    "php-cs-fixer": { "kind": "shell-function", "function": "_format_php" },
+    "rubocop-format": { "kind": "shell-function", "function": "_format_ruby" },
+    "rubocop-lint": { "kind": "shell-function", "function": "_lint_ruby" },
+    "ruff-format": { "kind": "shell-function", "function": "_format_ruff" },
+    "ruff-lint": { "kind": "shell-function", "function": "_lint_ruff" },
+    "rumdl-format": { "kind": "shell-function", "function": "_format_rumdl" },
+    "rumdl-lint": { "kind": "shell-function", "function": "_lint_rumdl" },
+    "rustfmt": { "kind": "shell-function", "function": "_format_rustfmt" },
+    "rust-clippy": { "kind": "shell-function", "function": "_lint_rust" },
+    "schema-lint": { "kind": "shell-function", "function": "_lint_schema" },
+    "selene": { "kind": "shell-function", "function": "_lint_selene" },
+    "shellcheck": { "kind": "shell-function", "function": "_lint_sh" },
+    "shfmt": { "kind": "shell-function", "function": "_format_sh" },
+    "shfmt-zsh": { "kind": "shell-function", "function": "_format_sh_zsh" },
+    "stylua": { "kind": "shell-function", "function": "_format_stylua" },
+    "superhtml-format": { "kind": "shell-function", "function": "_format_superhtml" },
+    "superhtml-lint": { "kind": "shell-function", "function": "_lint_superhtml" },
+    "systemd-analyze": { "kind": "shell-function", "function": "_lint_systemd_unit" },
+    "taplo-format": { "kind": "shell-function", "function": "_format_taplo" },
+    "taplo-lint": { "kind": "shell-function", "function": "_lint_taplo" },
+    "tmux": { "kind": "shell-function", "function": "_lint_tmux_config" },
+    "typos": { "kind": "shell-function", "function": "_lint_typos" },
+    "yamlfmt": { "kind": "shell-function", "function": "_format_yamlfmt" },
+    "zizmor": { "kind": "shell-function", "function": "_lint_zizmor" },
+    "zsh-lint": { "kind": "shell-function", "function": "_lint_zsh" }
+  },
+  "selectors": [
+    {
+      "id": "python",
+      "filetypes": ["python"],
+      "extensions": ["py"],
+      "format": [{ "tool": "ruff", "adapter": "ruff-format", "config": "ruff-format" }],
+      "lint": [{ "tool": "ruff", "adapter": "ruff-lint", "config": "ruff-lint" }]
+    },
+    {
+      "id": "bash-shell",
+      "filetypes": ["bash", "sh"],
+      "extensions": ["bash", "sh"],
+      "filenames": [".bash_profile", ".bashrc", ".envrc", ".profile", "envrc"],
+      "patterns": ["envrc-*", "agent-hook-*"],
+      "format": [{ "tool": "shfmt", "adapter": "shfmt", "config": "shfmt" }],
+      "lint": [{ "tool": "shellcheck", "adapter": "shellcheck", "config": "shellcheck" }]
+    },
+    {
+      "id": "zsh-shell",
+      "filetypes": ["zsh"],
+      "extensions": ["zsh"],
+      "filenames": [".zlogin", ".zlogout", ".zprofile", ".zshenv", ".zshrc"],
+      "format": [{ "tool": "shfmt", "adapter": "shfmt-zsh", "config": "shfmt" }],
+      "lint": [{ "tool": "zsh", "adapter": "zsh-lint" }]
+    },
+    {
+      "id": "go",
+      "filetypes": ["go"],
+      "extensions": ["go"],
+      "format": [
+        { "tool": "goimports", "adapter": "goimports" },
+        { "tool": "gofumpt", "adapter": "gofumpt" }
+      ],
+      "lint": [{ "tool": "golangci-lint", "adapter": "golangci-lint", "config": "golangci-lint" }]
+    },
+    {
+      "id": "web",
+      "filetypes": ["css", "javascript", "javascriptreact", "json", "jsonc", "typescript", "typescriptreact"],
+      "extensions": ["css", "js", "jsx", "json", "jsonc", "ts", "tsx"],
+      "format": [{ "tool": "biome", "adapter": "biome-format", "config": "biome-format" }],
+      "lint": [{ "tool": "biome", "adapter": "biome-lint", "config": "biome-lint" }]
+    },
+    {
+      "id": "markdown",
+      "filetypes": ["markdown"],
+      "extensions": ["md"],
+      "format": [{ "tool": "rumdl", "adapter": "rumdl-format", "config": "rumdl-format" }],
+      "lint": [{ "tool": "rumdl", "adapter": "rumdl-lint", "config": "rumdl-lint" }]
+    },
+    {
+      "id": "yaml",
+      "filetypes": ["yaml"],
+      "extensions": ["yaml", "yml"],
+      "format": [{ "tool": "yamlfmt", "adapter": "yamlfmt", "config": "yamlfmt" }],
+      "lint": [
+        {
+          "tool": "actionlint",
+          "adapter": "actionlint",
+          "pathPatterns": ["*/.github/workflows/*.yml", "*/.github/workflows/*.yaml"]
+        },
+        {
+          "tool": "zizmor",
+          "adapter": "zizmor",
+          "pathPatterns": ["*/.github/workflows/*.yml", "*/.github/workflows/*.yaml"]
+        }
+      ]
+    },
+    {
+      "id": "toml",
+      "filetypes": ["toml"],
+      "extensions": ["toml"],
+      "format": [{ "tool": "taplo", "adapter": "taplo-format", "config": "taplo-format" }],
+      "lint": [{ "tool": "taplo", "adapter": "taplo-lint", "config": "taplo-lint" }]
+    },
+    {
+      "id": "lua",
+      "filetypes": ["lua"],
+      "extensions": ["lua"],
+      "format": [{ "tool": "stylua", "adapter": "stylua", "config": "stylua" }],
+      "lint": [{ "tool": "selene", "adapter": "selene", "config": "selene" }]
+    },
+    {
+      "id": "rust",
+      "filetypes": ["rust"],
+      "extensions": ["rs"],
+      "format": [{ "tool": "rustfmt", "adapter": "rustfmt", "config": "rustfmt" }],
+      "lint": [{ "tool": "cargo", "adapter": "rust-clippy" }]
+    },
+    {
+      "id": "c-family",
+      "filetypes": ["c", "cpp"],
+      "extensions": ["c", "cc", "cpp", "cxx", "h", "hpp", "hxx"],
+      "format": [{ "tool": "clang-format", "adapter": "clang-format", "config": "clang-format" }]
+    },
+    {
+      "id": "html",
+      "filetypes": ["html"],
+      "extensions": ["htm", "html"],
+      "format": [{ "tool": "superhtml", "adapter": "superhtml-format" }],
+      "lint": [{ "tool": "superhtml", "adapter": "superhtml-lint" }]
+    },
+    {
+      "id": "java",
+      "filetypes": ["java"],
+      "extensions": ["java"],
+      "format": [{ "tool": "google-java-format", "adapter": "google-java-format" }],
+      "lint": [{ "tool": "google-java-format", "adapter": "google-java-format-lint" }]
+    },
+    {
+      "id": "ruby",
+      "filetypes": ["ruby"],
+      "extensions": ["rb"],
+      "format": [{ "tool": "rubocop", "adapter": "rubocop-format", "config": "rubocop-format" }],
+      "lint": [{ "tool": "rubocop", "adapter": "rubocop-lint", "config": "rubocop-lint" }]
+    },
+    {
+      "id": "php",
+      "filetypes": ["php"],
+      "extensions": ["php"],
+      "format": [{ "tool": "php-cs-fixer", "adapter": "php-cs-fixer", "config": "php-cs-fixer" }],
+      "lint": [{ "tool": "php", "adapter": "php" }]
+    },
+    {
+      "id": "cmake",
+      "filetypes": ["cmake"],
+      "filenames": ["CMakeLists.txt"],
+      "extensions": ["cmake"],
+      "format": [{ "tool": "cmake-format", "adapter": "cmake-format", "config": "cmake-format" }],
+      "lint": [{ "tool": "cmake-lint", "adapter": "cmake-lint", "config": "cmake-lint" }]
+    },
+    {
+      "id": "build",
+      "filetypes": ["bzl", "starlark"],
+      "filenames": ["BUCK", "BUILD", "MODULE.bazel", "TARGETS", "WORKSPACE"],
+      "patterns": ["BUCK.*", "BUILD.*", "TARGETS.*", "WORKSPACE.*"],
+      "extensions": ["bzl", "star"],
+      "format": [{ "tool": "buildifier", "adapter": "buildifier-format" }],
+      "lint": [{ "tool": "buildifier", "adapter": "buildifier-lint" }]
+    },
+    {
+      "id": "container",
+      "filetypes": ["dockerfile"],
+      "filenames": ["Containerfile", "Dockerfile"],
+      "patterns": ["Containerfile.*", "Dockerfile.*"],
+      "format": [{ "tool": "dockerfmt", "adapter": "dockerfmt" }],
+      "lint": [{ "tool": "hadolint", "adapter": "hadolint", "config": "hadolint" }]
+    },
+    {
+      "id": "make",
+      "filetypes": ["make"],
+      "filenames": ["GNUmakefile", "Makefile", "makefile"],
+      "extensions": ["mk"],
+      "lint": [{ "tool": "checkmake", "adapter": "checkmake", "config": "checkmake" }]
+    },
+    {
+      "id": "systemd",
+      "filetypes": ["systemd"],
+      "extensions": ["automount", "device", "mount", "path", "scope", "service", "slice", "socket", "swap", "target", "timer"],
+      "lint": [{ "tool": "systemd-analyze", "adapter": "systemd-analyze" }]
+    },
+    {
+      "id": "editorconfig",
+      "filetypes": ["editorconfig"],
+      "filenames": [".editorconfig"],
+      "lint": [{ "tool": "editorconfig-checker", "adapter": "editorconfig-checker" }]
+    },
+    {
+      "id": "gitconfig",
+      "filetypes": ["gitconfig"],
+      "filenames": [".gitconfig"],
+      "lint": [{ "tool": "git config", "adapter": "git-config" }]
+    },
+    {
+      "id": "crontab",
+      "filetypes": ["crontab"],
+      "filenames": ["cron", "crontab"],
+      "extensions": ["cron"],
+      "lint": [{ "tool": "crontab", "adapter": "crontab" }]
+    },
+    {
+      "id": "tmux",
+      "filetypes": ["tmux"],
+      "filenames": ["tmux.conf"],
+      "lint": [{ "tool": "tmux", "adapter": "tmux" }]
+    },
+    {
+      "id": "text",
+      "filetypes": ["text"],
+      "extensions": ["txt"]
+    }
+  ]
+}

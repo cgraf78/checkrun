@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# registry-test — unit tests for the Checkrun tooling registry.
+#
+# Usage: registry-test
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "registry-test"
+
+REGISTRY="$CHECKRUN_REPO_ROOT/share/checkrun/registry.json"
+SCHEMA="$CHECKRUN_REPO_ROOT/share/checkrun/schemas/registry.schema.json"
+REGISTRY_PY="$CHECKRUN_REPO_ROOT/lib/checkrun/registry.py"
+
+echo "=== checkrun: registry schema ==="
+
+_assert_file_exists "registry: schema file is tracked" "$SCHEMA"
+_assert_file_exists "registry: registry file is tracked" "$REGISTRY"
+
+python3 - "$REGISTRY" "$SCHEMA" <<'PY'
+import importlib.util
+import json
+import sys
+
+registry_path, schema_path = sys.argv[1:]
+with open(registry_path, encoding="utf-8") as file:
+    registry = json.load(file)
+with open(schema_path, encoding="utf-8") as file:
+    schema = json.load(file)
+
+if importlib.util.find_spec("jsonschema") is not None:
+    import jsonschema
+
+    validator_cls = jsonschema.validators.validator_for(schema)
+    validator_cls.check_schema(schema)
+    validator_cls(schema).validate(registry)
+PY
+_assert_exit "registry: jsonschema validates registry when available" 0 "$?"
+
+echo "=== checkrun: registry interpreter ==="
+
+_td=$(_tmpdir)
+
+python3 - "$CHECKRUN_REPO_ROOT" "$_td" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmp = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location(
+    "checkrun_registry", root / "lib/checkrun/registry.py"
+)
+registry_mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(registry_mod)
+
+registry = registry_mod.load_registry()
+capabilities = registry_mod.capabilities(registry)
+
+assert capabilities["version"] == 2
+assert "sley" not in capabilities
+assert "python" in capabilities["filetypes"]["format"]
+assert "systemd" in capabilities["filetypes"]["lint"]
+assert capabilities["filetypes"]["custom"]["filename"]["Dockerfile"] == "dockerfile"
+
+selectors = {selector["id"]: selector for selector in registry["selectors"]}
+assert selectors["c-family"].get("lint", []) == []
+assert "clang-tidy" not in json.dumps(selectors["c-family"])
+
+plan = registry_mod.plan(registry, [str(root / "README.md")], "lint")
+steps = plan["files"][0]["lint"]["steps"]
+assert [step["adapter"] for step in steps[:2]] == ["typos", "schema-lint"]
+assert steps[-1]["adapter"] == "rumdl-lint"
+
+workflow = tmp / ".github/workflows/ci.yml"
+workflow.parent.mkdir(parents=True, exist_ok=True)
+workflow.touch(exist_ok=True)
+workflow_plan = registry_mod.plan(registry, [str(workflow)], "lint")
+workflow_adapters = [step["adapter"] for step in workflow_plan["files"][0]["lint"]["steps"]]
+assert "actionlint" in workflow_adapters
+assert "zizmor" in workflow_adapters
+
+plain = tmp / "plain.yaml"
+plain.touch(exist_ok=True)
+plain_plan = registry_mod.plan(registry, [str(plain)], "lint")
+plain_adapters = [step["adapter"] for step in plain_plan["files"][0]["lint"]["steps"]]
+assert "actionlint" not in plain_adapters
+assert "zizmor" not in plain_adapters
+binary = tmp / "registry-test-binary"
+binary.write_bytes(b"\0\1\2")
+assert registry_mod.infer_filetype(binary, registry) is None
+PY
+_assert_exit "registry: interpreter derives capabilities and plans" 0 "$?"
+
+echo "=== checkrun: invalid registry fixtures ==="
+
+cp "$REGISTRY" "$_td/registry.json"
+
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["sley"] = {}
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: downstream key exits non-zero" 2 "$rc"
+_assert_contains "registry: downstream key reports error" "downstream-specific" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"].append(dict(data["selectors"][0]))
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: duplicate selector exits non-zero" 2 "$rc"
+_assert_contains "registry: duplicate selector reports error" "duplicate selector" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"][0]["format"][0]["adapter"] = "missing-adapter"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: missing adapter exits non-zero" 2 "$rc"
+_assert_contains "registry: missing adapter reports error" "unknown adapter" "$output"
+
+_test_summary

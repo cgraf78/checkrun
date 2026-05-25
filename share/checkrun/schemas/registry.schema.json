@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cgraf78.github.io/checkrun/registry.schema.json",
+  "title": "Checkrun Tooling Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "filetypes", "selectors", "crossCutting", "configPolicies", "adapters"],
+  "properties": {
+    "version": { "const": 1 },
+    "filetypes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["extension", "filename", "patterns", "shebangs"],
+      "properties": {
+        "extension": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "filename": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "patterns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/filetypePattern" }
+        },
+        "shebangs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/shebang" }
+        }
+      }
+    },
+    "selectors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/selector" }
+    },
+    "crossCutting": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lint": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        }
+      }
+    },
+    "configPolicies": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/configPolicy" }
+    },
+    "adapters": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/adapter" }
+    }
+  },
+  "$defs": {
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["shell-function", "internal"] },
+        "function": { "type": "string" },
+        "internal": { "type": "boolean" }
+      }
+    },
+    "configPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "envRoot": {
+          "enum": ["CHECKRUN_AUTOFORMAT_DIR", "CHECKRUN_AUTOLINT_DIR"]
+        },
+        "project": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/configProbe" }
+        },
+        "fallback": { "$ref": "#/$defs/configFallback" },
+        "native": { "enum": ["none"] },
+        "selfConfigGuard": { "type": "boolean" }
+      }
+    },
+    "configProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file"],
+      "properties": {
+        "file": { "type": "string" },
+        "contains": { "$ref": "#/$defs/configContains" }
+      }
+    },
+    "configContains": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "query"],
+      "properties": {
+        "format": { "enum": ["json", "toml"] },
+        "query": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "configFallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file"],
+      "properties": {
+        "file": { "type": "string" }
+      }
+    },
+    "filetypePattern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pattern", "filetype"],
+      "properties": {
+        "pattern": { "type": "string" },
+        "filetype": { "type": "string" },
+        "extensionlessOnly": { "type": "boolean" }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string" },
+        "filetypes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "extensions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "filenames": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "patterns": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "format": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "lint": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        }
+      }
+    },
+    "shebang": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filetype"],
+      "properties": {
+        "contains": { "type": "string" },
+        "containsAny": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "filetype": { "type": "string" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "adapter"],
+      "properties": {
+        "phase": { "enum": ["format", "lint", "spell", "schema", "tool"] },
+        "tool": { "type": "string" },
+        "adapter": { "type": "string" },
+        "config": { "type": "string" },
+        "pathPatterns": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "selection": { "enum": ["run-all", "first-available"] }
+      }
+    }
+  }
+}
