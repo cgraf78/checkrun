@@ -83,6 +83,80 @@ _assert_contains() {
   fi
 }
 
+_canonical_test_path() {
+  local path="$1" dir base absdir
+
+  # macOS temp paths can be reported through either `/var/...` or the
+  # canonical `/private/var/...` spelling depending on whether a shell helper,
+  # Python pathlib, or the invoked tool touched the path. Tests care that the
+  # same file was routed, not which spelling an OS layer chose.
+  if [[ -d "$path" ]]; then
+    (cd "$path" && pwd -P)
+    return
+  fi
+
+  case "$path" in
+    */*)
+      dir="${path%/*}"
+      base="${path##*/}"
+      [[ -n "$dir" ]] || dir=/
+      ;;
+    *)
+      dir=.
+      base="$path"
+      ;;
+  esac
+
+  absdir=$(cd "$dir" && pwd -P) || return 1
+  if [[ "$absdir" == "/" ]]; then
+    printf '/%s\n' "$base"
+  else
+    printf '%s/%s\n' "$absdir" "$base"
+  fi
+}
+
+_assert_contains_path_arg() {
+  local desc="$1" prefix="$2" path="$3" actual="$4"
+  local expected canonical
+
+  expected="${prefix}${path}"
+  canonical="${prefix}$(_canonical_test_path "$path")"
+
+  if [[ "$actual" == *"$expected"* || "$actual" == *"$canonical"* ]]; then
+    _pass "$desc"
+  else
+    _fail "$desc (expected to contain '$expected' or '$canonical', got '$actual')"
+  fi
+}
+
+_assert_contains_path_arg_suffix() {
+  local desc="$1" prefix="$2" path="$3" suffix="$4" actual="$5"
+  local expected canonical
+
+  expected="${prefix}${path}${suffix}"
+  canonical="${prefix}$(_canonical_test_path "$path")${suffix}"
+
+  if [[ "$actual" == *"$expected"* || "$actual" == *"$canonical"* ]]; then
+    _pass "$desc"
+  else
+    _fail "$desc (expected to contain '$expected' or '$canonical', got '$actual')"
+  fi
+}
+
+_assert_not_contains_path_arg() {
+  local desc="$1" prefix="$2" path="$3" actual="$4"
+  local unexpected canonical
+
+  unexpected="${prefix}${path}"
+  canonical="${prefix}$(_canonical_test_path "$path")"
+
+  if [[ "$actual" != *"$unexpected"* && "$actual" != *"$canonical"* ]]; then
+    _pass "$desc"
+  else
+    _fail "$desc (should not contain '$unexpected' or '$canonical')"
+  fi
+}
+
 _assert_not_contains() {
   local desc="$1" unexpected="$2" actual="$3"
   if [[ "$actual" != *"$unexpected"* ]]; then
@@ -329,6 +403,20 @@ _mock_home() {
 _mock_bin() {
   local d
   d=$(_tmpdir)
+  echo "$d"
+}
+
+_mock_checkrun_infra_bin() {
+  local d tool found
+
+  d=$(_mock_bin)
+  for tool in bash dirname mktemp python3 rm yq; do
+    found=$(command -v "$tool") || {
+      echo "required test infrastructure tool not found: $tool" >&2
+      exit 1
+    }
+    ln -s "$found" "$d/$tool"
+  done
   echo "$d"
 }
 

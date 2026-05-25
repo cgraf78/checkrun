@@ -509,16 +509,16 @@ output=$(PATH="$_rust_mock:$PATH" "$AUTOLINT" "$_rust_dir/src/lib.rs" 2>&1)
 rc=$?
 set -e
 _assert_exit "rust: clippy exit propagates" 7 "$rc"
-_assert_contains "rust: clippy uses manifest path" \
-  "clippy --manifest-path $_rust_dir/Cargo.toml --all-targets -- -D warnings" "$output"
+_assert_contains_path_arg_suffix "rust: clippy uses manifest path" \
+  "clippy --manifest-path " "$_rust_dir/Cargo.toml" " --all-targets -- -D warnings" "$output"
 
 set +e
 output=$(PATH="$_rust_mock:$PATH" "$AUTOLINT" --fix "$_rust_dir/src/lib.rs" 2>&1)
 rc=$?
 set -e
 _assert_exit "rust: clippy --fix exit propagates" 7 "$rc"
-_assert_contains "rust: --fix uses clippy fix" \
-  "clippy --fix --allow-dirty --allow-staged --manifest-path $_rust_dir/Cargo.toml --all-targets -- -D warnings" "$output"
+_assert_contains_path_arg_suffix "rust: --fix uses clippy fix" \
+  "clippy --fix --allow-dirty --allow-staged --manifest-path " "$_rust_dir/Cargo.toml" " --all-targets -- -D warnings" "$output"
 
 # HTML: superhtml check detects issues
 if command -v superhtml &>/dev/null; then
@@ -628,8 +628,8 @@ set -e
 _assert_exit "cmake: CMakeLists.txt exits with cmake-lint status" 7 "$rc"
 _assert_contains "cmake: CMakeLists.txt dispatches to cmake-lint" \
   "MOCK-CMAKE-LINT-ARGS:" "$output"
-_assert_contains "cmake: fallback config passed via --config-files" \
-  "--config-files $_cmakelint_cfg/cmake-format.py" "$output"
+_assert_contains_path_arg "cmake: fallback config passed via --config-files" \
+  "--config-files " "$_cmakelint_cfg/cmake-format.py" "$output"
 
 echo 'include(foo)' >"$_td/module.cmake"
 set +e
@@ -767,8 +767,8 @@ output=$(PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_taplo_repo/test.toml" 2>&1)
 rc=$?
 set -e
 _assert_exit "toml: per-repo .taplo.toml wins — exits 0" 0 "$rc"
-_assert_contains "toml: per-repo .taplo.toml passed via --config" \
-  "--config $_taplo_repo/.taplo.toml" "$output"
+_assert_contains_path_arg "toml: per-repo .taplo.toml passed via --config" \
+  "--config " "$_taplo_repo/.taplo.toml" "$output"
 
 # No per-repo config + $CHECKRUN_AUTOLINT_DIR/taplo.toml present → fallback applies.
 _alt_taplo=$(_tmpdir)
@@ -781,8 +781,8 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_alt_taplo" PATH="$_taplo_mockbin:$PATH" "$AUTO
 rc=$?
 set -e
 _assert_exit "toml: fallback taplo.toml — exits 0" 0 "$rc"
-_assert_contains "toml: fallback taplo.toml passed via --config" \
-  "--config $_alt_taplo/taplo.toml" "$output"
+_assert_contains_path_arg "toml: fallback taplo.toml passed via --config" \
+  "--config " "$_alt_taplo/taplo.toml" "$output"
 
 # No per-repo config + no fallback → --no-schema.
 echo 'k = "v"' >"$_td/ns.toml"
@@ -814,8 +814,8 @@ output=$(PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_selene_parent/sub/test.lua
 rc=$?
 set -e
 _assert_exit "lua: parent selene.toml — exits 0" 0 "$rc"
-_assert_contains "lua: parent selene.toml passed via --config" \
-  "--config $_selene_parent/selene.toml" "$output"
+_assert_contains_path_arg "lua: parent selene.toml passed via --config" \
+  "--config " "$_selene_parent/selene.toml" "$output"
 
 # No per-repo config + $CHECKRUN_AUTOLINT_DIR/selene.toml present → fallback applies.
 _alt_selene=$(_tmpdir)
@@ -826,8 +826,8 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_alt_selene" PATH="$_selene_mockbin:$PATH" "$AU
 rc=$?
 set -e
 _assert_exit "lua: fallback selene.toml — exits 0" 0 "$rc"
-_assert_contains "lua: fallback selene.toml passed via --config" \
-  "--config $_alt_selene/selene.toml" "$output"
+_assert_contains_path_arg "lua: fallback selene.toml passed via --config" \
+  "--config " "$_alt_selene/selene.toml" "$output"
 
 # No per-repo config + no fallback → no --config arg.
 echo 'print("hi")' >"$_td/nc.lua"
@@ -945,8 +945,8 @@ output=$(cd "$_biome_rel/launch" &&
 rc=$?
 set -e
 _assert_exit "js: relative fallback config dir exits 0 from another cwd" 0 "$rc"
-_assert_contains "js: relative fallback config dir resolved before dispatch" \
-  "--config-path $_biome_rel/launch/cfg" "$output"
+_assert_contains_path_arg "js: relative fallback config dir resolved before dispatch" \
+  "--config-path " "$_biome_rel/launch/cfg" "$output"
 
 _biome_self=$(_tmpdir)
 cat >"$_biome_self/biome.json" <<'EOF'
@@ -1075,7 +1075,7 @@ output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTO
 rc=$?
 set -e
 _assert_exit "Makefile: checkmake exit propagates" 6 "$rc"
-_assert_contains "Makefile: checkmake output shown" "checkmake: $_td/Makefile" "$output"
+_assert_contains_path_arg "Makefile: checkmake output shown" "checkmake: " "$_td/Makefile" "$output"
 
 cat >"$_td/rules.mk" <<'EOF'
 all:
@@ -1086,7 +1086,7 @@ output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTO
 rc=$?
 set -e
 _assert_exit "mk: checkmake exit propagates" 6 "$rc"
-_assert_contains "mk: checkmake output shown" "checkmake: $_td/rules.mk" "$output"
+_assert_contains_path_arg "mk: checkmake output shown" "checkmake: " "$_td/rules.mk" "$output"
 
 # checkmake config routing: fallback applies when no per-repo
 # checkmake.ini exists; per-repo config wins over fallback.
@@ -1112,8 +1112,8 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PAT
 rc=$?
 set -e
 _assert_exit "Makefile: fallback checkmake.ini exits 0" 0 "$rc"
-_assert_contains "Makefile: fallback checkmake.ini passed via --config" \
-  "--config $_checkmake_cfg/checkmake.ini" "$output"
+_assert_contains_path_arg "Makefile: fallback checkmake.ini passed via --config" \
+  "--config " "$_checkmake_cfg/checkmake.ini" "$output"
 
 _checkmake_repo=$(_tmpdir)
 cat >"$_checkmake_repo/checkmake.ini" <<'EOF'
@@ -1128,10 +1128,10 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PAT
 rc=$?
 set -e
 _assert_exit "Makefile: per-repo checkmake.ini exits 0" 0 "$rc"
-_assert_contains "Makefile: per-repo checkmake.ini passed via --config" \
-  "--config $_checkmake_repo/checkmake.ini" "$output"
-_assert_not_contains "Makefile: per-repo checkmake.ini suppresses fallback" \
-  "--config $_checkmake_cfg/checkmake.ini" "$output"
+_assert_contains_path_arg "Makefile: per-repo checkmake.ini passed via --config" \
+  "--config " "$_checkmake_repo/checkmake.ini" "$output"
+_assert_not_contains_path_arg "Makefile: per-repo checkmake.ini suppresses fallback" \
+  "--config " "$_checkmake_cfg/checkmake.ini" "$output"
 
 _checkmake_parent=$(_tmpdir)
 mkdir -p "$_checkmake_parent/project/sub" "$_checkmake_parent/launch"
@@ -1148,8 +1148,8 @@ output=$(cd "$_checkmake_parent/launch" &&
 rc=$?
 set -e
 _assert_exit "Makefile: parent checkmake.ini works from another cwd" 0 "$rc"
-_assert_contains "Makefile: parent checkmake.ini path is stable" \
-  "--config $_checkmake_parent/project/checkmake.ini" "$output"
+_assert_contains_path_arg "Makefile: parent checkmake.ini path is stable" \
+  "--config " "$_checkmake_parent/project/checkmake.ini" "$output"
 
 _checkmake_rel=$(_tmpdir)
 mkdir -p "$_checkmake_rel/launch/cfg" "$_checkmake_rel/project"
@@ -1166,8 +1166,8 @@ output=$(cd "$_checkmake_rel/launch" &&
 rc=$?
 set -e
 _assert_exit "Makefile: relative fallback checkmake.ini exits 0 from another cwd" 0 "$rc"
-_assert_contains "Makefile: relative fallback checkmake.ini resolved before cd" \
-  "--config $_checkmake_rel/launch/cfg/checkmake.ini" "$output"
+_assert_contains_path_arg "Makefile: relative fallback checkmake.ini resolved before cd" \
+  "--config " "$_checkmake_rel/launch/cfg/checkmake.ini" "$output"
 
 if command -v checkmake &>/dev/null; then
   _real_checkmake=$(_tmpdir)
@@ -1272,7 +1272,7 @@ rc=$?
 set -e
 _assert_exit "yml under .github/workflows: zizmor invoked" 4 "$rc"
 _assert_contains "yml under .github/workflows: zizmor output shown" "zizmor:" "$output"
-_assert_contains "yml under .github/workflows: zizmor target path passed" "$_wf_dir/test.yml" "$output"
+_assert_contains_path_arg "yml under .github/workflows: zizmor target path passed" "" "$_wf_dir/test.yml" "$output"
 
 set +e
 output=$(PATH="$_zizmor_mock:$PATH" "$AUTOLINT" "$_td/other.yml" 2>&1)
@@ -1323,8 +1323,8 @@ set -e
 _assert_exit "editorconfig: checker exit propagates" 9 "$rc"
 _assert_contains "editorconfig: checker runs" \
   "MOCK-EDITORCONFIG-CHECKER-ARGS:" "$output"
-_assert_contains "editorconfig: checker receives target file" \
-  "$_td/.editorconfig" "$output"
+_assert_contains_path_arg "editorconfig: checker receives target file" \
+  "" "$_td/.editorconfig" "$output"
 _assert_not_contains "editorconfig: checker does not pass .editorconfig as tool config" \
   "-config" "$output"
 
@@ -1424,8 +1424,8 @@ output=$(PATH="$_cfglint_mock:$PATH" "$AUTOLINT" "$_td/cron" 2>&1)
 rc=$?
 set -e
 _assert_exit "cron: crontab syntax checker runs" 7 "$rc"
-_assert_contains "cron: crontab -T receives file" \
-  "MOCK-CRONTAB-ARGS: -T $_td/cron" "$output"
+_assert_contains_path_arg "cron: crontab -T receives file" \
+  "MOCK-CRONTAB-ARGS: -T " "$_td/cron" "$output"
 
 cat >"$_td/tmux.conf" <<'EOF'
 set -g mouse on
@@ -1435,8 +1435,8 @@ output=$(PATH="$_cfglint_mock:$PATH" "$AUTOLINT" "$_td/tmux.conf" 2>&1)
 rc=$?
 set -e
 _assert_exit "tmux.conf: tmux syntax checker runs" 6 "$rc"
-_assert_contains "tmux.conf: tmux source-file dry-run receives file" \
-  "MOCK-TMUX-ARGS: source-file -n $_td/tmux.conf" "$output"
+_assert_contains_path_arg "tmux.conf: tmux source-file dry-run receives file" \
+  "MOCK-TMUX-ARGS: source-file -n " "$_td/tmux.conf" "$output"
 
 _git_cfg_dir="$_td/.config/git"
 mkdir -p "$_git_cfg_dir"
@@ -1449,8 +1449,8 @@ output=$(PATH="$_cfglint_mock:$PATH" "$AUTOLINT" "$_git_cfg_dir/config" 2>&1)
 rc=$?
 set -e
 _assert_exit "git config: git parser runs" 5 "$rc"
-_assert_contains "git config: git config --file receives file" \
-  "MOCK-GIT-ARGS: config --file $_git_cfg_dir/config --list" "$output"
+_assert_contains_path_arg_suffix "git config: git config --file receives file" \
+  "MOCK-GIT-ARGS: config --file " "$_git_cfg_dir/config" " --list" "$output"
 
 cat >"$_td/ssh-config" <<'EOF'
 Host test
@@ -1496,8 +1496,8 @@ output=$(PATH="$_systemd_mock:$PATH" "$AUTOLINT" "$_td/demo.service" 2>&1)
 rc=$?
 set -e
 _assert_exit "systemd: service verifier exit propagates" 11 "$rc"
-_assert_contains "systemd: service verifier runs" \
-  "MOCK-SYSTEMD-ANALYZE-ARGS: verify $_td/demo.service" "$output"
+_assert_contains_path_arg "systemd: service verifier runs" \
+  "MOCK-SYSTEMD-ANALYZE-ARGS: verify " "$_td/demo.service" "$output"
 
 cat >"$_td/demo.timer" <<'EOF'
 [Timer]
@@ -1508,8 +1508,8 @@ output=$(PATH="$_systemd_mock:$PATH" "$AUTOLINT" "$_td/demo.timer" 2>&1)
 rc=$?
 set -e
 _assert_exit "systemd: timer verifier exit propagates" 11 "$rc"
-_assert_contains "systemd: timer verifier runs" \
-  "MOCK-SYSTEMD-ANALYZE-ARGS: verify $_td/demo.timer" "$output"
+_assert_contains_path_arg "systemd: timer verifier runs" \
+  "MOCK-SYSTEMD-ANALYZE-ARGS: verify " "$_td/demo.timer" "$output"
 
 _no_systemd=$(_mock_bin)
 ln -s "$(command -v bash)" "$_no_systemd/bash"
@@ -1548,8 +1548,8 @@ rc=$?
 set -e
 _assert_exit "ruby: rubocop exit propagates" 12 "$rc"
 _assert_contains "ruby: rubocop runs" "MOCK-RUBOCOP-ARGS:" "$output"
-_assert_contains "ruby: fallback rubocop.yml passed via --config" \
-  "--config $_ruby_cfg/rubocop.yml" "$output"
+_assert_contains_path_arg "ruby: fallback rubocop.yml passed via --config" \
+  "--config " "$_ruby_cfg/rubocop.yml" "$output"
 
 set +e
 output=$(CHECKRUN_AUTOLINT_DIR="$_ruby_cfg" RUBOCOP_LOG="$_rubocop_log" PATH="$_rubocop_mock:$PATH" "$AUTOLINT" --fix "$_td/test.rb" 2>&1)
@@ -1581,7 +1581,7 @@ rc=$?
 set -e
 _assert_exit "php: parser exit propagates" 13 "$rc"
 _assert_contains "php: parser runs" "MOCK-PHP-ARGS:" "$output"
-_assert_contains "php: parser receives -l and file" "-l $_td/test.php" "$output"
+_assert_contains_path_arg "php: parser receives -l and file" "-l " "$_td/test.php" "$output"
 
 _hhvm_mock=$(_mock_bin)
 cat >"$_hhvm_mock/php" <<'EOF'
@@ -1654,8 +1654,8 @@ set -e
 _assert_exit "java: formatter check exit propagates" 15 "$rc"
 _assert_contains "java: formatter check runs" \
   "MOCK-GOOGLE-JAVA-FORMAT-ARGS:" "$output"
-_assert_contains "java: formatter check uses dry run" \
-  "--dry-run --set-exit-if-changed $_td/Test.java" "$output"
+_assert_contains_path_arg "java: formatter check uses dry run" \
+  "--dry-run --set-exit-if-changed " "$_td/Test.java" "$output"
 
 # ---------------------------------------------------------------------------
 # Tests: typos runs as a cross-cutting linter
@@ -1683,7 +1683,7 @@ rc=$?
 set -e
 _assert_exit "typos: invoked for plain text file" 7 "$rc"
 _assert_contains "typos: command output shown" "MOCK-TYPOS-ARGS:" "$output"
-_assert_contains "typos: target path passed" "$_td/typo.txt" "$output"
+_assert_contains_path_arg "typos: target path passed" "" "$_td/typo.txt" "$output"
 
 set +e
 output=$(PATH="$_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" --fix "$_td/typo.txt" 2>&1)
@@ -1702,8 +1702,8 @@ output=$(PATH="$_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR="$_typos_cfg_dir" "$AUT
 rc=$?
 set -e
 _assert_exit "typos: fallback config exits 0" 0 "$rc"
-_assert_contains "typos: fallback typos.toml passed via --config" \
-  "--config $_typos_cfg_dir/typos.toml" "$output"
+_assert_contains_path_arg "typos: fallback typos.toml passed via --config" \
+  "--config " "$_typos_cfg_dir/typos.toml" "$output"
 
 _typos_repo=$(_tmpdir)
 cat >"$_typos_repo/.typos.toml" <<'EOF'
@@ -1716,8 +1716,8 @@ output=$(PATH="$_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR="$_typos_cfg_dir" "$AUT
 rc=$?
 set -e
 _assert_exit "typos: per-repo config exits 0" 0 "$rc"
-_assert_not_contains "typos: per-repo config suppresses fallback" \
-  "--config $_typos_cfg_dir" "$output"
+_assert_not_contains_path_arg "typos: per-repo config suppresses fallback" \
+  "--config " "$_typos_cfg_dir" "$output"
 
 # ---------------------------------------------------------------------------
 # Tests: fallback configs (CHECKRUN_AUTOLINT_DIR) applied when no per-repo config
@@ -1850,8 +1850,8 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$A
 rc=$?
 set -e
 _assert_exit "dockerfile: fallback hadolint.yaml — exits 0" 0 "$rc"
-_assert_contains "dockerfile: fallback hadolint.yaml passed via -c" \
-  "-c $_alt_hadolint/hadolint.yaml" "$output"
+_assert_contains_path_arg "dockerfile: fallback hadolint.yaml passed via -c" \
+  "-c " "$_alt_hadolint/hadolint.yaml" "$output"
 
 # Per-repo .hadolint.yaml wins — no -c flag to fallback.
 _hadolint_repo=$(_tmpdir)
@@ -1866,8 +1866,8 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$A
 rc=$?
 set -e
 _assert_exit "dockerfile: per-repo .hadolint.yaml — exits 0" 0 "$rc"
-_assert_not_contains "dockerfile: per-repo .hadolint.yaml — no -c fallback" \
-  "-c $_alt_hadolint" "$output"
+_assert_not_contains_path_arg "dockerfile: per-repo .hadolint.yaml — no -c fallback" \
+  "-c " "$_alt_hadolint" "$output"
 
 # golangci-lint: fallback config routing via mock. Verifies --config
 # routing when no per-repo .golangci.yml is found.
@@ -1892,8 +1892,8 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_
 rc=$?
 set -e
 _assert_exit "go: fallback golangci-lint.yml — exits 0" 0 "$rc"
-_assert_contains "go: fallback golangci-lint.yml passed via --config" \
-  "--config $_alt_gc/golangci-lint.yml" "$output"
+_assert_contains_path_arg "go: fallback golangci-lint.yml passed via --config" \
+  "--config " "$_alt_gc/golangci-lint.yml" "$output"
 
 _gc_rel=$(_tmpdir)
 mkdir -p "$_gc_rel/launch/cfg" "$_gc_rel/project"
@@ -1909,8 +1909,8 @@ output=$(cd "$_gc_rel/launch" &&
 rc=$?
 set -e
 _assert_exit "go: relative fallback config exits 0 from another cwd" 0 "$rc"
-_assert_contains "go: relative fallback config path resolved before package cwd" \
-  "--config $_gc_rel/launch/cfg/golangci-lint.yml" "$output"
+_assert_contains_path_arg "go: relative fallback config path resolved before package cwd" \
+  "--config " "$_gc_rel/launch/cfg/golangci-lint.yml" "$output"
 
 # Per-repo .golangci.yml wins — no --config flag to fallback.
 _gc_repo=$(_tmpdir)
@@ -1925,8 +1925,8 @@ output=$(CHECKRUN_AUTOLINT_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_
 rc=$?
 set -e
 _assert_exit "go: per-repo .golangci.yml — exits 0" 0 "$rc"
-_assert_not_contains "go: per-repo .golangci.yml — no --config fallback" \
-  "--config $_alt_gc" "$output"
+_assert_not_contains_path_arg "go: per-repo .golangci.yml — no --config fallback" \
+  "--config " "$_alt_gc" "$output"
 
 # ---------------------------------------------------------------------------
 # Tests: ignore file ($CHECKRUN_AUTOLINT_DIR/ignore)
@@ -2243,11 +2243,7 @@ _assert_exit "hostile filename: tab/newline shell path lints" 0 "$rc"
 
 echo "=== Missing linters ==="
 
-_nolinters=$(_mock_bin)
-ln -s "$(command -v bash)" "$_nolinters/bash"
-# yq is hard-required by autolint; keep it on PATH so these tests
-# still reach the linter-missing graceful-skip branches.
-ln -s "$(command -v yq)" "$_nolinters/yq"
+_nolinters=$(_mock_checkrun_infra_bin)
 
 cat >"$_td/nolint.sh" <<'EOF'
 #!/bin/bash
@@ -2521,8 +2517,8 @@ rc=$?
 set -e
 _assert_exit "json multi-file: exits non-zero on lint errors" 1 "$rc"
 _assert_json_lines_valid "json multi-file: valid unified schema" "$output" "shellcheck"
-_assert_contains "json multi-file: includes first file" "$_td/json-multi-a.sh" "$output"
-_assert_contains "json multi-file: includes second file" "$_td/json-multi-b.sh" "$output"
+_assert_contains_path_arg "json multi-file: includes first file" "" "$_td/json-multi-a.sh" "$output"
+_assert_contains_path_arg "json multi-file: includes second file" "" "$_td/json-multi-b.sh" "$output"
 
 # ruff
 cat >"$_td/json-bad.py" <<'EOF'

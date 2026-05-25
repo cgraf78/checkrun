@@ -295,8 +295,8 @@ set -e
 _assert_exit "cmake: CMakeLists.txt exits 0" 0 "$rc"
 _assert_contains "cmake: CMakeLists.txt dispatches to cmake-format" \
   "MOCK-CMAKE-FORMAT-ARGS:" "$output"
-_assert_contains "cmake: fallback config passed via --config-files" \
-  "--config-files $_cmakefmt_cfg/cmake-format.py" "$output"
+_assert_contains_path_arg "cmake: fallback config passed via --config-files" \
+  "--config-files " "$_cmakefmt_cfg/cmake-format.py" "$output"
 
 echo 'include(foo)' >"$_td/module.cmake"
 set +e
@@ -333,8 +333,8 @@ _assert_exit "ruby: rubocop formatter exits 0" 0 "$rc"
 _assert_contains "ruby: rubocop formatter runs" "MOCK-RUBOCOP-FMT-ARGS:" "$output"
 _assert_contains "ruby: rubocop formatter uses layout-only autocorrect" \
   "--autocorrect --only Layout" "$output"
-_assert_contains "ruby: fallback rubocop.yml passed via --config" \
-  "--config $_ruby_cfg/rubocop.yml" "$output"
+_assert_contains_path_arg "ruby: fallback rubocop.yml passed via --config" \
+  "--config " "$_ruby_cfg/rubocop.yml" "$output"
 
 # PHP: php-cs-fixer dispatch and fallback config routing.
 _phpcsfixer_mock=$(_mock_bin)
@@ -357,8 +357,8 @@ set -e
 _assert_exit "php: php-cs-fixer exits 0" 0 "$rc"
 _assert_contains "php: php-cs-fixer runs" "MOCK-PHP-CS-FIXER-ARGS:" "$output"
 _assert_contains "php: php-cs-fixer uses no cache" "--using-cache=no" "$output"
-_assert_contains "php: fallback php-cs-fixer config passed" \
-  "--config $_php_cfg/php-cs-fixer.php" "$output"
+_assert_contains_path_arg "php: fallback php-cs-fixer config passed" \
+  "--config " "$_php_cfg/php-cs-fixer.php" "$output"
 
 # Java: google-java-format dispatch. The tool is intentionally
 # opinionated and has no fallback config to route.
@@ -378,8 +378,8 @@ output=$(PATH="$_gjf_fmt_mock:$PATH" "$AUTOFORMAT" "$_td/Test.java" 2>&1)
 rc=$?
 set -e
 _assert_exit "java: google-java-format exits 0" 0 "$rc"
-_assert_contains "java: google-java-format runs" \
-  "MOCK-GOOGLE-JAVA-FORMAT-ARGS: -i $_td/Test.java" "$output"
+_assert_contains_path_arg "java: google-java-format runs" \
+  "MOCK-GOOGLE-JAVA-FORMAT-ARGS: -i " "$_td/Test.java" "$output"
 
 # ---------------------------------------------------------------------------
 # Tests: default indent values
@@ -617,8 +617,8 @@ CHECKRUN_AUTOFORMAT_DIR="$_rustfmt_cfg" PATH="$_rustfmt_mock:$PATH" "$AUTOFORMAT
 _rustfmt_args=$(cat "$MOCK_RUSTFMT_LOG")
 _assert_contains "rust: Cargo edition is passed to rustfmt" \
   "--edition 2024" "$_rustfmt_args"
-_assert_contains "rust: Cargo project without rustfmt.toml still receives fallback config" \
-  "--config-path $_rustfmt_cfg/rustfmt.toml" "$_rustfmt_args"
+_assert_contains_path_arg "rust: Cargo project without rustfmt.toml still receives fallback config" \
+  "--config-path " "$_rustfmt_cfg/rustfmt.toml" "$_rustfmt_args"
 
 # TOML fallback: autoformat passes --config when no per-repo config
 _td_tm=$(_tmpdir)
@@ -662,8 +662,8 @@ output=$(cd "$_biome_rel/launch" &&
 rc=$?
 set -e
 _assert_exit "biome: relative fallback config dir exits 0 from another cwd" 0 "$rc"
-_assert_contains "biome: relative fallback config dir resolved before dispatch" \
-  "--config-path $_biome_rel/launch/cfg" "$output"
+_assert_contains_path_arg "biome: relative fallback config dir resolved before dispatch" \
+  "--config-path " "$_biome_rel/launch/cfg" "$output"
 
 _biome_self=$(_tmpdir)
 cat >"$_biome_self/biome.json" <<'EOF'
@@ -723,8 +723,8 @@ echo 'a: 1' >"$_yamlfmt_parent/sub/test.yaml"
 output=$(PATH="$_yamlfmt_mockbin:$PATH" "$AUTOFORMAT" "$_yamlfmt_parent/sub/test.yaml" 2>&1)
 rc=$?
 _assert_exit "yaml: parent .yamlfmt — exits 0" 0 "$rc"
-_assert_contains "yaml: parent .yamlfmt passed via -conf" \
-  "-conf $_yamlfmt_parent/.yamlfmt" "$output"
+_assert_contains_path_arg "yaml: parent .yamlfmt passed via -conf" \
+  "-conf " "$_yamlfmt_parent/.yamlfmt" "$output"
 
 _taplo_path_mock=$(_mock_bin)
 cat >"$_taplo_path_mock/taplo" <<'EOF'
@@ -747,8 +747,8 @@ output=$(cd "$_taplo_rel/launch" &&
 rc=$?
 set -e
 _assert_exit "toml: relative fallback config exits 0 from another cwd" 0 "$rc"
-_assert_contains "toml: relative fallback config path resolved before dispatch" \
-  "--config $_taplo_rel/launch/cfg/taplo.toml" "$output"
+_assert_contains_path_arg "toml: relative fallback config path resolved before dispatch" \
+  "--config " "$_taplo_rel/launch/cfg/taplo.toml" "$output"
 
 # ---------------------------------------------------------------------------
 # Tests: config at search root
@@ -933,9 +933,7 @@ fi
 
 echo "=== Missing tool graceful skip ==="
 
-_notools=$(_mock_bin)
-ln -s "$(command -v bash)" "$_notools/bash"
-ln -s "$(command -v yq)" "$_notools/yq"
+_notools=$(_mock_checkrun_infra_bin)
 
 cat >"$_td/skip.go" <<'EOF'
 package main
