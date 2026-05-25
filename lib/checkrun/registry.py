@@ -8,10 +8,11 @@ import fnmatch
 import json
 import os
 import sys
-import tomllib
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 CHECKRUN_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = CHECKRUN_ROOT / "share/checkrun/registry.json"
@@ -278,7 +279,11 @@ def infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
     for item in filetypes["patterns"]:
         if item.get("extensionlessOnly") is True and ext:
             continue
-        if fnmatch.fnmatchcase(name, item["pattern"]):
+        # Most custom filetype patterns are basename globs, but a few safe
+        # config syntaxes are identified by a narrow path shape rather than a
+        # unique basename. Reusing the same candidate forms as path-scoped tool
+        # matching keeps inference, explain, plan, and dispatch aligned.
+        if path_pattern_matches(path, [item["pattern"]]):
             return str(item["filetype"])
 
     # Shebang probing is intentionally last and text-only. Extensionless binary
@@ -312,9 +317,7 @@ def path_pattern_matches(path: Path, patterns: list[str]) -> bool:
     except ValueError:
         pass
     return any(
-        fnmatch.fnmatchcase(candidate, pattern)
-        for candidate in candidates
-        for pattern in patterns
+        fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates for pattern in patterns
     )
 
 
@@ -406,7 +409,9 @@ def resolve_config(
             continue
         if "contains" in probe and not _probe_contains(found, probe["contains"]):
             continue
-        if policy.get("selfConfigGuard") is True and found.resolve(strict=False) == path.resolve(strict=False):
+        if policy.get("selfConfigGuard") is True and found.resolve(strict=False) == path.resolve(
+            strict=False
+        ):
             return {"policy": policy_name, "source": "native", "path": str(found)}
         return {"policy": policy_name, "source": "project", "path": str(found)}
 
@@ -551,7 +556,11 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
         if plan_phase == "format":
             config = config_root("CHECKRUN_AUTOFORMAT_DIR")
             ignored = ignore_match(path, config, "format")
-            steps = [] if ignored["ignored"] or not path.is_file() else selected_steps(registry, path, filetype, "format")
+            steps = (
+                []
+                if ignored["ignored"] or not path.is_file()
+                else selected_steps(registry, path, filetype, "format")
+            )
             item["format"] = {
                 "ignored": ignored["ignored"],
                 "ignore": ignored if ignored["ignored"] else None,
@@ -564,7 +573,11 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
             spell_ignore = ignore_match(path, config, "spell")
             schema_ignore = ignore_match(path, config, "schema")
             tool_ignore = ignore_match(path, config, "tool")
-            all_steps = [] if lint_ignore["ignored"] or not path.is_file() else selected_steps(registry, path, filetype, "lint")
+            all_steps = (
+                []
+                if lint_ignore["ignored"] or not path.is_file()
+                else selected_steps(registry, path, filetype, "lint")
+            )
             steps = [
                 step
                 for step in all_steps
@@ -577,7 +590,11 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
                     and tool_ignore["ignored"]
                 )
             ]
-            schemas = [] if schema_ignore["ignored"] or lint_ignore["ignored"] or not path.is_file() else schema_associations(path)
+            schemas = (
+                []
+                if schema_ignore["ignored"] or lint_ignore["ignored"] or not path.is_file()
+                else schema_associations(path)
+            )
             item["lint"] = {
                 "ignored": lint_ignore["ignored"],
                 "ignore": lint_ignore if lint_ignore["ignored"] else None,
@@ -699,7 +716,9 @@ def print_human(items: list[dict[str, Any]]) -> None:
             print(f"  lint: ignored by {ignore['source']} ({ignore['pattern']})")
         else:
             tools = ", ".join(tool["tool"] for tool in lint["tools"]) or "none"
-            schema_names = ", ".join(str(schema.get("name")) for schema in lint["schemas"]) or "none"
+            schema_names = (
+                ", ".join(str(schema.get("name")) for schema in lint["schemas"]) or "none"
+            )
             print(f"  lint tools: {tools}")
             print(f"  schemas: {schema_names}")
 
@@ -771,7 +790,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "plan":
         if not args.json:
             parser.error("plan requires --json")
-        print(json.dumps(plan(registry, args.files, args.phase), separators=(",", ":"), sort_keys=True))
+        print(
+            json.dumps(
+                plan(registry, args.files, args.phase), separators=(",", ":"), sort_keys=True
+            )
+        )
         return 0
     if args.command == "shell-plan":
         print_shell_plan(registry, args.phase, args.files)
@@ -784,4 +807,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except RegistryError as exc:
         print(f"checkrun registry: {exc}", file=sys.stderr)
-        raise SystemExit(2)
+        raise SystemExit(2) from None

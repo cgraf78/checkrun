@@ -42,37 +42,44 @@ _lint_zizmor() {
   return "$tool_rc"
 }
 
-_lint_github_workflow() {
-  local file="$1" rc=0 out tool_rc
+_lint_actionlint() {
+  local file="$1" out tool_rc
+  command -v actionlint &>/dev/null || return 0
 
+  if [ "$json" -eq 1 ]; then
+    out=$(actionlint -format '{{json .}}' "$file" 2>/dev/null)
+    tool_rc=$?
+    if [ -n "$out" ]; then
+      printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
+        .[]? | {
+          path: $path,
+          line: .line,
+          col: .column,
+          end_col: .end_column,
+          severity: "error",
+          code: .kind,
+          message: .message,
+          source: "actionlint"
+        }'
+    fi
+    return "$tool_rc"
+  fi
+
+  actionlint "$file"
+}
+
+_lint_github_workflow() {
+  local file="$1" rc=0
+
+  # Kept as a compatibility helper for direct/internal callers. Registry-backed
+  # autolint dispatch now selects `actionlint` and `zizmor` as separate adapter
+  # steps so explain, plan, and execution show the same path-scoped tools.
   case "$file" in
     */.github/workflows/*) ;;
     *) return 0 ;;
   esac
 
-  if command -v actionlint &>/dev/null; then
-    if [ "$json" -eq 1 ]; then
-      out=$(actionlint -format '{{json .}}' "$file" 2>/dev/null)
-      tool_rc=$?
-      if [ -n "$out" ]; then
-        printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
-          .[]? | {
-            path: $path,
-            line: .line,
-            col: .column,
-            end_col: .end_column,
-            severity: "error",
-            code: .kind,
-            message: .message,
-            source: "actionlint"
-          }'
-      fi
-      [ "$tool_rc" -ne 0 ] && rc=$tool_rc
-    else
-      actionlint "$file" || rc=$?
-    fi
-  fi
+  _lint_actionlint "$file" || rc=$?
   _lint_zizmor "$file" || rc=$?
-
   return "$rc"
 }

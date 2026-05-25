@@ -47,6 +47,45 @@ _abs_path() {
   fi
 }
 
+_checkrun_python() {
+  local candidate
+
+  # Hooks and tests often constrain PATH to prove missing formatter/linter
+  # behavior. Registry planning still needs Python in those environments, so do
+  # not rely solely on `/usr/bin/env python3` from the registry script shebang.
+  if [ -n "${CHECKRUN_PYTHON:-}" ] && [ -x "$CHECKRUN_PYTHON" ]; then
+    printf '%s\n' "$CHECKRUN_PYTHON"
+    return 0
+  fi
+
+  for candidate in python3 /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+    case "$candidate" in
+      */*)
+        [ -x "$candidate" ] || continue
+        printf '%s\n' "$candidate"
+        return 0
+        ;;
+      *)
+        if command -v "$candidate" >/dev/null 2>&1; then
+          command -v "$candidate"
+          return 0
+        fi
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+_checkrun_registry() {
+  local python
+  python=$(_checkrun_python) || {
+    echo "checkrun: python3 is required for registry planning" >&2
+    return 127
+  }
+  "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"
+}
+
 # Walk up from the file's directory looking for a config file. `$root`
 # is an inclusive stop point: configs at `$root/$name` still count.
 # Tracks `prev` so the loop terminates even when `dir` is relative

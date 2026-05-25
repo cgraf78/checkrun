@@ -307,7 +307,7 @@ _format_one() {
   # ignore files, and config-policy discovery are allowed to interact. Keeping
   # that work out of shell dispatch prevents the old metadata-vs-execution
   # drift from returning in a second table.
-  plan=$("$CHECKRUN_LIB_DIR/registry.py" shell-plan --phase format -- "$file")
+  plan=$(_checkrun_registry shell-plan --phase format -- "$file")
   rc=$?
   [ "$rc" -ne 0 ] && return "$rc"
 

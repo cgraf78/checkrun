@@ -23,10 +23,12 @@ _lintable_path() {
   [ -z "$file" ] && return 1
   [ -f "$file" ] || return 1
 
-  # Normalize before ignore checks so editor, hook, and CLI callers all apply
-  # the same absolute-path policy even when they pass relative filenames.
+  # Normalize before planning so editor, hook, and CLI callers all apply the
+  # same absolute-path policy even when they pass relative filenames. Ignore
+  # decisions live in the registry planner now; keeping them out of this prefilter
+  # lets lint-ignore, spell-ignore, schema-ignore, and tool-ignore share one
+  # source of truth with `checkrun plan` and `checkrun explain`.
   file=$(_abs_path "$file") || return 1
-  _ignored_for lint "$file" "$CHECKRUN_AUTOLINT_DIR" && return 1
 
   printf '%s\n' "$file"
 }

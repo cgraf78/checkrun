@@ -83,170 +83,75 @@ _autolint_usage() {
 }
 
 _lint_one() {
-  local file="$1" _filedir ext rc=0
-  local _is_cmake=0 _is_dockerfile=0 _is_makefile=0 _is_starlark=0
+  local file="$1" plan row path filetype step_phase adapter config_source config_path
+  local rc=0 tool_rc dir
 
-  _filedir=$(dirname "$file")
-  ext="${file##*.}"
+  # The registry planner is the policy boundary for linting: it owns matching,
+  # cross-cutting spell/schema ordering, path-scoped workflow tools, and every
+  # phase-specific ignore file. Shell code below only translates adapter ids
+  # into concrete tool invocations.
+  plan=$(_checkrun_registry shell-plan --phase lint -- "$file")
+  tool_rc=$?
+  [ "$tool_rc" -ne 0 ] && return "$tool_rc"
+  [ -n "$plan" ] || return 0
 
-  # Spell checking is cross-cutting rather than extension-owned. Keep its ignore
-  # decision separate from schema/language linting so vendored config payloads
-  # can skip prose noise without losing structural validation.
-  if ! _ignored_for spell "$file" "$CHECKRUN_AUTOLINT_DIR"; then
-    _lint_typos "$file" "$_filedir" || rc=$?
+  # yq/jq remain execution dependencies, not planning dependencies. Check them
+  # only after the registry says at least one lint step will run, so missing or
+  # ignored files keep the same graceful skip behavior as before.
+  if ! command -v yq >/dev/null 2>&1; then
+    echo "autolint: yq is required" >&2
+    return 1
+  fi
+  if [ "$json" -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
+    echo "autolint: jq is required for --json" >&2
+    return 1
   fi
 
-  # Schema validation is policy-driven rather than extension-owned. Run it
-  # once near the top so editor, hook, and CLI callers all share the same
-  # public-schema checks for dotfile-specific config names.
-  if ! _ignored_for schema "$file" "$CHECKRUN_AUTOLINT_DIR"; then
-    _lint_schema "$file" || rc=$?
-  fi
-
-  # Backend/tool linting is the language- or filetype-specific phase below
-  # (ruff, biome, rumdl, shellcheck, etc.). Keep it skippable independently so
-  # generated or tool-owned files can still receive schema/spelling checks.
-  _ignored_for tool "$file" "$CHECKRUN_AUTOLINT_DIR" && return "$rc"
-
-  # Basename dispatch for files where the name — not extension — indicates
-  # the language (Dockerfiles, Starlark build files). Runs before extension
-  # dispatch and exits on match so neither path can fire for the same file.
-  case "${file##*/}" in
-    Dockerfile | Dockerfile.* | Containerfile | Containerfile.*)
-      _is_dockerfile=1
-      ;;
-    BUCK | BUCK.* | BUILD | BUILD.* | TARGETS | TARGETS.* | WORKSPACE | WORKSPACE.* | MODULE.bazel)
-      _is_starlark=1
-      ;;
-    Makefile | makefile | GNUmakefile)
-      _is_makefile=1
-      ;;
-    CMakeLists.txt)
-      _is_cmake=1
-      ;;
-  esac
-
-  # These are config syntaxes with reliable parser/dry-run commands,
-  # but they do not map cleanly to a file extension. Keep them scoped to
-  # known basenames/paths instead of treating every `.conf` alike.
-  # Deliberately exclude SSH config: `ssh -G -F <file>` executes
-  # `Match exec` while parsing, which is not safe for automatic hooks.
-  case "$file" in
-    */cron | */crontab | *.cron)
-      _lint_crontab "$file" || rc=$?
-      return "$rc"
-      ;;
-    */tmux.conf)
-      _lint_tmux_config "$file" || rc=$?
-      return "$rc"
-      ;;
-    */.gitconfig | */.config/git/config)
-      _lint_git_config "$file" || rc=$?
-      return "$rc"
-      ;;
-    */.editorconfig)
-      _lint_editorconfig "$file" || rc=$?
-      return "$rc"
-      ;;
-  esac
-
-  # Per-language dispatch. Each arm mirrors autoformat's three-step
-  # shape (tool-present guard → per-repo config detection → fallback
-  # via `$CHECKRUN_AUTOLINT_DIR`). Exceptions:
-  #   - `zsh` has no config mechanism; we just run `zsh -n`.
-  #   - `yml/yaml` is scoped to `*/.github/workflows/*` — actionlint
-  #     and zizmor are workflow-specific and would be noisy on arbitrary yamls.
-
-  # Basename dispatch: Dockerfiles and Starlark build files are identified
-  # by name, not extension. Flags were set earlier; act on them here so
-  # the extension case below can fall through normally.
-  if [ "${_is_dockerfile:-0}" -eq 1 ]; then
-    _lint_dockerfile "$file" "$_filedir" || rc=$?
-    return "$rc"
-  fi
-
-  if [ "${_is_starlark:-0}" -eq 1 ]; then
-    _lint_buildifier "$file" || rc=$?
-    return "$rc"
-  fi
-
-  if [ "${_is_makefile:-0}" -eq 1 ]; then
-    _lint_checkmake "$file" "$_filedir" || rc=$?
-    return "$rc"
-  fi
-
-  if [ "${_is_cmake:-0}" -eq 1 ]; then
-    _lint_cmake "$file" "$_filedir" || rc=$?
-    return "$rc"
-  fi
-
-  case "$ext" in
-    cmake)
-      _lint_cmake "$file" "$_filedir" || rc=$?
-      ;;
-    mk)
-      _lint_checkmake "$file" "$_filedir" || rc=$?
-      ;;
-    sh | bash)
-      _lint_sh "$file" "$_filedir" || rc=$?
-      ;;
-    zsh)
-      _lint_zsh "$file" || rc=$?
-      ;;
-    go)
-      _lint_go "$file" "$_filedir" || rc=$?
-      ;;
-    java)
-      _lint_java "$file" || rc=$?
-      ;;
-    htm | html)
-      _lint_superhtml "$file" || rc=$?
-      ;;
-    bzl | star)
-      _lint_buildifier "$file" || rc=$?
-      ;;
-    py)
-      _lint_ruff "$file" "$_filedir" || rc=$?
-      ;;
-    rb)
-      _lint_ruby "$file" "$_filedir" || rc=$?
-      ;;
-    rs)
-      _lint_rust "$file" "$_filedir" || rc=$?
-      ;;
-    php)
-      _lint_php "$file" || rc=$?
-      ;;
-    css | js | jsx | json | jsonc | ts | tsx)
-      _lint_biome "$file" "$_filedir" || rc=$?
-      ;;
-    automount | device | mount | path | scope | service | slice | socket | swap | target | timer)
-      _lint_systemd_unit "$file" || rc=$?
-      ;;
-    md)
-      _lint_rumdl "$file" "$_filedir" || rc=$?
-      ;;
-    toml)
-      _lint_taplo "$file" "$_filedir" || rc=$?
-      ;;
-    lua)
-      _lint_selene "$file" "$_filedir" || rc=$?
-      ;;
-    yml | yaml)
-      # Only lint GitHub Actions workflow YAML. A generic YAML linter on
-      # arbitrary yamls is too noisy; actionlint is scoped to workflows.
-      _lint_github_workflow "$file" || rc=$?
-      ;;
-    *)
-      # Extensionless files: dispatch via _classify_shell (dotfile name or shebang).
-      case "$(_classify_shell "$file")" in
-        zsh) _lint_zsh "$file" || rc=$? ;;
-        bash) _lint_sh "$file" "$_filedir" "$(_shellcheck_lang_hint "$file")" || rc=$? ;;
-      esac
-      ;;
-  esac
+  while IFS= read -r row || [ -n "$row" ]; do
+    IFS=$'\t' read -r path filetype step_phase adapter config_source config_path <<EOF
+$row
+EOF
+    dir=$(dirname "$path")
+    _lint_dispatch "$adapter" "$path" "$filetype" "$step_phase" "$config_source" "$config_path" "$dir" || rc=$?
+  done <<<"$plan"
 
   return "$rc"
+}
+
+_lint_dispatch() {
+  local adapter="$1" file="$2" filetype="$3" step_phase="$4" config_source="$5" config_path="$6" dir="$7"
+
+  # Dispatch only by registry adapter id. Filetype remains available for small
+  # adapter details, such as shellcheck language hints, but it no longer decides
+  # whether a linter runs.
+  case "$adapter" in
+    actionlint) _lint_actionlint "$file" ;;
+    biome-lint) _lint_biome "$file" "$dir" "$config_source" "$config_path" ;;
+    buildifier-lint) _lint_buildifier "$file" ;;
+    checkmake) _lint_checkmake "$file" "$dir" "$config_source" "$config_path" ;;
+    cmake-lint) _lint_cmake "$file" "$dir" "$config_source" "$config_path" ;;
+    crontab) _lint_crontab "$file" ;;
+    editorconfig-checker) _lint_editorconfig "$file" ;;
+    git-config) _lint_git_config "$file" ;;
+    golangci-lint) _lint_go "$file" "$dir" "$config_source" "$config_path" ;;
+    google-java-format-lint) _lint_java "$file" ;;
+    hadolint) _lint_dockerfile "$file" "$dir" "$config_source" "$config_path" ;;
+    php) _lint_php "$file" ;;
+    rubocop-lint) _lint_ruby "$file" "$dir" "$config_source" "$config_path" ;;
+    ruff-lint) _lint_ruff "$file" "$dir" "$config_source" "$config_path" ;;
+    rumdl-lint) _lint_rumdl "$file" "$dir" "$config_source" "$config_path" ;;
+    rust-clippy) _lint_rust "$file" "$dir" ;;
+    schema-lint) _lint_schema "$file" ;;
+    selene) _lint_selene "$file" "$dir" "$config_source" "$config_path" ;;
+    shellcheck) _lint_sh "$file" "$dir" "$(_shellcheck_lang_hint "$file")" "$config_source" "$config_path" ;;
+    superhtml-lint) _lint_superhtml "$file" ;;
+    systemd-analyze) _lint_systemd_unit "$file" ;;
+    taplo-lint) _lint_taplo "$file" "$dir" "$config_source" "$config_path" ;;
+    tmux) _lint_tmux_config "$file" ;;
+    typos) _lint_typos "$file" "$dir" "$config_source" "$config_path" ;;
+    zizmor) _lint_zizmor "$file" ;;
+    zsh-lint) _lint_zsh "$file" ;;
+  esac
 }
 
 _autolint_default_jobs() {
@@ -345,19 +250,6 @@ _autolint_main() {
   done
 
   [ "${#lint_files[@]}" -eq 0 ] && return 0
-
-  if ! command -v yq >/dev/null 2>&1; then
-    echo "autolint: yq is required" >&2
-    return 1
-  fi
-
-  # `--json` relies on jq to transform each tool's native JSON into the
-  # unified schema. Bail only after no-op paths are filtered so missing
-  # or ignored files keep the same graceful-skip behavior as normal mode.
-  if [ "$json" -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
-    echo "autolint: jq is required for --json" >&2
-    return 1
-  fi
 
   if [ "$fix" -eq 1 ]; then
     # Keep mutation mode sequential. Several backends operate at package/project

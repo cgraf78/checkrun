@@ -85,6 +85,7 @@
       { "pattern": "Dockerfile.*", "filetype": "dockerfile" },
       { "pattern": "TARGETS.*", "filetype": "bzl" },
       { "pattern": "WORKSPACE.*", "filetype": "bzl" },
+      { "pattern": "*/.config/git/config", "filetype": "gitconfig" },
       { "pattern": "agent-hook-*", "filetype": "sh", "extensionlessOnly": true },
       { "pattern": "envrc-*", "filetype": "bash", "extensionlessOnly": true }
     ],
@@ -260,7 +261,11 @@
     },
     "stylua": {
       "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
-      "project": [{ "file": "stylua.toml" }, { "file": ".stylua.toml" }, { "file": ".editorconfig" }],
+      "project": [
+        { "file": "stylua.toml" },
+        { "file": ".stylua.toml" },
+        { "file": ".editorconfig" }
+      ],
       "fallback": { "file": "stylua.toml" }
     },
     "taplo-format": {
@@ -369,7 +374,15 @@
     },
     {
       "id": "web",
-      "filetypes": ["css", "javascript", "javascriptreact", "json", "jsonc", "typescript", "typescriptreact"],
+      "filetypes": [
+        "css",
+        "javascript",
+        "javascriptreact",
+        "json",
+        "jsonc",
+        "typescript",
+        "typescriptreact"
+      ],
       "extensions": ["css", "js", "jsx", "json", "jsonc", "ts", "tsx"],
       "format": [{ "tool": "biome", "adapter": "biome-format", "config": "biome-format" }],
       "lint": [{ "tool": "biome", "adapter": "biome-lint", "config": "biome-lint" }]
@@ -489,7 +502,19 @@
     {
       "id": "systemd",
       "filetypes": ["systemd"],
-      "extensions": ["automount", "device", "mount", "path", "scope", "service", "slice", "socket", "swap", "target", "timer"],
+      "extensions": [
+        "automount",
+        "device",
+        "mount",
+        "path",
+        "scope",
+        "service",
+        "slice",
+        "socket",
+        "swap",
+        "target",
+        "timer"
+      ],
       "lint": [{ "tool": "systemd-analyze", "adapter": "systemd-analyze" }]
     },
     {
@@ -501,8 +526,14 @@
     {
       "id": "gitconfig",
       "filetypes": ["gitconfig"],
-      "filenames": [".gitconfig"],
-      "lint": [{ "tool": "git config", "adapter": "git-config" }]
+      "filenames": [".gitconfig", "config"],
+      "lint": [
+        {
+          "tool": "git config",
+          "adapter": "git-config",
+          "pathPatterns": ["*.gitconfig", "*/.config/git/config"]
+        }
+      ]
     },
     {
       "id": "crontab",
