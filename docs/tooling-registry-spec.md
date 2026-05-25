@@ -1,0 +1,595 @@
+# Checkrun Tooling Registry Spec
+
+## Purpose
+
+Checkrun should have one authoritative model for code-validation behavior. That
+model should decide which formatting, linting, schema, spelling, parser, and
+type-check tools apply to a file. The same model should drive:
+
+- `autoformat`
+- `autolint`
+- `checkrun explain`
+- `checkrun capabilities`
+- editor integrations such as Neovim
+- higher-level callers such as Sley
+
+Tool configuration remains outside Checkrun. Dotfiles and project-local config
+files own style/rule settings such as `ruff.toml`, `biome.json`, `taplo.toml`,
+and ignore files. Checkrun owns the behavior model: file matching, tool
+selection, phase ordering, dispatch semantics, and explainability.
+
+## Current State
+
+The current architecture is useful but split-brained:
+
+- `share/checkrun/capabilities.json` describes filetypes, selectors, tools, and
+  integration metadata.
+- `lib/checkrun/autoformat.sh` and `lib/checkrun/autolint.sh` contain the real
+  dispatch tables and phase ordering.
+- `lib/checkrun/explain.py` separately implements filetype inference and tool
+  selection from `capabilities.json`.
+- Dotfiles Neovim config consumes the metadata, but the metadata still exposes a
+  downstream-specific `sley` key.
+
+This creates drift risk. A new tool or selector can be added to shell dispatch
+without updating the metadata, or the metadata can describe behavior that the
+shell dispatch does not actually run.
+
+## Target State
+
+Checkrun should ship a versioned registry:
+
+```text
+share/checkrun/registry.json
+share/checkrun/schemas/registry.schema.json
+lib/checkrun/registry.py
+```
+
+`registry.json` is the source of truth. `registry.py` is the interpreter for that
+source of truth. It should produce both human-facing explanations and
+machine-facing execution plans.
+
+The physical `capabilities.json` file should be retired. `checkrun capabilities
+--json` should emit a derived integration projection from the registry.
+
+## Ownership Boundaries
+
+Checkrun owns:
+
+- supported filetype identifiers
+- filename, extension, pattern, and shebang matching
+- validation phases
+- tool identity and ordering
+- adapter identity
+- default dispatch behavior
+- path-scoped tools, such as GitHub Actions linters for workflow YAML only
+- config discovery semantics
+- fallback config file names and environment roots
+- explain and capabilities output
+- registry schema and registry interpreter
+
+Dotfiles or project repos own:
+
+- actual config file contents
+- global fallback config files under `~/.config/autoformat`
+- project-local tool configs
+- ignore files under the configured Checkrun config root
+- schema association policy instances under `~/.config/checkrun`
+
+Checkrun owns the schema association interpreter and schema for association
+policy documents. Dotfiles owns the default association policy instance. The
+tooling registry should say that schema validation is a lint phase, but it
+should not inline dotfiles-specific schema associations.
+
+Sley owns:
+
+- workflow orchestration
+- changed-file scope
+- hook timing
+- readiness and verify commands
+- Sley verify registry schema and behavior
+
+Neovim owns:
+
+- plugin wiring
+- mapping Checkrun-derived filetypes to the local formatter/linter plugin named
+  `sley`
+- editor-specific parser/LSP setup
+
+Checkrun must not contain downstream-specific keys such as `sley`, `nvim`, or
+dotfiles-only consumer behavior.
+
+## Registry Schema
+
+The registry should be JSON and validated by:
+
+```text
+share/checkrun/schemas/registry.schema.json
+```
+
+The schema should use `additionalProperties: false` at every object level unless
+there is a deliberate extension point. That keeps accidental consumer-specific
+fields from becoming de facto API.
+
+Recommended top-level shape:
+
+```json
+{
+  "version": 1,
+  "filetypes": {},
+  "selectors": [],
+  "crossCutting": {},
+  "configPolicies": {},
+  "adapters": {}
+}
+```
+
+The JSON Schema should validate document shape. `registry.py` should enforce
+cross-object invariants that are awkward in JSON Schema:
+
+- selector ids are unique
+- adapter ids are unique
+- every selected step references an existing adapter
+- every selected config policy exists
+- every config policy references a known environment root
+- every phase name is known
+- every filetype named in selectors is declared or intentionally external
+- every adapter implementation exists, or is explicitly marked `internal`
+- no top-level or selector-level downstream keys such as `sley` or `nvim` exist
+
+The seeded registry must resolve current metadata drift before it becomes
+authoritative. For example, current metadata advertises C/C++ linting via
+`clang-tidy`, while shell dispatch does not run a C/C++ linter today. The new
+registry should either model the actual supported behavior or intentionally add
+the adapter and tests. It must not preserve metadata-only tools that execution
+does not support.
+
+### Filetypes
+
+`filetypes` maps paths to normalized editor/tooling filetypes.
+
+```json
+{
+  "filetypes": {
+    "extension": {
+      "py": "python",
+      "rs": "rust",
+      "tsx": "typescriptreact"
+    },
+    "filename": {
+      "Dockerfile": "dockerfile",
+      "CMakeLists.txt": "cmake"
+    },
+    "patterns": [
+      { "pattern": "Dockerfile.*", "filetype": "dockerfile" },
+      { "pattern": "agent-hook-*", "filetype": "sh", "extensionlessOnly": true }
+    ],
+    "shebangs": [
+      { "contains": "zsh", "filetype": "zsh" },
+      { "containsAny": ["bash", "/sh"], "filetype": "bash" }
+    ]
+  }
+}
+```
+
+This replaces the current `sley.customFiletypes` metadata and the separate
+hard-coded extension map in `explain.py`.
+
+Matching order should be deterministic:
+
+1. exact filename
+2. extension
+3. glob pattern
+4. shebang for extensionless text files
+5. unknown
+
+Extensionless binary files should be classified as unknown without reading them
+as text. Special extensionless files such as `.profile`, `.envrc`, `envrc-*`,
+and agent hook files should be covered by registry data instead of hard-coded
+consumer logic.
+
+### Selectors
+
+Selectors describe which tools apply to a filetype, extension, filename, or path
+pattern.
+
+```json
+{
+  "id": "python",
+  "filetypes": ["python"],
+  "extensions": ["py"],
+  "format": [
+    {
+      "tool": "ruff",
+      "adapter": "ruff-format",
+      "config": "ruff-format"
+    }
+  ],
+  "lint": [
+    {
+      "tool": "ruff",
+      "adapter": "ruff-lint",
+      "config": "ruff-lint"
+    }
+  ]
+}
+```
+
+Each phase array is ordered. Default semantics are `run-all`: every selected
+step runs in declaration order if its adapter is available. This preserves
+current behavior such as `goimports` followed by `gofumpt`.
+
+If multiple selectors match the same file, the planner should concatenate
+matching steps in selector declaration order. Exact duplicate steps should be
+deduplicated by phase, tool, adapter, config policy, and path pattern. Similar
+but non-identical steps should remain visible rather than being collapsed by
+clever inference.
+
+Future alternative tools can use explicit selection semantics:
+
+```json
+{
+  "tool": "black",
+  "adapter": "black-format",
+  "selection": "first-available"
+}
+```
+
+Do not add preference machinery until there is a real second tool for the same
+phase and filetype.
+
+### Phases
+
+Initial supported phases:
+
+- `format`: mutating formatter steps
+- `lint`: backend linter steps
+- `spell`: spelling checks
+- `schema`: schema validation
+- `tool`: language/filetype-specific backend linting group
+
+`autolint` currently treats spelling and schema validation as cross-cutting
+lint phases before backend tool linting. The registry should preserve that
+ordering explicitly.
+
+```json
+{
+  "crossCutting": {
+    "lint": [
+      {
+        "phase": "spell",
+        "tool": "typos",
+        "adapter": "typos",
+        "config": "typos"
+      },
+      {
+        "phase": "schema",
+        "tool": "schema-lint",
+        "adapter": "schema-lint"
+      }
+    ]
+  }
+}
+```
+
+### Path-Scoped Tools
+
+Some tools should only apply to a subset of a filetype. GitHub Actions workflow
+linting is the current important example:
+
+```json
+{
+  "id": "yaml",
+  "filetypes": ["yaml"],
+  "extensions": ["yaml", "yml"],
+  "format": [
+    { "tool": "yamlfmt", "adapter": "yamlfmt", "config": "yamlfmt" }
+  ],
+  "lint": [
+    {
+      "tool": "actionlint",
+      "adapter": "actionlint",
+      "pathPatterns": ["*/.github/workflows/*.yml", "*/.github/workflows/*.yaml"]
+    },
+    {
+      "tool": "zizmor",
+      "adapter": "zizmor",
+      "pathPatterns": ["*/.github/workflows/*.yml", "*/.github/workflows/*.yaml"]
+    }
+  ]
+}
+```
+
+`checkrun explain`, `checkrun plan`, and execution must use the same
+`pathPatterns` matcher.
+
+The matcher should check the same candidate forms everywhere:
+
+- absolute normalized path
+- current-working-directory-relative path, when possible
+- basename
+
+This preserves current `explain` behavior while making execution match it.
+
+### Config Policies
+
+Config policies describe discovery and fallback rules. The registry should own
+which config names matter and where fallback config files are expected. It should
+not own the content of those files.
+
+```json
+{
+  "configPolicies": {
+    "ruff-format": {
+      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
+      "project": [
+        { "file": "ruff.toml" },
+        { "file": ".ruff.toml" },
+        {
+          "file": "pyproject.toml",
+          "contains": {
+            "format": "toml",
+            "query": ".tool.ruff // .tool.ruff.format"
+          }
+        }
+      ],
+      "fallback": { "file": "ruff.toml" }
+    }
+  }
+}
+```
+
+The plan engine should resolve each policy into one of:
+
+- `project`: a project-local config exists
+- `fallback`: a config under the configured fallback root exists
+- `none`: no config applies
+- `native`: the tool should rely on native discovery
+
+Adapters still own CLI details such as `--config`, `--config-path`,
+`--config-files`, `-conf`, or `-style=file:...`.
+
+Config root semantics:
+
+- `CHECKRUN_AUTOFORMAT_DIR` defaults to `~/.config/autoformat`.
+- `CHECKRUN_AUTOLINT_DIR` defaults to `CHECKRUN_AUTOFORMAT_DIR`, then
+  `~/.config/autoformat`.
+- `~` and environment variables in configured roots should be expanded before
+  paths are normalized.
+- relative config roots must be resolved to absolute paths before adapters run,
+  because several tools change cwd or discover configs from cwd instead of the
+  target file path.
+- project-local config walks start at the target file directory and walk upward.
+- project-local config must win over fallback config.
+- fallback config is used only when the fallback file exists.
+
+Policy should support parser-backed config detection such as `pyproject.toml`
+with `[tool.ruff]`. If parser support is unavailable, the behavior should match
+today's CLI dependency contract rather than silently changing dispatch.
+
+### Adapters
+
+Adapters are Checkrun-internal execution units. The registry should declare each
+adapter id so tests can verify that every selected tool has an implementation.
+
+```json
+{
+  "adapters": {
+    "ruff-format": {
+      "kind": "shell-function",
+      "function": "_format_ruff"
+    },
+    "ruff-lint": {
+      "kind": "shell-function",
+      "function": "_lint_ruff"
+    }
+  }
+}
+```
+
+The registry should not attempt to encode every command argument as JSON. Tool
+quirks are real and already tested in shell adapters. The registry decides that
+`ruff-format` applies; the adapter decides how to run it.
+
+This boundary is important for simplicity. The registry should stay small:
+matching rules, phase order, adapter ids, path scopes, and config-policy names.
+It should not become a generic command language.
+
+## Registry Interpreter
+
+`lib/checkrun/registry.py` should provide a small API:
+
+- load registry
+- validate registry shape
+- infer filetype
+- match selectors
+- apply path patterns
+- apply ignore policy
+- resolve config policies
+- produce a per-file phase plan
+- produce derived capabilities
+
+This module should be used by both `checkrun explain` and `checkrun plan`.
+It should be standard-library-only so hot hook paths do not gain optional Python
+package dependencies.
+
+Registry loading and validation errors are toolchain errors, not unsupported-file
+cases. `checkrun registry`, `checkrun capabilities`, `checkrun explain`, and
+`checkrun plan` should print a clear error and exit non-zero when the registry is
+missing or invalid. `autoformat` and `autolint` should propagate that registry
+failure rather than silently treating every file as unsupported.
+
+The interpreter should not access the network. Planning may inspect local target
+files, local config files, ignore files, and local schema association policies,
+but it must not fetch schemas or remote metadata.
+
+## CLI API
+
+### `checkrun registry --json`
+
+Print the raw registry. This is mainly for debugging, tests, and integration
+inspection. Consumers should prefer derived APIs.
+
+### `checkrun capabilities --json`
+
+Print a generic integration projection:
+
+```json
+{
+  "version": 2,
+  "filetypes": {
+    "format": ["python", "go"],
+    "lint": ["python", "go", "systemd"],
+    "custom": {
+      "filename": {},
+      "extension": {},
+      "patterns": []
+    }
+  }
+}
+```
+
+No downstream-specific key should appear in this output.
+
+Capabilities output should be sorted and stable so consumers can cache or diff
+it. Unknown or unsupported future registry fields should not leak through this
+projection until they are intentionally added to the public API.
+
+### `checkrun explain [--json] FILE...`
+
+Explain decisions from the same registry engine that produces execution plans:
+
+- normalized path
+- exists
+- inferred filetype
+- phase ignore decisions
+- selected steps
+- skipped steps and reasons
+- config source
+- schema associations
+
+### `checkrun plan --json [--phase format|lint] FILE...`
+
+Emit the execution plan consumed by `autoformat` and `autolint`.
+
+Example:
+
+```json
+[
+  {
+    "path": "/repo/app.py",
+    "filetype": "python",
+    "format": {
+      "ignored": false,
+      "steps": [
+        {
+          "tool": "ruff",
+          "adapter": "ruff-format",
+          "config": {
+            "policy": "ruff-format",
+            "source": "fallback",
+            "path": "/home/user/.config/autoformat/ruff.toml"
+          }
+        }
+      ]
+    }
+  }
+]
+```
+
+The plan format is Checkrun API. Keep it stable and versioned enough for tests,
+but treat adapter internals as implementation details. When `--phase` is omitted,
+the plan should include every known phase. When `--phase` is present, the plan
+should include only the requested phase plus any fields needed to explain why
+that phase is skipped.
+
+Plan output should include a top-level `version`. Each file entry should include
+enough detail to explain skips without requiring the caller to re-run matching:
+
+- `path`
+- `exists`
+- `filetype`
+- phase-level `ignored`
+- phase-level ignore source and pattern
+- step list
+- skipped step list, when relevant
+- config resolution result
+- missing required infrastructure, when known
+
+Plan generation should not execute formatter or linter tools. It may inspect the
+filesystem for target files, config files, ignore files, and schema association
+policy files.
+
+Step ordering in plan and JSON diagnostics should be deterministic:
+cross-cutting lint phases run before filetype-specific tool lint, and
+filetype-specific steps retain selector declaration order after duplicate
+deduplication.
+
+## Dispatch Flow
+
+Formatter flow:
+
+```text
+autoformat
+  -> parse CLI flags, preserving `--` separator behavior
+  -> normalize input files
+  -> call checkrun plan --phase format --json
+  -> for each file plan
+       -> if ignored, skip
+       -> for each step
+            -> dispatch adapter id
+            -> adapter applies tool-specific command behavior
+```
+
+Linter flow:
+
+```text
+autolint
+  -> parse --fix/--json, preserving `--` separator behavior
+  -> normalize input files
+  -> call checkrun plan --phase lint --json
+  -> for each file plan
+       -> run cross-cutting spell/schema steps unless ignored
+       -> run backend tool steps unless tool-ignored
+       -> preserve current batching behavior for read-only lint
+```
+
+Missing tools remain graceful no-ops. Missing required infrastructure such as
+`yq` and `jq` should keep current behavior unless the implementation explicitly
+proves a narrower requirement is safe.
+
+Intentional exit-code behavior should remain explicit:
+
+- `autoformat` exits 0 for unsupported files, missing tools, missing files,
+  ignored files, and formatter failures. Formatter stderr should surface only
+  when useful, matching current save-hook behavior.
+- `autolint` exits 0 for unsupported files, missing tools, missing files, and
+  ignored files.
+- `autolint` exits non-zero when selected linters report findings or tool
+  errors.
+- `autolint --fix` remains sequential to avoid project-scope fix races.
+- read-only `autolint` may batch independent files, preserving current bounded
+  concurrency behavior.
+
+Path arguments beginning with `-` must continue to work when callers insert
+`--`. Sley and editor hooks rely on this for hostile or unusual filenames.
+
+## Cutover
+
+This is a single-user toolchain today, so prefer a clean cutover over temporary
+compatibility shims. Do not emit both the generic capabilities shape and the old
+`sley` shape. Update Checkrun and dotfiles together, verify both, then push both
+repos when the new contract is green.
+
+The implementation should still preserve intentional workflow behavior, such as
+missing-tool no-ops, phase-specific ignores, and `autolint --json`, unless the
+new registry design deliberately replaces that behavior.
+
+## Non-Goals
+
+- Do not move fallback config files into Checkrun.
+- Do not make Sley consume registry internals directly.
+- Do not rewrite all execution in Python.
+- Do not generate shell dispatch into checked-in files.
+- Do not add user preference logic until there are multiple real tool choices
+  for the same phase and filetype.
