@@ -65,6 +65,13 @@ spec.loader.exec_module(registry_mod)
 registry = registry_mod.load_registry()
 capabilities = registry_mod.capabilities(registry)
 
+assert registry_mod.__all__ == [
+    "RegistryError",
+    "load_registry",
+    "plan",
+    "capabilities",
+    "explain_items",
+]
 assert capabilities["version"] == 2
 assert "sley" not in capabilities
 assert "python" in capabilities["filetypes"]["format"]
@@ -96,7 +103,14 @@ assert "actionlint" not in plain_adapters
 assert "zizmor" not in plain_adapters
 binary = tmp / "registry-test-binary"
 binary.write_bytes(b"\0\1\2")
-assert registry_mod.infer_filetype(binary, registry) is None
+assert registry_mod.plan(registry, [str(binary)])["files"][0]["filetype"] is None
+
+try:
+    registry_mod.plan(registry, [str(root / "README.md")], "spell")
+except registry_mod.RegistryError as error:
+    assert "unknown plan phase" in str(error), str(error)
+else:
+    raise AssertionError("public plan facade accepted an unsupported phase")
 
 format_dispatch = (root / "lib/checkrun/autoformat.sh").read_text(encoding="utf-8")
 lint_dispatch = (root / "lib/checkrun/autolint.sh").read_text(encoding="utf-8")
@@ -187,7 +201,9 @@ dedupe["selectors"].append(
         ],
     }
 )
-registry_mod.validate_invariants(dedupe)
+dedupe_path = tmp / "dedupe-registry.json"
+dedupe_path.write_text(json.dumps(dedupe), encoding="utf-8")
+dedupe = registry_mod.load_registry(dedupe_path)
 target = tmp / "dedupe.py"
 target.touch(exist_ok=True)
 dedupe_steps = registry_mod.plan(dedupe, [str(target)], "lint")["files"][0]["lint"]["steps"]
@@ -357,7 +373,7 @@ spec = importlib.util.spec_from_file_location(
 registry_mod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(registry_mod)
-registry_mod.SHELL_DISPATCH = {
+registry_mod._SHELL_DISPATCH = {
     "format": (dispatch_path, "_format_dispatch()"),
     "lint": (dispatch_path, "_run_lint_step()"),
 }

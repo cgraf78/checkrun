@@ -165,8 +165,9 @@ item = json.load(sys.stdin)[0]
 assert item["filetype"] == "json"
 assert item["lint"]["phases"]["tool"]["ignored"] is True
 assert item["lint"]["tools"] == []
-'
-_assert_exit "explain: reports backend tool ignore separately" 0 "$?"
+assert [step["reason"] for step in item["lint"]["skipped"] if step["tool"] == "biome"] == ["phase-ignore"]
+	'
+_assert_exit "explain: reports backend tool ignore and skipped step separately" 0 "$?"
 
 output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/plain.yaml" 2>&1)
 rc=$?
@@ -179,8 +180,10 @@ item = json.load(sys.stdin)[0]
 assert item["filetype"] == "yaml"
 assert [tool["tool"] for tool in item["format"]["tools"]] == ["yamlfmt"]
 assert item["lint"]["tools"] == []
-'
-_assert_exit "explain: generic yaml omits workflow-only linters" 0 "$?"
+assert [step["tool"] for step in item["lint"]["skipped"]] == ["actionlint", "zizmor"]
+assert all(step["reason"] == "path-pattern" for step in item["lint"]["skipped"])
+	'
+_assert_exit "explain: generic yaml explains skipped workflow-only linters" 0 "$?"
 
 output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/.github/workflows/build.yml" 2>&1)
 rc=$?

@@ -45,9 +45,9 @@ share/checkrun/schemas/registry.schema.json
 lib/checkrun/registry.py
 ```
 
-`registry.json` is the source of truth. `registry.py` is the interpreter for that
-source of truth. It should produce both human-facing explanations and
-machine-facing execution plans.
+`registry.json` is the source of truth. The internal `registry.py` interpreter
+loads and validates that source of truth, then produces the CLI JSON contracts
+for human-facing explanations and machine-facing execution plans.
 
 The physical `capabilities.json` file should be retired. `checkrun capabilities
 --json` should emit a derived integration projection from the registry.
@@ -401,21 +401,27 @@ It should not become a generic command language.
 
 ## Registry Interpreter
 
-`lib/checkrun/registry.py` should provide a small API:
+`lib/checkrun/registry.py` is an internal Checkrun interpreter, not the primary
+integration surface. Its public Python facade is deliberately small and listed in
+the module's `__all__`; every other helper should be underscore-prefixed so
+source-layout convenience does not create accidental API.
 
-- load registry
-- validate registry shape
-- infer filetype
+The interpreter owns these responsibilities:
+
+- load registry JSON
+- validate registry shape and invariants
+- infer filetype for a path
 - match selectors
 - apply path patterns
 - apply ignore policy
 - resolve config policies
-- produce a per-file phase plan
-- produce derived capabilities
+- produce plan entries
+- produce capabilities projection
 
-This module should be used by both `checkrun explain` and `checkrun plan`.
-It should be standard-library-only so hot hook paths do not gain optional Python
-package dependencies.
+`checkrun explain`, `checkrun plan`, and the private shell execution transport
+must all use this interpreter so planning, explanation, and execution cannot
+drift. It should be standard-library-only so hot hook paths do not gain optional
+Python package dependencies.
 
 Registry loading and validation errors are toolchain errors, not unsupported-file
 cases. `checkrun registry`, `checkrun capabilities`, `checkrun explain`, and
@@ -483,31 +489,41 @@ Explain decisions from the same registry engine that produces execution plans:
 
 ### `checkrun plan --json [--phase format|lint] FILE...`
 
-Emit the execution plan consumed by `autoformat` and `autolint`.
+Emit the stable execution-plan API. `autoformat` and `autolint` use the same
+interpreter through a private shell transport, but external consumers should use
+this JSON command.
 
 Example:
 
 ```json
-[
-  {
-    "path": "/repo/app.py",
-    "filetype": "python",
-    "format": {
-      "ignored": false,
-      "steps": [
-        {
-          "tool": "ruff",
-          "adapter": "ruff-format",
-          "config": {
-            "policy": "ruff-format",
-            "source": "fallback",
-            "path": "/home/user/.config/autoformat/ruff.toml"
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "/repo/app.py",
+      "exists": true,
+      "filetype": "python",
+      "format": {
+        "ignored": false,
+        "ignore": null,
+        "steps": [
+          {
+            "phase": "format",
+            "tool": "ruff",
+            "adapter": "ruff-format",
+            "config": {
+              "policy": "ruff-format",
+              "source": "fallback",
+              "path": "/home/user/.config/autoformat/ruff.toml"
+            }
           }
-        }
-      ]
+        ],
+        "skipped": [],
+        "configDir": "/home/user/.config/autoformat"
+      }
     }
-  }
-]
+  ]
+}
 ```
 
 The plan format is Checkrun API. Keep it stable and versioned enough for tests,
@@ -538,6 +554,18 @@ cross-cutting lint phases run before filetype-specific tool lint, and
 filetype-specific steps retain selector declaration order after duplicate
 deduplication.
 
+## Schema Association API
+
+`lib/checkrun/schemas/schema_policy.py` is dependency-addressable through
+shdeps, so its public API must stay explicit:
+
+- `schema_policy.py --lsp-schemas`
+- the functions listed in `schema_policy.__all__`
+
+The `--lsp-schemas` projection is named for the data shape it emits, not for one
+specific editor consumer. Helpers outside `__all__` should remain
+underscore-prefixed implementation details.
+
 ## Dispatch Flow
 
 Formatter flow:
@@ -546,7 +574,7 @@ Formatter flow:
 autoformat
   -> parse CLI flags, preserving `--` separator behavior
   -> normalize input files
-  -> call checkrun plan --phase format --json
+  -> ask the private registry shell-plan transport for a format plan
   -> for each file plan
        -> if ignored, skip
        -> for each step
@@ -560,7 +588,7 @@ Linter flow:
 autolint
   -> parse --fix/--json, preserving `--` separator behavior
   -> normalize input files
-  -> call checkrun plan --phase lint --json
+  -> ask the private registry shell-plan transport for a lint plan
   -> for each file plan
        -> run cross-cutting spell/schema steps unless ignored
        -> run backend tool steps unless tool-ignored
@@ -570,6 +598,11 @@ autolint
 Missing tools remain graceful no-ops. Missing required infrastructure such as
 `yq` and `jq` should keep current behavior unless the implementation explicitly
 proves a narrower requirement is safe.
+
+The private shell-plan transport is intentionally not documented as integration
+API. It exists only so Bash callers can consume NUL-delimited fields without
+trying to store NUL bytes in variables; external consumers should use
+`checkrun plan --json`.
 
 Intentional exit-code behavior should remain explicit:
 

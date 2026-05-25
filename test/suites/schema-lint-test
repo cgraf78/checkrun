@@ -348,8 +348,33 @@ _assert_exit "policy bootstrap: non-object policy fails without traceback" 1 "$r
 _assert_contains "policy bootstrap: non-object reports policy schema name" "Checkrun schema association policy" "$output"
 _assert_contains "policy bootstrap: non-object reports object type" "object" "$output"
 
+python3 - "$POLICY_SCRIPT" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+script = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("checkrun_schema_policy", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+assert module.__all__ == [
+    "load_json",
+    "policy_path",
+    "policy_schema_path",
+    "schema_path",
+    "schema_url",
+    "matching_associations",
+    "lsp_schema_config",
+]
+assert hasattr(module, "lsp_schema_config")
+assert not hasattr(module, "nvim_config")
+PY
+_assert_exit "policy API: public facade is explicit" 0 "$?"
+
 set +e
-output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" PATH="$_shdeps_bin:$PATH" python3 "$POLICY_SCRIPT" --nvim 2>/dev/null)
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" PATH="$_shdeps_bin:$PATH" python3 "$POLICY_SCRIPT" --lsp-schemas 2>/dev/null)
 rc=$?
 set -e
 _assert_exit "editor config: policy interpreter exits 0" 0 "$rc"
@@ -364,7 +389,7 @@ echo "=== schema-lint: production config schemas ==="
 
 if [[ -f "$HOME/.config/checkrun/associations.json" ]]; then
   set +e
-  output=$(python3 "$POLICY_SCRIPT" --nvim 2>/dev/null)
+  output=$(python3 "$POLICY_SCRIPT" --lsp-schemas 2>/dev/null)
   rc=$?
   set -e
   _assert_exit "production schemas: editor config emits successfully" 0 "$rc"

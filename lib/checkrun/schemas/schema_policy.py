@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
-"""Shared Checkrun schema association policy.
+"""Shared Checkrun schema association policy interpreter.
 
 The policy file is intentionally data-only. This module owns the semantics for
-that data so `autolint`, direct schema validation, and nvim all expand paths,
-matches, and schema URLs the same way.
+that data so `autolint`, direct schema validation, and editor integrations all
+expand paths, matches, and schema URLs the same way.
+
+Public contract:
+  - `schema_policy.py --lsp-schemas`
+  - `load_json()`
+  - `policy_path()`
+  - `policy_schema_path()`
+  - `schema_path()`
+  - `schema_url()`
+  - `matching_associations()`
+  - `lsp_schema_config()`
+
+The functions outside `__all__` are implementation details. Keeping that line
+clear matters because this file is dependency-addressable through shdeps, so any
+unmarked helper can otherwise become a de facto integration API.
 """
 
 from __future__ import annotations
@@ -21,61 +35,75 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
-# Resolve HOME once per process so CLI tools, tests, and nvim all interpret the
+# Resolve HOME once per process so CLIs, tests, and editors all interpret the
 # same policy file against the same root. Hosts provide their policy under
 # Checkrun's config namespace; the policy data may still match files owned by
 # integration repos, app repos, or any other host harness.
-HOME = Path.home()
-CHECKRUN_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_POLICY = HOME / ".config/checkrun/associations.json"
-DEFAULT_SCHEMA_DATA_DIR = ".local/share/checkrun/schemas"
-DEFAULT_POLICY_SCHEMA = CHECKRUN_ROOT / "share/checkrun/schemas/associations.schema.json"
+_HOME = Path.home()
+_CHECKRUN_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_POLICY = _HOME / ".config/checkrun/associations.json"
+_DEFAULT_SCHEMA_DATA_DIR = ".local/share/checkrun/schemas"
+_DEFAULT_POLICY_SCHEMA = _CHECKRUN_ROOT / "share/checkrun/schemas/associations.schema.json"
+
+__all__ = [
+    "load_json",
+    "policy_path",
+    "policy_schema_path",
+    "schema_path",
+    "schema_url",
+    "matching_associations",
+    "lsp_schema_config",
+]
 
 
 def load_json(path: Path) -> Any:
+    """Load a JSON policy or schema document from `path`."""
+
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
 
 
-def home_path(value: str) -> Path:
+def _home_path(value: str) -> Path:
     if value.startswith("$HOME/"):
-        return HOME / value[len("$HOME/") :]
+        return _HOME / value[len("$HOME/") :]
     if value.startswith("~/"):
-        return HOME / value[2:]
+        return _HOME / value[2:]
     path = Path(value)
     if path.is_absolute():
         return path
-    return HOME / value
+    return _HOME / value
 
 
-def home_string(value: str) -> str:
+def _home_string(value: str) -> str:
     # Editor-facing schema URLs can be either real URLs or file URLs. Expand
     # HOME inside file URLs without disturbing normal https:// sources.
     if value.startswith("file://$HOME"):
-        return value.replace("file://$HOME", "file://" + str(HOME), 1)
+        return value.replace("file://$HOME", "file://" + str(_HOME), 1)
     if value.startswith("file://~"):
-        return value.replace("file://~", "file://" + str(HOME), 1)
+        return value.replace("file://~", "file://" + str(_HOME), 1)
     if value.startswith("$HOME/") or value.startswith("~/"):
-        return str(home_path(value))
+        return str(_home_path(value))
     if value.startswith("$HOME"):
-        return value.replace("$HOME", str(HOME), 1)
+        return value.replace("$HOME", str(_HOME), 1)
     return value
 
 
 def policy_path() -> Path:
+    """Return the active schema association policy path."""
+
     # CHECKRUN_SCHEMA_ASSOCIATIONS lets tests and temporary worktrees exercise
     # the same interpreter without editing the real host policy.
     value = os.environ.get("CHECKRUN_SCHEMA_ASSOCIATIONS")
-    return home_path(value) if value else DEFAULT_POLICY
+    return _home_path(value) if value else _DEFAULT_POLICY
 
 
 def policy_schema_path() -> Path:
     """Return the schema that defines association policy documents."""
 
-    return DEFAULT_POLICY_SCHEMA
+    return _DEFAULT_POLICY_SCHEMA
 
 
-def dependency_file_path(dependency: str, asset_path: str) -> Path:
+def _dependency_file_path(dependency: str, asset_path: str) -> Path:
     """Resolve a dependency-owned schema asset through shdeps."""
 
     shdeps = shutil.which("shdeps")
@@ -107,11 +135,11 @@ def schema_path(policy: dict[str, Any], association: dict[str, Any]) -> Path:
         return Path()
     dependency = association.get("dependency")
     if isinstance(dependency, str) and dependency:
-        return dependency_file_path(dependency, schema)
+        return _dependency_file_path(dependency, schema)
     if schema.startswith("file://"):
-        return home_path(schema[len("file://") :])
+        return _home_path(schema[len("file://") :])
     if schema.startswith("$HOME/") or schema.startswith("~/"):
-        return home_path(schema)
+        return _home_path(schema)
     path = Path(schema)
     if path.is_absolute():
         return path
@@ -119,8 +147,8 @@ def schema_path(policy: dict[str, Any], association: dict[str, Any]) -> Path:
         # Paths with directories are host-local config/data paths. Keep them
         # anchored under HOME while bare public-schema payload names stay under
         # schemaDataDir.
-        return HOME / schema
-    data_dir = home_path(str(policy.get("schemaDataDir", DEFAULT_SCHEMA_DATA_DIR)))
+        return _HOME / schema
+    data_dir = _home_path(str(policy.get("schemaDataDir", _DEFAULT_SCHEMA_DATA_DIR)))
     return data_dir / schema
 
 
@@ -139,17 +167,17 @@ def schema_url(
 
     source = association.get("source")
     if prefer_source and isinstance(source, str) and source:
-        return home_string(source)
+        return _home_string(source)
 
     schema = association.get("schema")
     if not isinstance(schema, str) or not schema:
         return None
     if schema.startswith(("http://", "https://", "file://")):
-        return home_string(schema)
+        return _home_string(schema)
     return "file://" + str(schema_path(policy, association))
 
 
-def expanded_patterns(patterns: Iterable[Any]) -> list[str]:
+def _expanded_patterns(patterns: Iterable[Any]) -> list[str]:
     """Expand one policy match into every supported consumer match form.
 
     Policy patterns are written once as home-relative host paths. The extra
@@ -166,9 +194,9 @@ def expanded_patterns(patterns: Iterable[Any]) -> list[str]:
         pattern = raw.strip()
         if not pattern:
             continue
-        candidates = [home_string(pattern)]
+        candidates = [_home_string(pattern)]
         if not pattern.startswith(("/", "$HOME/", "~/")):
-            candidates.extend([str(HOME / pattern), f"**/{pattern}"])
+            candidates.extend([str(_HOME / pattern), f"**/{pattern}"])
         for candidate in candidates:
             if candidate not in seen:
                 seen.add(candidate)
@@ -176,19 +204,19 @@ def expanded_patterns(patterns: Iterable[Any]) -> list[str]:
     return expanded
 
 
-def candidates(path: Path) -> set[str]:
+def _candidates(path: Path) -> set[str]:
     absolute = str(path)
     names = {absolute}
     try:
-        names.add(str(path.relative_to(HOME)))
+        names.add(str(path.relative_to(_HOME)))
     except ValueError:
         pass
     return names
 
 
-def matches(path: Path, association: dict[str, Any]) -> bool:
-    names = candidates(path)
-    for pattern in expanded_patterns(association.get("matches", [])):
+def _matches(path: Path, association: dict[str, Any]) -> bool:
+    names = _candidates(path)
+    for pattern in _expanded_patterns(association.get("matches", [])):
         # fnmatch treats "/" as an ordinary character. That is intentional:
         # the policy's generated `**/foo` patterns are meant to match copied
         # checkout paths without adding another glob implementation.
@@ -197,7 +225,7 @@ def matches(path: Path, association: dict[str, Any]) -> bool:
     return False
 
 
-def associations(policy: Any, *, enforce_only: bool = False) -> list[dict[str, Any]]:
+def _associations(policy: Any, *, enforce_only: bool = False) -> list[dict[str, Any]]:
     # A malformed top-level policy should never make consumers traceback. The
     # policy file itself is validated separately by schema-lint's bootstrap
     # check; other consumers can safely treat it as having no associations.
@@ -214,14 +242,16 @@ def associations(policy: Any, *, enforce_only: bool = False) -> list[dict[str, A
 
 
 def matching_associations(policy: dict[str, Any], path: Path) -> list[dict[str, Any]]:
+    """Return enforceable schema associations that match `path`."""
+
     return [
         association
-        for association in associations(policy, enforce_only=True)
-        if matches(path, association)
+        for association in _associations(policy, enforce_only=True)
+        if _matches(path, association)
     ]
 
 
-def append_unique(items: Iterable[str], extra: Iterable[str]) -> list[str]:
+def _append_unique(items: Iterable[str], extra: Iterable[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for item in [*items, *extra]:
@@ -231,33 +261,33 @@ def append_unique(items: Iterable[str], extra: Iterable[str]) -> list[str]:
     return result
 
 
-def glob_body(pattern: str) -> str:
+def _glob_body(pattern: str) -> str:
     return re.escape(pattern).replace(r"\-", "-").replace(r"\*\*", ".*").replace(r"\*", ".*")
 
 
-def glob_to_regex(pattern: str) -> str:
+def _glob_to_regex(pattern: str) -> str:
     # Taplo wants regex keys, while JSON/YAML language servers accept glob-like
     # fileMatch values. Keep this conversion in the shared interpreter so TOML
     # does not drift from the path expansion used by other editor surfaces.
-    body = glob_body(pattern)
+    body = _glob_body(pattern)
     if pattern.startswith("/"):
         return "^" + body + "$"
     if pattern.startswith("**/"):
-        return ".*/" + glob_body(pattern[3:]) + "$"
+        return ".*/" + _glob_body(pattern[3:]) + "$"
     return ".*/" + body + "$"
 
 
-def nvim_config(policy: dict[str, Any]) -> dict[str, Any]:
-    """Build editor-facing schema associations from the shared policy."""
+def lsp_schema_config(policy: dict[str, Any]) -> dict[str, Any]:
+    """Build LSP/editor-facing schema associations from the shared policy."""
 
     json_schemas: list[dict[str, Any]] = []
     yaml_schemas: dict[str, list[str]] = {}
     toml_schemas: dict[str, str] = {}
 
-    for association in associations(policy):
+    for association in _associations(policy):
         fmt = str(association.get("format", "")).lower()
         url = schema_url(policy, association, prefer_source=True)
-        file_matches = expanded_patterns(association.get("matches", []))
+        file_matches = _expanded_patterns(association.get("matches", []))
         if not url or not file_matches:
             continue
         if fmt == "json":
@@ -271,20 +301,20 @@ def nvim_config(policy: dict[str, Any]) -> dict[str, Any]:
         elif fmt == "yaml":
             # yamlls keys schemas by URL, so distinct policy entries that use
             # the same published schema must share one deduped fileMatch list.
-            yaml_schemas[url] = append_unique(yaml_schemas.get(url, []), file_matches)
+            yaml_schemas[url] = _append_unique(yaml_schemas.get(url, []), file_matches)
         elif fmt == "toml":
             for pattern in file_matches:
-                toml_schemas[glob_to_regex(pattern)] = url
+                toml_schemas[_glob_to_regex(pattern)] = url
 
     return {"json": json_schemas, "yaml": yaml_schemas, "toml": toml_schemas}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--nvim", action="store_true", help="emit nvim LSP schema config")
+    parser.add_argument("--lsp-schemas", action="store_true", help="emit LSP schema config")
     args = parser.parse_args(argv)
 
-    if not args.nvim:
+    if not args.lsp_schemas:
         parser.error("one output mode is required")
 
     path = policy_path()
@@ -296,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     except (JSONDecodeError, OSError) as exc:
         print(f"schema policy: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(nvim_config(policy), separators=(",", ":")))
+    print(json.dumps(lsp_schema_config(policy), separators=(",", ":")))
     return 0
 
 

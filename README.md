@@ -12,8 +12,10 @@ CLIs as their formatting and linting policy surface.
 ## CLIs
 
 ```text
+checkrun registry --json
 checkrun capabilities --json
 checkrun explain [--json] FILE [FILE...]
+checkrun plan --json [--phase format|lint] FILE [FILE...]
 checkrun format FILE [FILE...]
 checkrun lint [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
@@ -31,11 +33,13 @@ Both commands ignore missing, deleted, or explicitly ignored files. Missing
 language tools are treated as graceful no-ops so a host without a language
 toolchain does not break unrelated workflows.
 
+`checkrun registry --json` emits the raw registry for debugging and tests.
 `checkrun capabilities --json` emits machine-readable filetype metadata for
-editor integrations. `checkrun explain` reports the normalized
-path, inferred filetype, phase-specific ignore decisions, candidate
-formatter/linter tools, fallback config names, and matching schema associations
-for selected files.
+editor integrations. `checkrun plan --json` emits the stable execution-plan API
+for integrations that need to inspect Checkrun decisions without running tools.
+`checkrun explain` reports the normalized path, inferred filetype,
+phase-specific ignore decisions, candidate formatter/linter tools, fallback
+config names, and matching schema associations for selected files.
 
 ## Dependencies
 
@@ -44,7 +48,9 @@ for selected files.
   file remains after filtering.
 - `jq` is required by `autolint --json`, schema association policy, and any
   checks that need JSON diagnostics.
-- `python3` is required for schema association helpers.
+- Python 3.11+ is required for registry planning and schema association helpers.
+  Set `CHECKRUN_PYTHON` to a compatible interpreter when the host default
+  `python3` does not include stdlib `tomllib`.
 - `shdeps` is required only when a schema association policy references a
   dependency-owned schema with `"dependency": "owner/repo"`.
 
@@ -65,11 +71,13 @@ own toolchain through the host environment or integration layer.
   filetype inference, formatter/linter selection, `checkrun plan`,
   `checkrun explain`, and the derived `checkrun capabilities --json` output.
 - `share/checkrun/schemas/registry.schema.json` validates the registry shape;
-  `lib/checkrun/registry.py` enforces cross-object invariants that JSON Schema
-  cannot express cleanly.
-- `lib/checkrun/schemas/schema_policy.py` is the schema association API shared
-  by editors and linting. Associations may set `"dependency": "owner/repo"` and
-  a repo-relative `"schema"` path when a schema is public API owned by a
+  the internal `lib/checkrun/registry.py` interpreter enforces cross-object
+  invariants that JSON Schema cannot express cleanly.
+- `lib/checkrun/schemas/schema_policy.py` is the public schema association API
+  shared by editors and linting. `--lsp-schemas` emits the editor/LSP
+  projection. Its documented Python facade is limited to the module's `__all__`;
+  other helpers are internal. Associations may set `"dependency": "owner/repo"`
+  and a repo-relative `"schema"` path when a schema is public API owned by a
   shdeps-managed dependency; the interpreter resolves those through
   `shdeps dep-file`.
 - `lib/checkrun/schemas/schema-lint.py` validates files through that policy.
@@ -83,7 +91,7 @@ dependency manager's contract:
 
 ```bash
 . "$(shdeps dep-file cgraf78/checkrun share/checkrun/shell.sh)"
-python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --nvim
+python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --lsp-schemas
 checkrun capabilities --json
 ```
 

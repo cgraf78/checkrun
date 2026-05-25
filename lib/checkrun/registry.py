@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Checkrun tooling registry interpreter."""
+"""Internal interpreter for Checkrun's tooling registry.
+
+Public contract:
+  - `checkrun registry --json`
+  - `checkrun capabilities --json`
+  - `checkrun explain [--json] FILE...`
+  - `checkrun plan --json [--phase format|lint] FILE...`
+
+This module is intentionally not a general-purpose library API. A tiny Python
+facade is kept documented for repo tests and future Checkrun-owned callers, but
+downstream integrations should consume the CLI JSON contracts instead. Keeping
+that boundary explicit prevents helper functions from becoming accidental public
+API just because they live in a sourceable dependency checkout.
+"""
 
 from __future__ import annotations
 
@@ -15,33 +28,41 @@ from typing import Any
 
 import tomllib
 
-CHECKRUN_ROOT = Path(__file__).resolve().parents[2]
-REGISTRY_PATH = CHECKRUN_ROOT / "share/checkrun/registry.json"
-REGISTRY_SCHEMA_PATH = CHECKRUN_ROOT / "share/checkrun/schemas/registry.schema.json"
-LINTER_ADAPTER_DIR = CHECKRUN_ROOT / "lib/checkrun/linters"
+__all__ = [
+    "RegistryError",
+    "load_registry",
+    "plan",
+    "capabilities",
+    "explain_items",
+]
+
+_CHECKRUN_ROOT = Path(__file__).resolve().parents[2]
+_REGISTRY_PATH = _CHECKRUN_ROOT / "share/checkrun/registry.json"
+_REGISTRY_SCHEMA_PATH = _CHECKRUN_ROOT / "share/checkrun/schemas/registry.schema.json"
+_LINTER_ADAPTER_DIR = _CHECKRUN_ROOT / "lib/checkrun/linters"
 
 # Keep phase names centralized because the registry is now the contract shared by
 # shell hooks, CLI explainability, and editor integrations. If a new phase is
 # introduced in only one caller, drift comes back immediately.
-PHASES = {"format", "lint", "spell", "schema", "tool"}
-PLAN_PHASES = {"format", "lint"}
-ENV_ROOTS = {"CHECKRUN_AUTOFORMAT_DIR", "CHECKRUN_AUTOLINT_DIR"}
-DOWNSTREAM_KEYS = {"sley", "nvim"}
-PHASE_IGNORE_FILES = {
+_PHASES = {"format", "lint", "spell", "schema", "tool"}
+_PLAN_PHASES = {"format", "lint"}
+_ENV_ROOTS = {"CHECKRUN_AUTOFORMAT_DIR", "CHECKRUN_AUTOLINT_DIR"}
+_DOWNSTREAM_KEYS = {"sley", "nvim"}
+_PHASE_IGNORE_FILES = {
     "format": "format-ignore",
     "lint": "lint-ignore",
     "spell": "spell-ignore",
     "schema": "schema-ignore",
     "tool": "tool-ignore",
 }
-SHELL_ADAPTER_SOURCES = (
-    CHECKRUN_ROOT / "lib/checkrun/autoformat.sh",
-    CHECKRUN_ROOT / "lib/checkrun/autolint.sh",
-    CHECKRUN_ROOT / "lib/checkrun/common.sh",
+_SHELL_ADAPTER_SOURCES = (
+    _CHECKRUN_ROOT / "lib/checkrun/autoformat.sh",
+    _CHECKRUN_ROOT / "lib/checkrun/autolint.sh",
+    _CHECKRUN_ROOT / "lib/checkrun/common.sh",
 )
-SHELL_DISPATCH = {
-    "format": (CHECKRUN_ROOT / "lib/checkrun/autoformat.sh", "_format_dispatch()"),
-    "lint": (CHECKRUN_ROOT / "lib/checkrun/autolint.sh", "_lint_dispatch()"),
+_SHELL_DISPATCH = {
+    "format": (_CHECKRUN_ROOT / "lib/checkrun/autoformat.sh", "_format_dispatch()"),
+    "lint": (_CHECKRUN_ROOT / "lib/checkrun/autolint.sh", "_lint_dispatch()"),
 }
 
 
@@ -49,7 +70,7 @@ class RegistryError(RuntimeError):
     """Raised when the registry cannot be loaded or validated."""
 
 
-def shell_functions() -> set[str]:
+def _shell_functions() -> set[str]:
     """Return shell functions available to registry-declared adapters."""
 
     # Adapter existence is an interpreter invariant, not just a test nicety:
@@ -63,7 +84,7 @@ def shell_functions() -> set[str]:
     # Top-level entry libraries are explicit, while linter domains are globbed
     # so adding a new `linters/*.sh` file does not create a second maintenance
     # point in the registry validator.
-    sources = sorted((*SHELL_ADAPTER_SOURCES, *LINTER_ADAPTER_DIR.glob("*.sh")))
+    sources = sorted((*_SHELL_ADAPTER_SOURCES, *_LINTER_ADAPTER_DIR.glob("*.sh")))
     for source in sources:
         try:
             lines = source.read_text(encoding="utf-8").splitlines()
@@ -76,7 +97,7 @@ def shell_functions() -> set[str]:
     return functions
 
 
-def shell_dispatch_functions(phase: str) -> dict[str, str]:
+def _shell_dispatch_functions(phase: str) -> dict[str, str]:
     """Return adapter ids and shell functions accepted by one dispatcher."""
 
     # The registry can only be authoritative if a selected adapter is known to
@@ -86,7 +107,7 @@ def shell_dispatch_functions(phase: str) -> dict[str, str]:
     # the right arguments. This narrow parser intentionally supports Checkrun's
     # one-line dispatch arms instead of trying to understand arbitrary shell.
     try:
-        source, function = SHELL_DISPATCH[phase]
+        source, function = _SHELL_DISPATCH[phase]
     except KeyError as exc:
         raise RegistryError(f"unknown dispatch phase: {phase}") from exc
     try:
@@ -115,7 +136,7 @@ def shell_dispatch_functions(phase: str) -> dict[str, str]:
     return dispatch
 
 
-def load_json(path: Path) -> Any:
+def _load_json(path: Path) -> Any:
     try:
         with path.open("r", encoding="utf-8") as file:
             return json.load(file)
@@ -223,17 +244,17 @@ def _validate_schema_node(
             _validate_schema_node(item, node["items"], full_schema, f"{path}[{index}]")
 
 
-def validate_shape(registry: dict[str, Any], schema: dict[str, Any]) -> None:
+def _validate_shape(registry: dict[str, Any], schema: dict[str, Any]) -> None:
     _validate_schema_node(registry, schema, schema, "registry")
 
 
-def validate_invariants(registry: dict[str, Any]) -> None:
+def _validate_invariants(registry: dict[str, Any]) -> None:
     # JSON Schema can prove the document shape, but not the cross-object
     # relationships that make the registry trustworthy as a source of truth.
     # These checks are the drift guard: metadata cannot advertise an adapter,
     # config policy, or filetype that execution cannot understand.
-    if DOWNSTREAM_KEYS.intersection(registry):
-        keys = ", ".join(sorted(DOWNSTREAM_KEYS.intersection(registry)))
+    if _DOWNSTREAM_KEYS.intersection(registry):
+        keys = ", ".join(sorted(_DOWNSTREAM_KEYS.intersection(registry)))
         raise RegistryError(f"downstream-specific registry keys are not allowed: {keys}")
 
     declared_filetypes = set(registry["filetypes"]["extension"].values())
@@ -243,7 +264,7 @@ def validate_invariants(registry: dict[str, Any]) -> None:
 
     adapters = registry["adapters"]
     config_policies = registry["configPolicies"]
-    dispatch_functions = {phase: shell_dispatch_functions(phase) for phase in PLAN_PHASES}
+    dispatch_functions = {phase: _shell_dispatch_functions(phase) for phase in _PLAN_PHASES}
     dispatch_adapter_ids = {
         adapter_id for dispatch in dispatch_functions.values() for adapter_id in dispatch
     }
@@ -263,7 +284,7 @@ def validate_invariants(registry: dict[str, Any]) -> None:
         names = ", ".join(sorted(non_shell_dispatch))
         raise RegistryError(f"shell dispatch references non-shell adapters: {names}")
 
-    implemented_functions = shell_functions()
+    implemented_functions = _shell_functions()
     for adapter_id, adapter in adapters.items():
         if adapter.get("kind") == "shell-function" and not adapter.get("function"):
             raise RegistryError(f"{adapter_id}: shell-function adapter requires function")
@@ -291,8 +312,8 @@ def validate_invariants(registry: dict[str, Any]) -> None:
         if selector_id in selectors_seen:
             raise RegistryError(f"duplicate selector id: {selector_id}")
         selectors_seen.add(selector_id)
-        if DOWNSTREAM_KEYS.intersection(selector):
-            keys = ", ".join(sorted(DOWNSTREAM_KEYS.intersection(selector)))
+        if _DOWNSTREAM_KEYS.intersection(selector):
+            keys = ", ".join(sorted(_DOWNSTREAM_KEYS.intersection(selector)))
             raise RegistryError(f"{selector_id}: downstream-specific keys are not allowed: {keys}")
         if not selector.get("filetypes"):
             raise RegistryError(f"{selector_id}: selector requires at least one filetype")
@@ -302,7 +323,7 @@ def validate_invariants(registry: dict[str, Any]) -> None:
         for phase in ("format", "lint"):
             for step in selector.get(phase, []):
                 selected_adapters.add(step["adapter"])
-                validate_step(
+                _validate_step(
                     step,
                     phase,
                     selector_id,
@@ -313,11 +334,11 @@ def validate_invariants(registry: dict[str, Any]) -> None:
                 )
 
     for phase, steps in registry.get("crossCutting", {}).items():
-        if phase not in PLAN_PHASES:
+        if phase not in _PLAN_PHASES:
             raise RegistryError(f"unknown cross-cutting phase: {phase}")
         for step in steps:
             step_phase = str(step.get("phase", phase))
-            if step_phase not in PHASES:
+            if step_phase not in _PHASES:
                 raise RegistryError(f"unknown step phase: {step_phase}")
             if "pathPatterns" in step:
                 raise RegistryError(
@@ -325,7 +346,7 @@ def validate_invariants(registry: dict[str, Any]) -> None:
                     "cross-cutting steps apply to every lintable file"
                 )
             selected_adapters.add(step["adapter"])
-            validate_step(
+            _validate_step(
                 step,
                 phase,
                 f"crossCutting.{phase}",
@@ -346,7 +367,7 @@ def validate_invariants(registry: dict[str, Any]) -> None:
 
     for name, policy in config_policies.items():
         env_root = policy.get("envRoot")
-        if env_root is not None and env_root not in ENV_ROOTS:
+        if env_root is not None and env_root not in _ENV_ROOTS:
             raise RegistryError(f"{name}: unknown env root: {env_root}")
 
     for item in registry["filetypes"]["shebangs"]:
@@ -356,7 +377,7 @@ def validate_invariants(registry: dict[str, Any]) -> None:
             raise RegistryError("shebang rule must contain exactly one matcher")
 
 
-def validate_step(
+def _validate_step(
     step: dict[str, Any],
     phase: str,
     owner: str,
@@ -386,7 +407,7 @@ def validate_step(
         )
     if "config" in step and step["config"] not in config_policies:
         raise RegistryError(f"{owner}.{phase}: unknown config policy: {step['config']}")
-    if step_phase not in PHASES:
+    if step_phase not in _PHASES:
         raise RegistryError(f"{owner}.{phase}: unknown phase: {step.get('phase')}")
     if step_phase not in allowed_step_phases:
         expected = ", ".join(sorted(allowed_step_phases))
@@ -396,33 +417,42 @@ def validate_step(
 
 
 def load_registry(path: Path | None = None) -> dict[str, Any]:
-    registry_path = path or Path(os.environ.get("CHECKRUN_REGISTRY", REGISTRY_PATH))
+    """Load and validate a Checkrun tooling registry.
+
+    This is the small Python facade used by Checkrun's own tests and CLIs. It is
+    intentionally stricter than JSON Schema alone because registry correctness
+    depends on cross-object facts: selectors must reference declared filetypes,
+    selected adapters must exist in shell dispatch, and downstream-specific keys
+    must never become policy.
+    """
+
+    registry_path = path or Path(os.environ.get("CHECKRUN_REGISTRY", _REGISTRY_PATH))
     if not registry_path.is_absolute():
         registry_path = Path.cwd() / registry_path
-    registry = load_json(registry_path)
-    schema = load_json(REGISTRY_SCHEMA_PATH)
+    registry = _load_json(registry_path)
+    schema = _load_json(_REGISTRY_SCHEMA_PATH)
     if not isinstance(registry, dict):
         raise RegistryError("registry root must be an object")
     if not isinstance(schema, dict):
         raise RegistryError("registry schema root must be an object")
     # Surface downstream ownership mistakes with a direct message before generic
     # additionalProperties validation turns them into a bland "unknown key".
-    if DOWNSTREAM_KEYS.intersection(registry):
-        keys = ", ".join(sorted(DOWNSTREAM_KEYS.intersection(registry)))
+    if _DOWNSTREAM_KEYS.intersection(registry):
+        keys = ", ".join(sorted(_DOWNSTREAM_KEYS.intersection(registry)))
         raise RegistryError(f"downstream-specific registry keys are not allowed: {keys}")
-    validate_shape(registry, schema)
-    validate_invariants(registry)
+    _validate_shape(registry, schema)
+    _validate_invariants(registry)
     return registry
 
 
-def extension(path: Path) -> str:
+def _extension(path: Path) -> str:
     name = path.name
     if "." not in name or name.startswith(".") and name.count(".") == 1:
         return ""
     return name.rsplit(".", 1)[1]
 
 
-def abs_path(path: str) -> Path:
+def _abs_path(path: str) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
@@ -435,13 +465,13 @@ def _is_text(path: Path) -> bool:
     return b"\0" not in chunk
 
 
-def infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
+def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
     # Match order mirrors the spec and editor expectations. Filename wins before
     # extension so files such as CMakeLists.txt and Dockerfile are stable even
     # when they contain dots or suffixes that would otherwise look generic.
     filetypes = registry["filetypes"]
     name = path.name
-    ext = extension(path)
+    ext = _extension(path)
 
     if name in filetypes["filename"]:
         return str(filetypes["filename"][name])
@@ -455,7 +485,7 @@ def infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
         # config syntaxes are identified by a narrow path shape rather than a
         # unique basename. Reusing the same candidate forms as path-scoped tool
         # matching keeps inference, explain, plan, and dispatch aligned.
-        if path_pattern_matches(path, [item["pattern"]]):
+        if _path_pattern_matches(path, [item["pattern"]]):
             return str(item["filetype"])
 
     # Shebang probing is intentionally last and text-only. Extensionless binary
@@ -477,7 +507,7 @@ def infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
     return None
 
 
-def path_pattern_matches(path: Path, patterns: list[str]) -> bool:
+def _path_pattern_matches(path: Path, patterns: list[str]) -> bool:
     if not patterns:
         return True
     # Keep path-scoped tools identical between explain, plan, and execution.
@@ -493,7 +523,7 @@ def path_pattern_matches(path: Path, patterns: list[str]) -> bool:
     )
 
 
-def selector_matches(path: Path, filetype: str | None, selector: dict[str, Any]) -> bool:
+def _selector_matches(path: Path, filetype: str | None, selector: dict[str, Any]) -> bool:
     # Filetype inference is the only path-to-language decision point. Selectors
     # intentionally consume that normalized answer instead of carrying their own
     # filename/extension/pattern matchers, which would let execution drift from
@@ -509,7 +539,7 @@ def _skip(step: dict[str, Any], reason: str, **details: Any) -> dict[str, Any]:
     return skipped
 
 
-def config_root(env_name: str) -> Path:
+def _config_root(env_name: str) -> Path:
     # Lint defaults through CHECKRUN_AUTOFORMAT_DIR because most personal policy
     # files live in one dotfiles directory. Resolving roots here, before adapter
     # execution, protects tools that cd or discover config from process cwd.
@@ -526,7 +556,7 @@ def config_root(env_name: str) -> Path:
     return path.resolve(strict=False)
 
 
-def walk_config(dir_path: Path, filename: str) -> Path | None:
+def _walk_config(dir_path: Path, filename: str) -> Path | None:
     # Project-local policy must win over personal fallback policy. Walking from
     # the target file directory also avoids long-lived editor/agent cwd leaking
     # into config selection.
@@ -567,7 +597,7 @@ def _probe_contains(path: Path, contains: dict[str, Any]) -> bool:
     return _lookup_path(data, [str(item) for item in contains["query"]]) is not None
 
 
-def resolve_config(
+def _resolve_config(
     registry: dict[str, Any],
     policy_name: str | None,
     path: Path,
@@ -580,7 +610,7 @@ def resolve_config(
     policy = registry["configPolicies"][policy_name]
     file_dir = path.parent
     for probe in policy.get("project", []):
-        found = walk_config(file_dir, probe["file"])
+        found = _walk_config(file_dir, probe["file"])
         if not found:
             continue
         if "contains" in probe and not _probe_contains(found, probe["contains"]):
@@ -593,7 +623,7 @@ def resolve_config(
 
     fallback = policy.get("fallback")
     if fallback and policy.get("envRoot"):
-        root = config_root(str(policy["envRoot"]))
+        root = _config_root(str(policy["envRoot"]))
         candidate = (root / fallback["file"]).resolve(strict=False)
         if candidate.is_file():
             if policy.get("selfConfigGuard") is True and candidate == path.resolve(strict=False):
@@ -605,8 +635,8 @@ def resolve_config(
     return {"policy": policy_name, "source": "native"}
 
 
-def ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
-    for filename in ("ignore", PHASE_IGNORE_FILES.get(phase, f"{phase}-ignore")):
+def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
+    for filename in ("ignore", _PHASE_IGNORE_FILES.get(phase, f"{phase}-ignore")):
         source = config / filename
         if not source.is_file():
             continue
@@ -623,11 +653,11 @@ def ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
     return {"ignored": False}
 
 
-def schema_associations(path: Path) -> list[dict[str, Any]]:
+def _schema_associations(path: Path) -> list[dict[str, Any]]:
     # Schema association policy remains outside the tooling registry. The plan
     # reports matching associations for explainability, but the association file
     # itself is still owned by dotfiles/project policy.
-    schemas_dir = CHECKRUN_ROOT / "lib/checkrun/schemas"
+    schemas_dir = _CHECKRUN_ROOT / "lib/checkrun/schemas"
     sys.path.insert(0, str(schemas_dir))
     try:
         import schema_policy  # type: ignore
@@ -681,14 +711,14 @@ def _planned_step(
         "phase": phase,
         "tool": step["tool"],
         "adapter": step["adapter"],
-        "config": resolve_config(registry, step.get("config"), path),
+        "config": _resolve_config(registry, step.get("config"), path),
     }
     if "pathPatterns" in step:
         planned["pathPatterns"] = list(step["pathPatterns"])
     return planned
 
 
-def collect_steps(
+def _collect_steps(
     registry: dict[str, Any],
     path: Path,
     filetype: str | None,
@@ -708,10 +738,10 @@ def collect_steps(
                 steps.append(_planned_step(registry, path, step, "lint"))
                 seen.add(key)
     for selector in registry["selectors"]:
-        if not selector_matches(path, filetype, selector):
+        if not _selector_matches(path, filetype, selector):
             continue
         for step in selector.get(phase, []):
-            if not path_pattern_matches(path, step.get("pathPatterns", [])):
+            if not _path_pattern_matches(path, step.get("pathPatterns", [])):
                 skipped.append(
                     _skip(
                         _planned_step(registry, path, step, phase),
@@ -728,22 +758,12 @@ def collect_steps(
     return steps, skipped
 
 
-def selected_steps(
-    registry: dict[str, Any],
-    path: Path,
-    filetype: str | None,
-    phase: str,
-) -> list[dict[str, Any]]:
-    steps, _skipped = collect_steps(registry, path, filetype, phase)
-    return steps
-
-
-def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None) -> dict[str, Any]:
+def _plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None) -> dict[str, Any]:
     # Planning inspects local files and config only; it never executes tools.
     # Shell entrypoints consume this as their policy answer and keep adapter
     # invocation separate.
-    path = abs_path(file_arg)
-    filetype = infer_filetype(path, registry)
+    path = _abs_path(file_arg)
+    filetype = _infer_filetype(path, registry)
     phases = [phase] if phase else ["format", "lint"]
     item: dict[str, Any] = {
         "path": str(path),
@@ -752,10 +772,10 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
     }
     for plan_phase in phases:
         if plan_phase == "format":
-            config = config_root("CHECKRUN_AUTOFORMAT_DIR")
-            ignored = ignore_match(path, config, "format")
+            config = _config_root("CHECKRUN_AUTOFORMAT_DIR")
+            ignored = _ignore_match(path, config, "format")
             candidate_steps, skipped = (
-                collect_steps(registry, path, filetype, "format") if path.is_file() else ([], [])
+                _collect_steps(registry, path, filetype, "format") if path.is_file() else ([], [])
             )
             if ignored["ignored"]:
                 steps = []
@@ -772,13 +792,13 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
                 "configDir": str(config),
             }
         elif plan_phase == "lint":
-            config = config_root("CHECKRUN_AUTOLINT_DIR")
-            lint_ignore = ignore_match(path, config, "lint")
-            spell_ignore = ignore_match(path, config, "spell")
-            schema_ignore = ignore_match(path, config, "schema")
-            tool_ignore = ignore_match(path, config, "tool")
+            config = _config_root("CHECKRUN_AUTOLINT_DIR")
+            lint_ignore = _ignore_match(path, config, "lint")
+            spell_ignore = _ignore_match(path, config, "spell")
+            schema_ignore = _ignore_match(path, config, "schema")
+            tool_ignore = _ignore_match(path, config, "tool")
             all_steps, skipped = (
-                collect_steps(registry, path, filetype, "lint") if path.is_file() else ([], [])
+                _collect_steps(registry, path, filetype, "lint") if path.is_file() else ([], [])
             )
             steps = []
             for step in all_steps:
@@ -795,7 +815,7 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
             schemas = (
                 []
                 if schema_ignore["ignored"] or lint_ignore["ignored"] or not path.is_file()
-                else schema_associations(path)
+                else _schema_associations(path)
             )
             item["lint"] = {
                 "ignored": lint_ignore["ignored"],
@@ -823,13 +843,25 @@ def plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None)
 
 
 def plan(registry: dict[str, Any], files: list[str], phase: str | None = None) -> dict[str, Any]:
+    """Return the versioned public plan JSON payload for `files`.
+
+    Downstream callers should normally obtain this through
+    `checkrun plan --json`; keeping the same builder available here lets tests
+    verify the CLI and interpreter without maintaining a second expected shape.
+    """
+
+    if phase is not None and phase not in _PLAN_PHASES:
+        expected = ", ".join(sorted(_PLAN_PHASES))
+        raise RegistryError(f"unknown plan phase {phase!r}; expected one of {expected}")
     return {
         "version": 1,
-        "files": [plan_file(registry, file, phase) for file in files],
+        "files": [_plan_file(registry, file, phase) for file in files],
     }
 
 
 def capabilities(registry: dict[str, Any]) -> dict[str, Any]:
+    """Return the versioned public capabilities JSON projection."""
+
     # Capabilities are an integration projection, not another policy source.
     # Neovim maps these generic filetypes to its local formatter/linter names.
     #
@@ -861,9 +893,11 @@ def capabilities(registry: dict[str, Any]) -> dict[str, Any]:
 
 
 def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, Any]]:
+    """Return the public JSON payload used by `checkrun explain --json`."""
+
     items = []
     for file in files:
-        item = plan_file(registry, file)
+        item = _plan_file(registry, file)
         fmt = item["format"]
         lint = item["lint"]
         items.append(
@@ -874,6 +908,7 @@ def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, 
                 "format": {
                     "ignored": fmt["ignored"],
                     "ignore": fmt["ignore"],
+                    "skipped": fmt["skipped"],
                     "tools": [
                         {
                             "tool": step["tool"],
@@ -888,6 +923,7 @@ def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, 
                     "ignored": lint["ignored"],
                     "ignore": lint["ignore"],
                     "phases": lint["phases"],
+                    "skipped": lint["skipped"],
                     "tools": [
                         {
                             "tool": step["tool"],
@@ -906,7 +942,7 @@ def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, 
     return items
 
 
-def print_human(items: list[dict[str, Any]]) -> None:
+def _print_human(items: list[dict[str, Any]]) -> None:
     for item in items:
         print(item["path"])
         print(f"  exists: {str(item['exists']).lower()}")
@@ -931,7 +967,7 @@ def print_human(items: list[dict[str, Any]]) -> None:
             print(f"  schemas: {schema_names}")
 
 
-def print_shell_plan(registry: dict[str, Any], phase: str, files: list[str]) -> None:
+def _print_shell_plan(registry: dict[str, Any], phase: str, files: list[str]) -> None:
     planned = plan(registry, files, phase)
     for item in planned["files"]:
         phase_data = item[phase]
@@ -972,11 +1008,17 @@ def main(argv: list[str] | None = None) -> int:
 
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--json", action="store_true", help="emit JSON")
-    plan_parser.add_argument("--phase", choices=sorted(PLAN_PHASES))
+    plan_parser.add_argument("--phase", choices=sorted(_PLAN_PHASES))
     plan_parser.add_argument("files", nargs="*")
 
-    shell_parser = subparsers.add_parser("shell-plan")
-    shell_parser.add_argument("--phase", choices=sorted(PLAN_PHASES), required=True)
+    # Private execution transport for Bash callers. `bin/checkrun` does not
+    # expose this command; integrations should use the versioned JSON from
+    # `checkrun plan --json`.
+    shell_parser = subparsers.add_parser(
+        "shell-plan",
+        help="private shell transport for Checkrun entrypoints",
+    )
+    shell_parser.add_argument("--phase", choices=sorted(_PLAN_PHASES), required=True)
     shell_parser.add_argument("files", nargs="*")
 
     args = parser.parse_args(argv)
@@ -999,7 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(items, separators=(",", ":"), sort_keys=True))
         else:
-            print_human(items)
+            _print_human(items)
         return 0
     if args.command == "plan":
         if not args.json:
@@ -1011,7 +1053,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "shell-plan":
-        print_shell_plan(registry, args.phase, args.files)
+        _print_shell_plan(registry, args.phase, args.files)
         return 0
     raise AssertionError(args.command)
 
