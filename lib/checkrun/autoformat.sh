@@ -70,7 +70,7 @@ _run_fmt() {
 # shebang path; `lang` is the `-ln` value ("" for default bash parsing,
 # "zsh" for zsh scripts).
 _format_sh() {
-  local file="$1" dir="$2" lang="${3:-}"
+  local file="$1" dir="$2" lang="${3:-}" config_source="${4:-}" config_path="${5:-}"
   local args=() v_indent="" v_sci=""
 
   [ -n "$lang" ] && args+=("-ln=$lang")
@@ -78,13 +78,12 @@ _format_sh() {
   # shfmt reads EditorConfig on its own. Only translate the fallback
   # TOML into CLI flags when the repo has no .editorconfig, otherwise
   # the explicit flags would override the repo's local style.
-  if ! _has_config "$dir" ".editorconfig" &&
-    [ -f "$CHECKRUN_AUTOFORMAT_DIR/shfmt.toml" ]; then
+  if [ "$config_source" = "fallback" ] && [ -f "$config_path" ]; then
     {
       read -r v_indent
       read -r v_sci
     } < <(
-      _toml_read_keys "$CHECKRUN_AUTOFORMAT_DIR/shfmt.toml" indent switch_case_indent
+      _toml_read_keys "$config_path" indent switch_case_indent
     )
     [ -n "$v_indent" ] && args+=(-i "$v_indent")
     [ "$v_sci" = "true" ] && args+=(-ci)
@@ -94,20 +93,18 @@ _format_sh() {
 }
 
 _format_cmake() {
-  local file="$1" dir="$2" cfg args=()
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
   command -v cmake-format &>/dev/null || return 0
 
-  cfg=$(_find_cmake_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
-  [ -n "$cfg" ] && args=(--config-files "$cfg")
+  [ -n "$config_path" ] && args=(--config-files "$config_path")
   _run_fmt cmake-format -i ${args[@]+"${args[@]}"} "$file"
 }
 
 _format_ruby() {
-  local file="$1" dir="$2" cfg args=()
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
   command -v rubocop &>/dev/null || return 0
 
-  cfg=$(_find_rubocop_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
-  [ -n "$cfg" ] && args=(--config "$cfg")
+  [ -n "$config_path" ] && args=(--config "$config_path")
   # Limit autoformat to RuboCop's Layout department. Full RuboCop
   # autocorrect can rewrite code semantics; layout-only keeps save-time
   # formatting predictable while autolint handles broader diagnostics.
@@ -116,11 +113,10 @@ _format_ruby() {
 }
 
 _format_php() {
-  local file="$1" dir="$2" cfg args=()
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
   command -v php-cs-fixer &>/dev/null || return 0
 
-  cfg=$(_find_php_cs_fixer_config "$dir" "$CHECKRUN_AUTOFORMAT_DIR" 2>/dev/null || true)
-  [ -n "$cfg" ] && args=(--config "$cfg")
+  [ -n "$config_path" ] && args=(--config "$config_path")
   _run_fmt php-cs-fixer fix --quiet --using-cache=no ${args[@]+"${args[@]}"} "$file"
 }
 
@@ -130,267 +126,203 @@ _format_java() {
   _run_fmt google-java-format -i "$file"
 }
 
+_format_ruff() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
+  command -v ruff &>/dev/null || return 0
+
+  # The registry already decided whether project policy or fallback policy
+  # applies. Only force Ruff's config for the fallback case: project-local
+  # pyproject/ruff.toml discovery is Ruff's native behavior and keeps relative
+  # config includes interpreted the way Ruff expects.
+  [ "$config_source" = "fallback" ] && [ -n "$config_path" ] && args=(--config "$config_path")
+  _run_fmt ruff format --quiet ${args[@]+"${args[@]}"} "$file"
+  # Also sort imports (`I` rule) as a format-adjacent fix. The full lint rule
+  # set runs via autolint --fix; scoping here to imports-only keeps
+  # autoformat-on-save deterministic and avoids broad lint rewrites.
+  _run_fmt ruff check --quiet --fix --select=I ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_goimports() {
+  local file="$1"
+  command -v goimports &>/dev/null || return 0
+  _run_fmt goimports -w "$file"
+}
+
+_format_gofumpt() {
+  local file="$1"
+  command -v gofumpt &>/dev/null || return 0
+  _run_fmt gofumpt -w "$file"
+}
+
+_format_sh_zsh() {
+  _format_sh "$1" "$2" "zsh" "${3:-}" "${4:-}"
+}
+
+_format_clang() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
+  command -v clang-format &>/dev/null || return 0
+
+  # clang-format walks for project `.clang-format` files by itself, but it does
+  # not know about the personal fallback file. The registry tells us when the
+  # fallback is the selected policy, and only that case needs an explicit style.
+  if [ "$config_source" = "fallback" ] && [ -n "$config_path" ]; then
+    args=(-style="file:$config_path")
+  fi
+  _run_fmt clang-format -i ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_stylua() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
+  command -v stylua &>/dev/null || return 0
+
+  # stylua treats stylua.toml and .editorconfig as project style sources. Pass
+  # only the fallback explicitly so project policy remains native and local.
+  if [ "$config_source" = "fallback" ] && [ -n "$config_path" ]; then
+    args=(--config-path "$config_path")
+  fi
+  _run_fmt stylua ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_rustfmt() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}"
+  local args=() cargo_edition
+  command -v rustfmt &>/dev/null || return 0
+
+  # Cargo owns parser edition, while rustfmt.toml owns style. Keeping edition
+  # inference in the adapter avoids turning the registry into a project model.
+  cargo_edition=$(_find_cargo_edition "$dir" 2>/dev/null || true)
+  [ -n "$cargo_edition" ] && args+=(--edition "$cargo_edition")
+  if [ "$config_source" = "fallback" ] && [ -n "$config_path" ]; then
+    args+=(--config-path "$config_path")
+  fi
+  _run_fmt rustfmt ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_taplo() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
+  command -v taplo &>/dev/null || return 0
+
+  # taplo's config discovery starts from process cwd, so both project and
+  # fallback selections from the registry are passed explicitly.
+  [ -n "$config_path" ] && args=(--config "$config_path")
+  _run_fmt taplo fmt ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_biome() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
+  command -v biome &>/dev/null || return 0
+
+  # Biome accepts a config root directory, not the config file. The registry's
+  # self-config guard returns `native` for the config file itself so we avoid
+  # handing Biome the same root twice and triggering nested-root errors.
+  if [ "$config_source" != "native" ] && [ -n "$config_path" ]; then
+    args=(--config-path "$(dirname "$config_path")")
+  fi
+  # `biome check --write --linter-enabled=false` runs formatter + assist
+  # (organize imports etc.) but skips lint fixes. Autolint owns lint fixes so
+  # save-time formatting never applies broader behavior-changing rewrites.
+  _run_fmt biome check --write --linter-enabled=false \
+    ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_superhtml() {
+  local file="$1"
+  command -v superhtml &>/dev/null || return 0
+  _run_fmt superhtml fmt "$file"
+}
+
+_format_buildifier() {
+  local file="$1"
+  command -v buildifier &>/dev/null || return 0
+  _run_fmt buildifier "$file"
+}
+
+_format_dockerfmt() {
+  local file="$1"
+  command -v dockerfmt &>/dev/null || return 0
+  _run_fmt dockerfmt -w "$file"
+}
+
+_format_yamlfmt() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
+  command -v yamlfmt &>/dev/null || return 0
+
+  # yamlfmt does not walk upward from the target file. The registry walk gives
+  # us a cwd-independent config path, so pass project and fallback policies.
+  [ -n "$config_path" ] && args=(-conf "$config_path")
+  _run_fmt yamlfmt ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_rumdl() {
+  local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
+  command -v rumdl &>/dev/null || return 0
+
+  # rumdl --fix doubles as a formatter: it auto-fixes markdown rule violations
+  # without becoming a prose reflower. Keep project config native but point at
+  # the fallback when the registry selected personal policy.
+  if [ "$config_source" = "fallback" ] && [ -n "$config_path" ]; then
+    args=(--config "$config_path")
+  fi
+  _run_fmt rumdl check --fix ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_dispatch() {
+  local adapter="$1" file="$2" filetype="$3" config_source="$4" config_path="$5"
+  local dir
+  dir=$(dirname "$file")
+
+  # Adapter ids are the stable boundary between the registry and shell. This
+  # case statement intentionally dispatches by adapter id only; filetype,
+  # extension, basename, path-scope, and ignore decisions have already happened
+  # inside the registry interpreter.
+  case "$adapter" in
+    biome-format) _format_biome "$file" "$dir" "$config_source" "$config_path" ;;
+    buildifier-format) _format_buildifier "$file" "$dir" "$config_source" "$config_path" ;;
+    clang-format) _format_clang "$file" "$dir" "$config_source" "$config_path" ;;
+    cmake-format) _format_cmake "$file" "$dir" "$config_source" "$config_path" ;;
+    dockerfmt) _format_dockerfmt "$file" "$dir" "$config_source" "$config_path" ;;
+    gofumpt) _format_gofumpt "$file" "$dir" "$config_source" "$config_path" ;;
+    goimports) _format_goimports "$file" "$dir" "$config_source" "$config_path" ;;
+    google-java-format) _format_java "$file" "$dir" "$config_source" "$config_path" ;;
+    php-cs-fixer) _format_php "$file" "$dir" "$config_source" "$config_path" ;;
+    rubocop-format) _format_ruby "$file" "$dir" "$config_source" "$config_path" ;;
+    ruff-format) _format_ruff "$file" "$dir" "$config_source" "$config_path" ;;
+    rumdl-format) _format_rumdl "$file" "$dir" "$config_source" "$config_path" ;;
+    rustfmt) _format_rustfmt "$file" "$dir" "$config_source" "$config_path" ;;
+    shfmt) _format_sh "$file" "$dir" "" "$config_source" "$config_path" ;;
+    shfmt-zsh) _format_sh_zsh "$file" "$dir" "$config_source" "$config_path" ;;
+    stylua) _format_stylua "$file" "$dir" "$config_source" "$config_path" ;;
+    superhtml-format) _format_superhtml "$file" "$dir" "$config_source" "$config_path" ;;
+    taplo-format) _format_taplo "$file" "$dir" "$config_source" "$config_path" ;;
+    yamlfmt) _format_yamlfmt "$file" "$dir" "$config_source" "$config_path" ;;
+  esac
+}
+
 _format_one() {
-  local file="$1" _filedir ext
-  local args=() repo_cfg yamlfmt_cfg cargo_edition
-  local has_ruff_config=0
+  local file="$1" plan row path filetype _phase adapter config_source config_path rc
 
   [ -z "$file" ] && return 0
-  [ -f "$file" ] || return 0
-  # Normalizing before ignore/config checks keeps hook calls, editor
-  # calls, and manual relative invocations on the same policy path.
-  file=$(_abs_path "$file") || return 0
-  _ignored_for format "$file" "$CHECKRUN_AUTOFORMAT_DIR" && return 0
 
-  _filedir=$(dirname "$file")
-  ext="${file##*.}"
+  # Planning is the one place where filename, extension, shebang, path scope,
+  # ignore files, and config-policy discovery are allowed to interact. Keeping
+  # that work out of shell dispatch prevents the old metadata-vs-execution
+  # drift from returning in a second table.
+  plan=$("$CHECKRUN_LIB_DIR/registry.py" shell-plan --phase format -- "$file")
+  rc=$?
+  [ "$rc" -ne 0 ] && return "$rc"
 
-  # Basename dispatch for files where the name — not extension — indicates
-  # the language (Dockerfiles, Starlark build files). Runs before extension
-  # dispatch and exits on match so neither path can fire for the same file.
-  case "${file##*/}" in
-    Dockerfile | Dockerfile.* | Containerfile | Containerfile.*)
-      if command -v dockerfmt &>/dev/null; then
-        _run_fmt dockerfmt -w "$file"
-      fi
-      return 0
-      ;;
-    BUCK | BUCK.* | BUILD | BUILD.* | TARGETS | TARGETS.* | WORKSPACE | WORKSPACE.* | MODULE.bazel)
-      if command -v buildifier &>/dev/null; then
-        _run_fmt buildifier "$file"
-      fi
-      return 0
-      ;;
-    CMakeLists.txt)
-      _format_cmake "$file" "$_filedir"
-      return 0
-      ;;
-  esac
+  [ -n "$plan" ] || return 0
+  while IFS= read -r row || [ -n "$row" ]; do
+    IFS=$'\t' read -r path filetype _phase adapter config_source config_path <<EOF
+$row
+EOF
+    # Formatter failures are advisory by design: `_run_fmt` surfaces useful
+    # stderr, and the save hook continues with exit 0. Registry failures above
+    # are different and propagate because they mean Checkrun itself is invalid.
+    _format_dispatch "$adapter" "$path" "$filetype" "$config_source" "$config_path" || true
+  done <<<"$plan"
 
-  # Design contract shared by every arm below: if the formatter isn't
-  # installed, return 0 silently. autoformat fires on every edit-hook
-  # save; it must never block the hook because a tool happens to be
-  # absent on this host. The `command -v <tool> &>/dev/null` guard at
-  # the top of each branch encodes this.
-  #
-  # Per-language dispatch shape is the same three steps:
-  #   1. `command -v <tool>` presence guard (see above).
-  #   2. Per-repo config detection via `_has_config` / `_find_config`
-  #      (and sometimes a `yq` walk for pyproject-style configs).
-  #   3. Fallback to `$CHECKRUN_AUTOFORMAT_DIR/<tool-config>` via a `--config`-
-  #      like CLI flag when no per-repo config was found.
-  # Each tool has a slightly different flag name and config-file set;
-  # inline comments explain the quirks (e.g. taplo walks from cwd, not
-  # the file path).
-  case "$ext" in
-    py)
-      if command -v ruff &>/dev/null; then
-        args=()
-        has_ruff_config=0
-        if _has_config "$_filedir" "ruff.toml" ||
-          _has_config "$_filedir" ".ruff.toml" ||
-          _walk_config_with_key "$_filedir" pyproject.toml toml \
-            '.tool.ruff // .tool.ruff.format'; then
-          has_ruff_config=1
-        fi
-        if [ "$has_ruff_config" -eq 0 ] &&
-          [ -f "$CHECKRUN_AUTOFORMAT_DIR/ruff.toml" ]; then
-          args=(--config "$CHECKRUN_AUTOFORMAT_DIR/ruff.toml")
-        fi
-        _run_fmt ruff format --quiet ${args[@]+"${args[@]}"} "$file"
-        # Also sort imports (`I` rule) as a format-adjacent fix. The
-        # full lint rule set runs via autolint --fix; scoping here to
-        # imports-only keeps autoformat's behavior deterministic and
-        # unsurprising on save.
-        _run_fmt ruff check --quiet --fix --select=I ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    go)
-      if command -v goimports &>/dev/null; then
-        _run_fmt goimports -w "$file"
-      fi
-      if command -v gofumpt &>/dev/null; then
-        _run_fmt gofumpt -w "$file"
-      fi
-      ;;
-    java)
-      _format_java "$file"
-      ;;
-    sh | bash)
-      if command -v shfmt &>/dev/null; then
-        _format_sh "$file" "$_filedir"
-      fi
-      ;;
-    zsh)
-      if command -v shfmt &>/dev/null; then
-        _format_sh "$file" "$_filedir" "zsh"
-      fi
-      ;;
-    c | cpp | cc | cxx | h | hpp | hxx)
-      if command -v clang-format &>/dev/null; then
-        args=()
-        # clang-format doesn't walk for a fallback style file the way it
-        # walks for a per-repo `.clang-format`. Point it at our fallback
-        # explicitly so the style is consistent on files outside a repo.
-        if ! _has_config "$_filedir" ".clang-format" &&
-          ! _has_config "$_filedir" "_clang-format" &&
-          [ -f "$CHECKRUN_AUTOFORMAT_DIR/clang-format" ]; then
-          args=(-style="file:$CHECKRUN_AUTOFORMAT_DIR/clang-format")
-        fi
-        _run_fmt clang-format -i ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    lua)
-      if command -v stylua &>/dev/null; then
-        args=()
-        # stylua treats both stylua.toml and .editorconfig as style
-        # sources. Respect either one before applying the personal
-        # fallback, because CLI --config-path would otherwise win.
-        if ! _has_config "$_filedir" "stylua.toml" &&
-          ! _has_config "$_filedir" ".stylua.toml" &&
-          ! _has_config "$_filedir" ".editorconfig" &&
-          [ -f "$CHECKRUN_AUTOFORMAT_DIR/stylua.toml" ]; then
-          args=(--config-path "$CHECKRUN_AUTOFORMAT_DIR/stylua.toml")
-        fi
-        _run_fmt stylua ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    rs)
-      if command -v rustfmt &>/dev/null; then
-        args=()
-        # Cargo owns the language edition for real crates. Keep using the
-        # fallback rustfmt style config when no repo rustfmt.toml exists, but
-        # pass Cargo's edition explicitly so direct rustfmt agrees with
-        # `cargo fmt` on Rust 2024 syntax and formatting.
-        cargo_edition=$(_find_cargo_edition "$_filedir" 2>/dev/null || true)
-        [ -n "$cargo_edition" ] && args+=(--edition "$cargo_edition")
-        # rustfmt's config walk only covers Rust's standard filenames.
-        # Passing the fallback explicitly keeps standalone files aligned
-        # with integration defaults while leaving repo configs untouched.
-        if ! _has_config "$_filedir" "rustfmt.toml" &&
-          ! _has_config "$_filedir" ".rustfmt.toml" &&
-          [ -f "$CHECKRUN_AUTOFORMAT_DIR/rustfmt.toml" ]; then
-          args+=(--config-path "$CHECKRUN_AUTOFORMAT_DIR/rustfmt.toml")
-        fi
-        _run_fmt rustfmt ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    rb)
-      _format_ruby "$file" "$_filedir"
-      ;;
-    php)
-      _format_php "$file" "$_filedir"
-      ;;
-    toml)
-      if command -v taplo &>/dev/null; then
-        args=()
-        # taplo walks from the process cwd (not the file path) when
-        # auto-discovering its config, so detect the per-repo config
-        # ourselves and pass it explicitly via --config. Falls back to
-        # our global default when no per-repo config is present.
-        repo_cfg=$(_find_config "$_filedir" "taplo.toml" 2>/dev/null ||
-          _find_config "$_filedir" ".taplo.toml" 2>/dev/null || true)
-        if [ -n "$repo_cfg" ]; then
-          args=(--config "$repo_cfg")
-        elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/taplo.toml" ]; then
-          args=(--config "$CHECKRUN_AUTOFORMAT_DIR/taplo.toml")
-        fi
-        _run_fmt taplo fmt ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    css | js | jsx | json | jsonc | ts | tsx)
-      if command -v biome &>/dev/null; then
-        args=()
-        # biome walks for biome.json(c) itself, but its walk starts from
-        # the process cwd (not the file path). Detect the per-repo config
-        # here and pass --config-path (a directory) explicitly. Falls back
-        # to our global default when no per-repo config is present.
-        #
-        # Self-format guard: if the file being formatted IS the config we
-        # would otherwise pass, skip the --config-path arg. Otherwise
-        # biome sees the same root config twice (once via --config-path,
-        # once via its own discovery walk on the input file) and errors
-        # with "nested root configuration".
-        repo_cfg=$(_find_config "$_filedir" "biome.json" 2>/dev/null ||
-          _find_config "$_filedir" "biome.jsonc" 2>/dev/null || true)
-        if [ -n "$repo_cfg" ] && [ "$repo_cfg" != "$file" ]; then
-          args=(--config-path "$(dirname "$repo_cfg")")
-        elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/biome.json" ] &&
-          [ "$file" != "$CHECKRUN_AUTOFORMAT_DIR/biome.json" ]; then
-          args=(--config-path "$CHECKRUN_AUTOFORMAT_DIR")
-        fi
-        # `biome check --write --linter-enabled=false` runs formatter +
-        # assist (organize imports etc.) but skips the linter. Autolint
-        # runs `biome lint` separately — keeping these disjoint means
-        # autoformat-on-save never applies a behavior-changing lint fix
-        # behind the user's back.
-        _run_fmt biome check --write --linter-enabled=false \
-          ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    htm | html)
-      if command -v superhtml &>/dev/null; then
-        _run_fmt superhtml fmt "$file"
-      fi
-      ;;
-    bzl | star)
-      if command -v buildifier &>/dev/null; then
-        _run_fmt buildifier "$file"
-      fi
-      ;;
-    cmake)
-      _format_cmake "$file" "$_filedir"
-      ;;
-    yaml | yml)
-      if command -v yamlfmt &>/dev/null; then
-        args=()
-        # yamlfmt's own auto-discovery looks for `.yamlfmt` in the cwd
-        # (not walking). Detect a per-repo `.yamlfmt` via the walk so
-        # `autoformat` respects it regardless of cwd at invocation time.
-        yamlfmt_cfg=$(_find_config "$_filedir" ".yamlfmt" 2>/dev/null || true)
-        if [ -n "$yamlfmt_cfg" ]; then
-          args=(-conf "$yamlfmt_cfg")
-        elif [ -f "$CHECKRUN_AUTOFORMAT_DIR/yamlfmt.yaml" ]; then
-          args=(-conf "$CHECKRUN_AUTOFORMAT_DIR/yamlfmt.yaml")
-        fi
-        _run_fmt yamlfmt ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    md)
-      # rumdl --fix doubles as a formatter: it auto-fixes most rule
-      # violations (list markers, spacing, heading styles). It isn't a
-      # prose reflower like prettier; for prose reflow, rely on the
-      # editor's gqq or equivalent.
-      if command -v rumdl &>/dev/null; then
-        args=()
-        # rumdl also understands markdownlint config names, so those
-        # count as repo-owned policy and suppress the fallback.
-        if ! _has_config "$_filedir" ".rumdl.toml" &&
-          ! _has_config "$_filedir" "rumdl.toml" &&
-          ! _has_config "$_filedir" ".markdownlint.json" &&
-          ! _has_config "$_filedir" ".markdownlint.jsonc" &&
-          [ -f "$CHECKRUN_AUTOFORMAT_DIR/rumdl.toml" ]; then
-          args=(--config "$CHECKRUN_AUTOFORMAT_DIR/rumdl.toml")
-        fi
-        _run_fmt rumdl check --fix ${args[@]+"${args[@]}"} "$file"
-      fi
-      ;;
-    *)
-      # Extensionless files: dispatch via _classify_shell (dotfile name or shebang).
-      case "$(_classify_shell "$file")" in
-        zsh)
-          if command -v shfmt &>/dev/null; then
-            _format_sh "$file" "$_filedir" "zsh"
-          fi
-          ;;
-        bash)
-          if command -v shfmt &>/dev/null; then
-            _format_sh "$file" "$_filedir"
-          fi
-          ;;
-      esac
-      ;;
-  esac
+  return 0
 }
 
 _autoformat_main() {
