@@ -136,7 +136,8 @@ cross-object invariants that are awkward in JSON Schema:
 - every selector declares at least one normalized filetype
 - every filetype named in selectors is declared
 - selector-local filename, extension, and pattern matchers are rejected
-- every adapter implementation exists, or is explicitly marked `internal`
+- every selected shell adapter is implemented and dispatchable
+- non-shell `internal` adapters are never selected or dispatched
 - no top-level or selector-level downstream keys such as `sley` or `nvim` exist
 
 The seeded registry must resolve pre-existing metadata drift before it becomes
@@ -229,9 +230,9 @@ but non-identical steps should remain visible rather than being collapsed by
 clever inference.
 
 Selectors must not carry their own `extensions`, `filenames`, or `patterns`
-matchers. Step-level `pathPatterns` are the only selector-adjacent path matcher,
-and they narrow an already selected filetype-specific step instead of creating a
-second filetype inference table.
+matchers. Step-level `pathPatterns` are selector-only: they narrow an already
+selected filetype-specific step instead of creating a second filetype inference
+table.
 
 Future alternative-tool preference is intentionally out of scope for the first
 registry cutover. Do not add preference or `first-available` machinery until
@@ -271,6 +272,10 @@ ordering explicitly.
   }
 }
 ```
+
+Cross-cutting steps must not declare `pathPatterns`. They are intentionally
+global lint phases; path-scoped behavior belongs to selector-owned tool steps,
+where the filetype has already been inferred.
 
 ### Path-Scoped Tools
 
@@ -453,6 +458,15 @@ No downstream-specific key should appear in this output.
 Capabilities output should be sorted and stable so consumers can cache or diff
 it. Unknown or unsupported future registry fields should not leak through this
 projection until they are intentionally added to the public API.
+
+A selector may declare an empty phase array, such as `"lint": []`, when the
+filetype should appear in capabilities for cross-cutting-only behavior. This is
+deliberately registry-owned: integration-visible support must not come from
+hard-coded defaults in the interpreter.
+
+Formatting support requires at least one formatter step. Lint support is based
+on the selector's `lint` key being present, so a format-only selector does not
+implicitly appear in `filetypes.lint`.
 
 ### `checkrun explain [--json] FILE...`
 

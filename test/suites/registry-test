@@ -413,6 +413,123 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 data = json.loads(path.read_text())
+data["crossCutting"]["lint"][0]["pathPatterns"] = ["*/README.md"]
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: cross-cutting pathPatterns exit non-zero" 2 "$rc"
+_assert_contains "registry: cross-cutting pathPatterns report field" "pathPatterns" "$output"
+_assert_contains "registry: cross-cutting pathPatterns report schema error" "unknown key" "$output"
+
+python3 - "$SCHEMA" "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    import jsonschema
+except ImportError:
+    raise SystemExit(0)
+
+schema = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+data = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+try:
+    jsonschema.validate(data, schema)
+except jsonschema.ValidationError as error:
+    assert "Additional properties are not allowed" in error.message, error.message
+else:
+    raise AssertionError("schema accepted cross-cutting pathPatterns")
+PY
+_assert_exit "registry schema: cross-cutting pathPatterns are rejected" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+del data["crossCutting"]["lint"][0]["phase"]
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: cross-cutting phase is required" 2 "$rc"
+_assert_contains "registry: missing cross-cutting phase reports error" "missing required key" "$output"
+
+python3 - "$SCHEMA" "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    import jsonschema
+except ImportError:
+    raise SystemExit(0)
+
+schema = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+data = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+try:
+    jsonschema.validate(data, schema)
+except jsonschema.ValidationError as error:
+    assert "'phase' is a required property" in error.message, error.message
+else:
+    raise AssertionError("schema accepted cross-cutting step without phase")
+PY
+_assert_exit "registry schema: cross-cutting phase is required" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["crossCutting"]["lint"][0]["phase"] = "tool"
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: cross-cutting phase enum exits non-zero" 2 "$rc"
+_assert_contains "registry: cross-cutting phase enum reports field" "phase" "$output"
+_assert_contains "registry: cross-cutting phase enum reports allowed values" "spell" "$output"
+_assert_contains "registry: cross-cutting phase enum reports schema" "schema" "$output"
+
+python3 - "$SCHEMA" "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    import jsonschema
+except ImportError:
+    raise SystemExit(0)
+
+schema = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+data = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+try:
+    jsonschema.validate(data, schema)
+except jsonschema.ValidationError as error:
+    assert "'tool' is not one of" in error.message, error.message
+else:
+    raise AssertionError("schema accepted invalid cross-cutting phase")
+PY
+_assert_exit "registry schema: cross-cutting phase enum is narrow" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
 data["adapters"]["internal-lint"] = {"kind": "internal"}
 data["selectors"][0]["lint"][0]["adapter"] = "internal-lint"
 path.write_text(json.dumps(data))
@@ -460,6 +577,23 @@ output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2
 rc=$?
 _assert_exit "registry: unused adapter exits non-zero" 2 "$rc"
 _assert_contains "registry: unused adapter reports error" "unused shell-function adapters" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["adapters"]["ruff-format"]["internal"] = True
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: stale adapter internal flag exits non-zero" 2 "$rc"
+_assert_contains "registry: stale adapter internal flag reports error" "unknown key" "$output"
 
 cp "$REGISTRY" "$_td/registry.json"
 python3 - "$_td/registry.json" <<'PY'

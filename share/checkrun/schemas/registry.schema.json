@@ -40,7 +40,7 @@
       "properties": {
         "lint": {
           "type": "array",
-          "items": { "$ref": "#/$defs/step" }
+          "items": { "$ref": "#/$defs/crossCuttingStep" }
         }
       }
     },
@@ -60,8 +60,7 @@
       "required": ["kind"],
       "properties": {
         "kind": { "enum": ["shell-function", "internal"] },
-        "function": { "type": "string" },
-        "internal": { "type": "boolean" }
+        "function": { "type": "string" }
       }
     },
     "configPolicy": {
@@ -151,6 +150,17 @@
           "items": { "type": "string" }
         },
         "filetype": { "type": "string" }
+      }
+    },
+    "crossCuttingStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "tool", "adapter"],
+      "properties": {
+        "phase": { "enum": ["spell", "schema"] },
+        "tool": { "type": "string" },
+        "adapter": { "type": "string" },
+        "config": { "type": "string" }
       }
     },
     "step": {

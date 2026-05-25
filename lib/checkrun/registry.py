@@ -319,6 +319,11 @@ def validate_invariants(registry: dict[str, Any]) -> None:
             step_phase = str(step.get("phase", phase))
             if step_phase not in PHASES:
                 raise RegistryError(f"unknown step phase: {step_phase}")
+            if "pathPatterns" in step:
+                raise RegistryError(
+                    f"crossCutting.{phase}: pathPatterns are selector-only; "
+                    "cross-cutting steps apply to every lintable file"
+                )
             selected_adapters.add(step["adapter"])
             validate_step(
                 step,
@@ -827,13 +832,18 @@ def plan(registry: dict[str, Any], files: list[str], phase: str | None = None) -
 def capabilities(registry: dict[str, Any]) -> dict[str, Any]:
     # Capabilities are an integration projection, not another policy source.
     # Neovim maps these generic filetypes to its local formatter/linter names.
+    #
+    # Lint key presence is intentional here. A selector may use `lint: []` to
+    # declare "cross-cutting-only" lint support for a filetype, such as plain
+    # text spell checking, without inventing a synthetic no-op adapter. Formatting
+    # still requires real steps because there is no cross-cutting formatter phase.
     format_filetypes: set[str] = set()
-    lint_filetypes: set[str] = {"text"}
+    lint_filetypes: set[str] = set()
     for selector in registry["selectors"]:
         selector_filetypes = set(selector.get("filetypes", []))
         if selector.get("format"):
             format_filetypes.update(selector_filetypes)
-        if selector.get("format") or selector.get("lint"):
+        if "lint" in selector:
             lint_filetypes.update(selector_filetypes)
     custom = registry["filetypes"]
     return {

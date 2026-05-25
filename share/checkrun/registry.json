@@ -424,7 +424,8 @@
     {
       "id": "c-family",
       "filetypes": ["c", "cpp"],
-      "format": [{ "tool": "clang-format", "adapter": "clang-format", "config": "clang-format" }]
+      "format": [{ "tool": "clang-format", "adapter": "clang-format", "config": "clang-format" }],
+      "lint": []
     },
     {
       "id": "html",
@@ -506,7 +507,8 @@
     },
     {
       "id": "text",
-      "filetypes": ["text"]
+      "filetypes": ["text"],
+      "lint": []
     }
   ]
 }

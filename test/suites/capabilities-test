@@ -16,6 +16,9 @@ CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
 _require_compatible_libc "capabilities-test"
 
 CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
+REGISTRY="$CHECKRUN_REPO_ROOT/share/checkrun/registry.json"
+REGISTRY_PY="$CHECKRUN_REPO_ROOT/lib/checkrun/registry.py"
+_td=$(_tmpdir)
 
 echo "=== checkrun: capability metadata ==="
 
@@ -65,5 +68,105 @@ assert selectors["c-family"].get("lint", []) == []
 assert [item["tool"] for item in selectors["yaml"]["lint"]] == ["actionlint", "zizmor"]
 '
 _assert_exit "registry: emits raw registry data" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["selectors"] = [
+    selector for selector in data["selectors"] if selector["id"] != "text"
+]
+data["filetypes"]["extension"].pop("txt", None)
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" capabilities --json 2>&1)
+rc=$?
+_assert_exit "capabilities: custom registry exits 0" 0 "$rc"
+
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+assert "text" not in data["filetypes"]["lint"]
+'
+_assert_exit "capabilities: text lint support is registry-derived" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["filetypes"]["extension"]["fmt"] = "formatonly"
+data["selectors"].append(
+    {
+        "id": "format-only",
+        "filetypes": ["formatonly"],
+        "format": [
+            {
+                "tool": "ruff",
+                "adapter": "ruff-format",
+                "config": "ruff-format",
+            }
+        ],
+    }
+)
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" capabilities --json 2>&1)
+rc=$?
+_assert_exit "capabilities: format-only custom registry exits 0" 0 "$rc"
+
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+assert "formatonly" in data["filetypes"]["format"]
+assert "formatonly" not in data["filetypes"]["lint"]
+'
+_assert_exit "capabilities: format does not imply lint support" 0 "$?"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["filetypes"]["extension"]["spell"] = "spellonly"
+data["selectors"].append(
+    {
+        "id": "spell-only",
+        "filetypes": ["spellonly"],
+        "lint": [],
+    }
+)
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" capabilities --json 2>&1)
+rc=$?
+_assert_exit "capabilities: lint-empty custom registry exits 0" 0 "$rc"
+
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+assert "spellonly" not in data["filetypes"]["format"]
+assert "spellonly" in data["filetypes"]["lint"]
+'
+_assert_exit "capabilities: empty lint key advertises cross-cutting lint" 0 "$?"
 
 _test_summary

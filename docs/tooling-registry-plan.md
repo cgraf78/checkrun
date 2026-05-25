@@ -447,8 +447,8 @@ Add tests that fail if:
 - `checkrun explain` and `checkrun plan` disagree about selected tools
 - a registry selector references an adapter that is not implemented
 - a registry advertises a tool that execution cannot dispatch
-- an adapter is implemented but neither referenced nor explicitly marked
-  internal
+- a shell-function adapter is implemented but never referenced
+- an internal adapter is selected by a registry step or dispatched by shell
 - a selector references an undefined config policy
 - two selectors share the same id
 - two adapters share the same id

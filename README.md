@@ -138,8 +138,8 @@ To add a formatter or linter, update the registry first:
 1. Add or reuse filetype inference under `filetypes`.
 2. Add a selector for the normalized filetype, then add a step with the tool
    name, adapter id, and config policy when the tool has Checkrun-owned config
-   discovery. Use step-level `pathPatterns` only to narrow a tool within an
-   already inferred filetype.
+   discovery. Use step-level `pathPatterns` only on selector steps to narrow a
+   tool within an already inferred filetype.
 3. Add the adapter id under `adapters` and implement the named shell function.
 4. Dispatch that adapter id from `autoformat.sh` or `autolint.sh`.
 5. Add registry-plan coverage plus adapter behavior tests.
