@@ -33,7 +33,7 @@ CHECKRUN_LIB_DIR="$_bin_dir/../lib/checkrun"
 _run_registry() {
   local python
   python=$(_checkrun_python) || {
-    echo "checkrun: python3 is required for registry planning" >&2
+    echo "checkrun: python3 with tomllib is required for registry planning" >&2
     exit 127
   }
   exec "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"

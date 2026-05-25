@@ -47,13 +47,24 @@ _abs_path() {
   fi
 }
 
+_checkrun_python_usable() {
+  local python="$1"
+
+  # The registry uses stdlib `tomllib`, so "has a python3 executable" is not a
+  # strong enough contract. macOS still ships older `/usr/bin/python3` versions
+  # on some runner images; using them produces a traceback in constrained-PATH
+  # hook tests before Checkrun can print its own diagnostics.
+  [ -x "$python" ] || return 1
+  "$python" -c 'import tomllib' >/dev/null 2>&1
+}
+
 _checkrun_python() {
-  local candidate
+  local candidate resolved
 
   # Hooks and tests often constrain PATH to prove missing formatter/linter
   # behavior. Registry planning still needs Python in those environments, so do
   # not rely solely on `/usr/bin/env python3` from the registry script shebang.
-  if [ -n "${CHECKRUN_PYTHON:-}" ] && [ -x "$CHECKRUN_PYTHON" ]; then
+  if [ -n "${CHECKRUN_PYTHON:-}" ] && _checkrun_python_usable "$CHECKRUN_PYTHON"; then
     printf '%s\n' "$CHECKRUN_PYTHON"
     return 0
   fi
@@ -61,13 +72,15 @@ _checkrun_python() {
   for candidate in python3 /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
     case "$candidate" in
       */*)
-        [ -x "$candidate" ] || continue
+        _checkrun_python_usable "$candidate" || continue
         printf '%s\n' "$candidate"
         return 0
         ;;
       *)
         if command -v "$candidate" >/dev/null 2>&1; then
-          command -v "$candidate"
+          resolved=$(command -v "$candidate")
+          _checkrun_python_usable "$resolved" || continue
+          printf '%s\n' "$resolved"
           return 0
         fi
         ;;
@@ -80,7 +93,7 @@ _checkrun_python() {
 _checkrun_registry() {
   local python
   python=$(_checkrun_python) || {
-    echo "checkrun: python3 is required for registry planning" >&2
+    echo "checkrun: python3 with tomllib is required for registry planning" >&2
     return 127
   }
   "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"

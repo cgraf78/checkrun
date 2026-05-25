@@ -61,6 +61,21 @@ assert "python" in data["filetypes"]["format"]
 '
 _assert_exit "capabilities: minimal PATH emits JSON" 0 "$?"
 
+_bad_python_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_bad_python_bin/bash"
+cat >"$_bad_python_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+echo "bad python selected" >&2
+exit 1
+EOF
+chmod +x "$_bad_python_bin/python3"
+set +e
+output=$(PATH="$_bad_python_bin" "$CHECKRUN" capabilities --json 2>&1)
+rc=$?
+set -e
+_assert_exit "capabilities: unusable PATH python is skipped" 0 "$rc"
+_assert_not_contains "capabilities: unusable PATH python does not run" "bad python selected" "$output"
+
 output=$("$CHECKRUN" registry --json 2>&1)
 rc=$?
 _assert_exit "registry: --json exits 0" 0 "$rc"
