@@ -77,7 +77,7 @@ case "$cmd" in
     ;;
   explain)
     shift
-    exec "$_bin_dir/../lib/checkrun/explain.py" "$@"
+    exec "$_bin_dir/../lib/checkrun/registry.py" explain "$@"
     ;;
   format | fmt)
     shift

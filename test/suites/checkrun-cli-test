@@ -175,3 +175,82 @@ assert item["lint"]["schemas"][0]["name"] == "Example config"
 assert item["lint"]["schemas"][0]["enforce"] is True
 '
 _assert_exit "explain: reports matching schema association" 0 "$?"
+
+echo "=== checkrun: plan ==="
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/keep.py" 2>&1)
+rc=$?
+_assert_exit "plan: lint phase exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+assert data["version"] == 1
+item = data["files"][0]
+assert "format" not in item
+assert item["filetype"] == "python"
+steps = item["lint"]["steps"]
+assert [step["adapter"] for step in steps[:2]] == ["typos", "schema-lint"]
+assert steps[-1]["adapter"] == "ruff-lint"
+'
+_assert_exit "plan: lint phase includes registry-selected steps" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+rc=$?
+_assert_exit "plan: format phase exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+item = data["files"][0]
+assert "lint" not in item
+assert item["format"]["steps"][0]["adapter"] == "ruff-format"
+'
+_assert_exit "plan: format phase includes formatter step" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json "$_td/keep.py" 2>&1)
+rc=$?
+_assert_exit "plan: omitted phase exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+item = json.load(sys.stdin)["files"][0]
+assert "format" in item
+assert "lint" in item
+'
+_assert_exit "plan: omitted phase includes all phases" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/plain.yaml" 2>&1)
+rc=$?
+_assert_exit "plan: generic yaml exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+steps = json.load(sys.stdin)["files"][0]["lint"]["steps"]
+assert [step["adapter"] for step in steps] == ["typos", "schema-lint"]
+'
+_assert_exit "plan: generic yaml omits workflow-only linters" 0 "$?"
+
+output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/.github/workflows/build.yml" 2>&1)
+rc=$?
+_assert_exit "plan: workflow yaml exits 0" 0 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+steps = json.load(sys.stdin)["files"][0]["lint"]["steps"]
+assert [step["adapter"] for step in steps] == ["typos", "schema-lint", "actionlint", "zizmor"]
+'
+_assert_exit "plan: workflow yaml includes scoped linters" 0 "$?"
+
+missing_registry="$_td/missing-registry.json"
+output=$(CHECKRUN_REGISTRY="$missing_registry" "$CHECKRUN" plan --json --phase lint "$_td/keep.py" 2>&1)
+rc=$?
+_assert_exit "plan: missing registry exits non-zero" 2 "$rc"
+_assert_contains "plan: missing registry reports error" "registry file not found" "$output"
+
+_test_summary
