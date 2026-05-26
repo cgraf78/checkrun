@@ -66,6 +66,25 @@ _lint_rust() {
   cargo clippy --version &>/dev/null || return 0
   manifest_dir="${manifest%/*}"
 
+  # autolint spawns one subshell per changed file in parallel. cargo clippy is
+  # workspace-wide, so N changed .rs files in one workspace produce N redundant
+  # invocations that queue behind Cargo's package-cache lock and print
+  # "Blocking waiting for file lock" N-1 times. Deduplicate with an atomic
+  # mkdir sentinel keyed on the manifest: the first subshell to win creates it
+  # and runs clippy; the rest return 0 immediately. $$ is the parent autolint
+  # PID — shared across all co-batch subshells, distinct between invocations.
+  local sentinel sentinel_hash
+  sentinel_hash=$(printf '%s' "$manifest" | cksum | cut -d' ' -f1)
+  sentinel="${TMPDIR:-/tmp}/autolint-rust-$$-${sentinel_hash}"
+  if ! mkdir "$sentinel" 2>/dev/null; then
+    return 0
+  fi
+  # No cleanup trap: the sentinel must outlive this subshell so that other
+  # co-batch subshells (which may start after this one finishes) still see it
+  # and skip. $$ is the parent autolint PID — unique per invocation — so the
+  # sentinel is naturally scoped to one autolint run and won't block future
+  # runs. /tmp is cleared by the OS; the directories are empty and tiny.
+
   if [ "$json" -eq 1 ]; then
     local out tool_rc
     out=$(cargo clippy --message-format=json --manifest-path "$manifest" \

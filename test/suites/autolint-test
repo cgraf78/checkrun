@@ -520,6 +520,82 @@ _assert_exit "rust: clippy --fix exit propagates" 7 "$rc"
 _assert_contains_path_arg_suffix "rust: --fix uses clippy fix" \
   "clippy --fix --allow-dirty --allow-staged --manifest-path " "$_rust_dir/Cargo.toml" " --all-targets -- -D warnings" "$output"
 
+# Rust deduplication: autolint spawns one subshell per file in parallel.
+# cargo clippy is workspace-wide, so N files from the same workspace should
+# produce exactly one clippy invocation. A mock cargo appends its args to a
+# log file; the test counts lines to verify only one invocation ran.
+_rust_dedup_dir=$(_tmpdir)
+cat >"$_rust_dedup_dir/Cargo.toml" <<'EOF'
+[package]
+name = "deduptest"
+version = "0.1.0"
+edition = "2021"
+EOF
+mkdir -p "$_rust_dedup_dir/src"
+echo 'pub fn a() {}' >"$_rust_dedup_dir/src/a.rs"
+echo 'pub fn b() {}' >"$_rust_dedup_dir/src/b.rs"
+echo 'pub fn c() {}' >"$_rust_dedup_dir/src/c.rs"
+
+_rust_dedup_mock=$(_mock_bin)
+_rust_dedup_log=$(_tmpdir)/clippy-calls.log
+: >"$_rust_dedup_log"
+cat >"$_rust_dedup_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "clippy" ] && [ "${2:-}" = "--version" ]; then exit 0; fi
+printf '%s\n' "$*" >>"$CLIPPY_CALL_LOG"
+exit 0
+EOF
+chmod +x "$_rust_dedup_mock/cargo"
+
+set +e
+CLIPPY_CALL_LOG="$_rust_dedup_log" CHECKRUN_AUTOLINT_JOBS=4 \
+  PATH="$_rust_dedup_mock:$PATH" \
+  "$AUTOLINT" \
+  "$_rust_dedup_dir/src/a.rs" \
+  "$_rust_dedup_dir/src/b.rs" \
+  "$_rust_dedup_dir/src/c.rs" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "rust dedup: exits 0 for three files in same workspace" 0 "$rc"
+_dedup_call_count=$(wc -l <"$_rust_dedup_log" | tr -d ' ')
+_assert_eq "rust dedup: same workspace runs clippy exactly once for three files" \
+  "1" "$_dedup_call_count"
+
+# Rust deduplication: files from different workspaces must each run clippy.
+_rust_ws_a=$(_tmpdir)
+_rust_ws_b=$(_tmpdir)
+cat >"$_rust_ws_a/Cargo.toml" <<'EOF'
+[package]
+name = "workspace-a"
+version = "0.1.0"
+edition = "2021"
+EOF
+cat >"$_rust_ws_b/Cargo.toml" <<'EOF'
+[package]
+name = "workspace-b"
+version = "0.1.0"
+edition = "2021"
+EOF
+mkdir -p "$_rust_ws_a/src" "$_rust_ws_b/src"
+echo 'pub fn a() {}' >"$_rust_ws_a/src/lib.rs"
+echo 'pub fn b() {}' >"$_rust_ws_b/src/lib.rs"
+
+_rust_two_ws_log=$(_tmpdir)/two-ws-calls.log
+: >"$_rust_two_ws_log"
+
+set +e
+CLIPPY_CALL_LOG="$_rust_two_ws_log" CHECKRUN_AUTOLINT_JOBS=4 \
+  PATH="$_rust_dedup_mock:$PATH" \
+  "$AUTOLINT" \
+  "$_rust_ws_a/src/lib.rs" \
+  "$_rust_ws_b/src/lib.rs" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "rust dedup: exits 0 for files in two different workspaces" 0 "$rc"
+_two_ws_call_count=$(wc -l <"$_rust_two_ws_log" | tr -d ' ')
+_assert_eq "rust dedup: different workspaces each run clippy independently" \
+  "2" "$_two_ws_call_count"
+
 # HTML: superhtml check detects issues
 if command -v superhtml &>/dev/null; then
   cat >"$_td/bad.html" <<'EOF'
