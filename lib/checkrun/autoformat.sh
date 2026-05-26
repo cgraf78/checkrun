@@ -418,6 +418,13 @@ _autoformat_main() {
     CHECKRUN_AUTOFORMAT_DIR=$(_abs_dir "$CHECKRUN_AUTOFORMAT_DIR")
   fi
 
+  # Export so the Python planner subprocess sees the bash-resolved absolute
+  # path. Without `export`, the variable is shell-local and Python's
+  # os.environ.get() returns None, falling back to its own default — which
+  # works by coincidence but means the bash resolution above is effectively
+  # dead code in that case.
+  export CHECKRUN_AUTOFORMAT_DIR
+
   if ! command -v yq >/dev/null 2>&1; then
     echo "autoformat: yq is required" >&2
     return 1
