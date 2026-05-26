@@ -425,12 +425,15 @@ _autoformat_main() {
   # dead code in that case.
   export CHECKRUN_AUTOFORMAT_DIR
 
+  # Zero file args is a successful no-op — exit before checking yq so a host
+  # missing yq doesn't error on commands that wouldn't have run anything
+  # anyway (e.g. `autoformat $(get-changed-files)` with an empty result).
+  [ "$#" -eq 0 ] && return 0
+
   if ! command -v yq >/dev/null 2>&1; then
     echo "autoformat: yq is required" >&2
     return 1
   fi
-
-  [ "$#" -eq 0 ] && return 0
 
   # Pre-plan all files in one Python invocation, then dispatch each file from
   # its pre-built plan. Sequential dispatch is intentional: several formatters
