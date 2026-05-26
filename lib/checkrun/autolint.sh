@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # autolint implementation — lint files by extension.
-# Requires yq, which should be installed by the host bootstrap path.
+# Requires yq when at least one lint step is planned; jq additionally when
+# --json is selected. The check is lazy (inside _lint_one, after planning)
+# so ignored files skip cleanly on lean hosts.
 # No-ops gracefully if a linter is not installed.
 # Respects per-repo config files.
 #
@@ -72,50 +74,43 @@ _autolint_usage() {
     "  Python:    .py" \
     "  Ruby:      .rb" \
     "  Rust:      .rs" \
-    "  Shell:     .sh, .bash, .zsh, shell shebangs, .bashrc, .zshrc, .envrc" \
+    "  Shell:     .sh, .bash, .zsh, extensionless files with a shell shebang, .bashrc, .zshrc, .envrc" \
     "  Systemd:   .automount, .device, .mount, .path, .scope, .service, .slice, .socket, .swap, .target, .timer" \
     "  Web/data:  .css, .js, .jsx, .ts, .tsx, .json, .jsonc, .html, .htm" \
     "" \
     "Options:" \
     "  --fix       Apply safe linter fixes where supported." \
     "  --json      Emit one unified JSON diagnostic per output line." \
-    "  -h, --help  Show this help and exit."
+    "  -h, --help  Show this help and exit." \
+    "" \
+    "Environment:" \
+    "  CHECKRUN_AUTOLINT_JOBS  Override parallel worker count (default: min(cores, 8))." \
+    "  CHECKRUN_AUTOLINT_DIR   Fallback config directory (defaults to CHECKRUN_AUTOFORMAT_DIR)."
 }
 
-_lint_one() {
-  local file="$1" path filetype step_phase adapter config_source config_path
-  local rc=0 tool_rc dir plan_file
+_lint_one_with_plan() {
+  # Dispatch a pre-built plan file. Split out of _lint_one so the parallel
+  # parent process can plan many files in a single Python call (see
+  # _autolint_pre_plan), then hand each worker its own pre-built plan without
+  # paying for a per-file `python3 registry.py` startup. The file path itself
+  # is carried inside each plan record, so this helper only needs the plan
+  # file location.
+  #
+  # An empty plan file means "no lint steps" (unsupported / ignored): return
+  # cleanly without checking yq/jq, so missing-tool hosts can still
+  # save-on-edit unsupported file types.
+  local plan_file="$1"
+  local path filetype step_phase adapter config_source config_path
+  local rc=0 tool_rc dir
 
-  # The registry planner is the policy boundary for linting: it owns matching,
-  # cross-cutting spell/schema ordering, path-scoped workflow tools, and every
-  # phase-specific ignore file. Shell code below only translates adapter ids
-  # into concrete tool invocations.
-  plan_file=$(_checkrun_tempfile) || {
-    echo "autolint: could not create registry plan temp file" >&2
-    return 1
-  }
-  _checkrun_registry shell-plan --phase lint -- "$file" >"$plan_file"
-  tool_rc=$?
-  if [ "$tool_rc" -ne 0 ]; then
-    _checkrun_remove "$plan_file"
-    return "$tool_rc"
-  fi
-  [ -s "$plan_file" ] || {
-    _checkrun_remove "$plan_file"
-    return 0
-  }
+  [ -s "$plan_file" ] || return 0
 
-  # yq/jq remain execution dependencies, not planning dependencies. Check them
-  # only after the registry says at least one lint step will run, so missing or
-  # ignored files keep the same graceful skip behavior as before.
   if ! command -v yq >/dev/null 2>&1; then
     echo "autolint: yq is required" >&2
-    _checkrun_remove "$plan_file"
     return 1
   fi
   if [ "$json" -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
     echo "autolint: jq is required for --json" >&2
-    _checkrun_remove "$plan_file"
     return 1
   fi
 
@@ -138,8 +133,46 @@ _lint_one() {
     [ "$tool_rc" -ne 0 ] && rc=$tool_rc
   done <"$plan_file"
 
+  return "$rc"
+}
+
+_lint_one() {
+  # Plan one file inline (one Python invocation per call) and dispatch. Used by
+  # the sequential paths (--fix mode and --jobs=1 fallback). The parallel paths
+  # use the batched _autolint_pre_plan helper plus _lint_one_with_plan so the
+  # Python planner runs once total, not once per file.
+  local file="$1"
+  local rc tool_rc plan_file
+
+  plan_file=$(_checkrun_tempfile) || {
+    echo "autolint: could not create registry plan temp file" >&2
+    return 1
+  }
+  _checkrun_registry shell-plan --phase lint -- "$file" >"$plan_file"
+  tool_rc=$?
+  if [ "$tool_rc" -ne 0 ]; then
+    _checkrun_remove "$plan_file"
+    return "$tool_rc"
+  fi
+
+  _lint_one_with_plan "$plan_file"
+  rc=$?
   _checkrun_remove "$plan_file"
   return "$rc"
+}
+
+_autolint_pre_plan() {
+  # Plan many files in a single Python invocation. Writes `<index>.plan` per
+  # input file into a fresh dir whose path is echoed on stdout for the caller
+  # to capture. Returns non-zero (and removes the dir) if the planner itself
+  # fails — empty per-file plans are legitimate skips, not failures.
+  local out_dir
+  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-plans.XXXXXX") || return 1
+  if ! _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint -- "$@"; then
+    rm -rf "$out_dir"
+    return 1
+  fi
+  printf '%s\n' "$out_dir"
 }
 
 _lint_dispatch() {
@@ -228,15 +261,29 @@ _autolint_merge_rc() {
 }
 
 _autolint_run_file_batch() {
-  local rc=0 file_rc batch_file stdout_file stderr_file pid index
+  # Barrier-style: spawn every file in the wave concurrently, then wait for
+  # them all before returning. Output is preserved in file_args order via the
+  # parallel arrays of per-file temp files. Used as a fallback on bash <4.3
+  # where `wait -n` is unavailable; on bash 4.3+ the pool path below keeps
+  # ${jobs} workers in flight at all times instead of waiting at wave
+  # boundaries.
+  #
+  # Arg layout: <plan_dir> <base_index> <file...>. plan_dir holds per-file
+  # plans named `<global_index>.plan` produced by _autolint_pre_plan. The
+  # base_index lets each wave find its slice of the global plan dir, so the
+  # same pre-built dir serves every wave without renumbering.
+  local plan_dir="$1" base_index="$2"
+  shift 2
+  local rc=0 file_rc stdout_file stderr_file pid index global_index
   local -a batch_files=("$@")
   local -a batch_pids=() batch_stdout_files=() batch_stderr_files=()
 
-  for batch_file in "${batch_files[@]}"; do
+  for index in "${!batch_files[@]}"; do
+    global_index=$((base_index + index))
     stdout_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stdout.XXXXXX")
     stderr_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stderr.XXXXXX")
     (
-      _lint_one "$batch_file"
+      _lint_one_with_plan "$plan_dir/$global_index.plan"
     ) >"$stdout_file" 2>"$stderr_file" &
     pid=$!
     batch_pids+=("$pid")
@@ -256,6 +303,80 @@ _autolint_run_file_batch() {
     [ -s "$stdout_file" ] && cat "$stdout_file"
     [ -s "$stderr_file" ] && cat "$stderr_file" >&2
     rm -f "$stdout_file" "$stderr_file"
+    rc=$(_autolint_merge_rc "$rc" "$file_rc")
+  done
+
+  return "$rc"
+}
+
+# Bash 4.3 introduced `wait -n` (wait for any one child). Older shells —
+# including macOS's system bash 3.2 — must use the barrier path above.
+_autolint_supports_pool() {
+  if [ "${BASH_VERSINFO[0]}" -gt 4 ]; then
+    return 0
+  fi
+  if [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; then
+    return 0
+  fi
+  return 1
+}
+
+_autolint_run_files_pool() {
+  # Pool-style: maintain up to ${jobs} workers in flight. When any worker
+  # finishes (via `wait -n`), spawn the next file immediately rather than
+  # waiting for the whole wave. One slow file (e.g. a Rust file that triggers
+  # clippy) no longer idles the other ${jobs-1} workers for the rest of the
+  # wave. Output is still emitted in file_args order at the end to keep
+  # diagnostics deterministic for users and editor consumers — buffering is
+  # already required by the per-file temp file scheme.
+  #
+  # Each worker reads a pre-built plan file from `plan_dir/<index>.plan`,
+  # which _autolint_main built in one Python call before invoking us. That
+  # avoids paying one `python3 registry.py` startup per file.
+  local jobs="$1" plan_dir="$2"
+  shift 2
+  local -a files=("$@")
+  local n=${#files[@]}
+  local -a pids=() stdouts=() stderrs=()
+  local rc=0 file_rc i next=0 in_flight=0 stdout_file stderr_file
+
+  # Spawn-and-reap loop. `wait -n` blocks until any one child finishes; its
+  # exit status reflects that child but we don't need to map it back to a pid
+  # here — we'll wait on each specific pid in the in-order pass below to pick
+  # up the correct per-file rc. A wait on an already-finished child returns
+  # immediately with its stored exit status, so this is cheap.
+  while [ "$next" -lt "$n" ] || [ "$in_flight" -gt 0 ]; do
+    while [ "$next" -lt "$n" ] && [ "$in_flight" -lt "$jobs" ]; do
+      stdout_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stdout.XXXXXX")
+      stderr_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stderr.XXXXXX")
+      (
+        _lint_one_with_plan "$plan_dir/$next.plan"
+      ) >"$stdout_file" 2>"$stderr_file" &
+      pids[next]=$!
+      stdouts[next]=$stdout_file
+      stderrs[next]=$stderr_file
+      next=$((next + 1))
+      in_flight=$((in_flight + 1))
+    done
+
+    if [ "$in_flight" -gt 0 ]; then
+      # `wait -n` returns 127 only when there are no children to wait for.
+      # Our in_flight counter guards against that case, so any exit status
+      # here belongs to a real worker.
+      wait -n 2>/dev/null || true
+      in_flight=$((in_flight - 1))
+    fi
+  done
+
+  for i in "${!files[@]}"; do
+    if wait "${pids[$i]}"; then
+      file_rc=0
+    else
+      file_rc=$?
+    fi
+    [ -s "${stdouts[$i]}" ] && cat "${stdouts[$i]}"
+    [ -s "${stderrs[$i]}" ] && cat "${stderrs[$i]}" >&2
+    rm -f "${stdouts[$i]}" "${stderrs[$i]}"
     rc=$(_autolint_merge_rc "$rc" "$file_rc")
   done
 
@@ -326,10 +447,37 @@ _autolint_main() {
         rc=$(_autolint_merge_rc "$rc" "$?")
       done
     else
-      for ((start = 0; start < ${#lint_files[@]}; start += jobs)); do
-        _autolint_run_file_batch "${lint_files[@]:start:jobs}"
+      # Plan every file in a single Python invocation. The pre-built plan
+      # directory survives the spawn/wait below and is cleaned up after the
+      # runner returns. If pre-planning itself fails (registry corruption,
+      # tmpdir unavailable), fall back to per-file planning inside _lint_one
+      # so a broken host gets the same diagnostic flow it used to.
+      local plan_dir=""
+      plan_dir=$(_autolint_pre_plan "${lint_files[@]}") || plan_dir=""
+      if [ -n "$plan_dir" ] && _autolint_supports_pool; then
+        # Modern bash: keep ${jobs} workers in flight at all times.
+        _autolint_run_files_pool "$jobs" "$plan_dir" "${lint_files[@]}"
         rc=$(_autolint_merge_rc "$rc" "$?")
-      done
+      elif [ -n "$plan_dir" ]; then
+        # Legacy bash (e.g. macOS system bash 3.2): wave-style barrier
+        # batching. Pass the plan_dir + the global base index of each wave so
+        # workers find their pre-built plan via plan_dir/<global_index>.plan.
+        for ((start = 0; start < ${#lint_files[@]}; start += jobs)); do
+          _autolint_run_file_batch "$plan_dir" "$start" \
+            "${lint_files[@]:start:jobs}"
+          rc=$(_autolint_merge_rc "$rc" "$?")
+        done
+      else
+        # Pre-planning failed — fall through to per-file planning. Each
+        # _lint_one call runs its own python3 invocation, matching legacy
+        # behavior, so the user still gets diagnostics instead of a silent
+        # skip.
+        for file in "${lint_files[@]}"; do
+          _lint_one "$file"
+          rc=$(_autolint_merge_rc "$rc" "$?")
+        done
+      fi
+      [ -n "$plan_dir" ] && rm -rf "$plan_dir"
     fi
   fi
 

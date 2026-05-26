@@ -33,7 +33,7 @@ _autoformat_usage() {
     "  Python:    .py" \
     "  Ruby:      .rb" \
     "  Rust:      .rs" \
-    "  Shell:     .sh, .bash, .zsh, shell shebangs, .bashrc, .zshrc, .profile, .envrc" \
+    "  Shell:     .sh, .bash, .zsh, extensionless files with a shell shebang, .bashrc, .zshrc, .profile, .envrc" \
     "  Web/data:  .css, .js, .jsx, .ts, .tsx, .json, .jsonc, .html, .htm" \
     "" \
     "Options:" \
@@ -58,9 +58,10 @@ _run_fmt() {
   fi
   "$@" 2>"$err"
   rc=$?
-  if [ "$rc" -ne 0 ] && [ -s "$err" ]; then
-    cat "$err" >&2
-  fi
+  # `cat` on an empty file is harmless and one fewer stat per invocation than
+  # gating with `[ -s ]`. On real tool errors there's almost always something
+  # in the stderr buffer; on empty buffers cat is a no-op.
+  [ "$rc" -ne 0 ] && cat "$err" >&2
   rm -f "$err"
   return "$rc"
 }
@@ -122,7 +123,10 @@ _format_php() {
 }
 
 _format_java() {
-  local file="$1"
+  # Positional contract from _format_dispatch is (file, dir, config_source,
+  # config_path). google-java-format has no per-dir or config knob, so the rest
+  # are named-ignored to keep the dispatch contract visible at the call site.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
   command -v google-java-format &>/dev/null || return 0
   _run_fmt google-java-format -i "$file"
 }
@@ -144,13 +148,18 @@ _format_ruff() {
 }
 
 _format_goimports() {
-  local file="$1"
+  # Positional contract from _format_dispatch is (file, dir, config_source,
+  # config_path). goimports has no config knob — the rest are named-ignored so
+  # the dispatch contract stays readable.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
   command -v goimports &>/dev/null || return 0
   _run_fmt goimports -w "$file"
 }
 
 _format_gofumpt() {
-  local file="$1"
+  # Same positional contract as _format_goimports — gofumpt has no project-aware
+  # knobs, so dir / config_source / config_path are named-ignored.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
   command -v gofumpt &>/dev/null || return 0
   _run_fmt gofumpt -w "$file"
 }
@@ -227,19 +236,24 @@ _format_biome() {
 }
 
 _format_superhtml() {
-  local file="$1"
+  # Positional contract from _format_dispatch is (file, dir, config_source,
+  # config_path). superhtml has no config knob — the rest are named-ignored so
+  # the dispatch contract is visible.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
   command -v superhtml &>/dev/null || return 0
   _run_fmt superhtml fmt "$file"
 }
 
 _format_buildifier() {
-  local file="$1"
+  # Same positional contract — buildifier has no per-dir/config knob.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
   command -v buildifier &>/dev/null || return 0
   _run_fmt buildifier "$file"
 }
 
 _format_dockerfmt() {
-  local file="$1"
+  # Same positional contract — dockerfmt has no per-dir/config knob.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
   command -v dockerfmt &>/dev/null || return 0
   _run_fmt dockerfmt -w "$file"
 }
@@ -303,30 +317,19 @@ _format_dispatch() {
   esac
 }
 
-_format_one() {
-  local file="$1" plan_file path filetype _phase adapter config_source config_path rc dispatch_rc
+_format_one_with_plan() {
+  # Dispatch a pre-built plan file. Split out of _format_one so the parent
+  # process can pre-plan many files in a single Python call (see
+  # _autoformat_pre_plan). The source file path is carried inside each plan
+  # record, so this helper only needs the plan location.
+  #
+  # An empty plan file means "no formatter steps" (unsupported / ignored) —
+  # return cleanly so missing-tool hosts can still save-on-edit those files.
+  local plan_file="$1"
+  local path filetype _phase adapter config_source config_path dispatch_rc
 
-  [ -z "$file" ] && return 0
+  [ -s "$plan_file" ] || return 0
 
-  # Planning is the one place where filename, extension, shebang, path scope,
-  # ignore files, and config-policy discovery are allowed to interact. Keeping
-  # that work out of shell dispatch prevents the old metadata-vs-execution
-  # drift from returning in a second table.
-  plan_file=$(_checkrun_tempfile) || {
-    echo "autoformat: could not create registry plan temp file" >&2
-    return 1
-  }
-  _checkrun_registry shell-plan --phase format -- "$file" >"$plan_file"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    _checkrun_remove "$plan_file"
-    return "$rc"
-  fi
-
-  [ -s "$plan_file" ] || {
-    _checkrun_remove "$plan_file"
-    return 0
-  }
   while IFS= read -r -d '' path &&
     IFS= read -r -d '' filetype &&
     IFS= read -r -d '' _phase &&
@@ -345,9 +348,53 @@ _format_one() {
     fi
   done <"$plan_file"
 
-  _checkrun_remove "$plan_file"
   [ "${dispatch_rc:-0}" -eq 125 ] && return "$dispatch_rc"
   return 0
+}
+
+_format_one() {
+  # Plan one file inline (one Python invocation per call) and dispatch. Used
+  # when _autoformat_pre_plan is unavailable (mktemp/tmpdir broken) or as the
+  # explicit single-file API. The batched path in _autoformat_main shares the
+  # same _format_one_with_plan dispatch loop after pre-planning all files at
+  # once.
+  local file="$1" plan_file rc
+
+  [ -z "$file" ] && return 0
+
+  # Planning is the one place where filename, extension, shebang, path scope,
+  # ignore files, and config-policy discovery are allowed to interact. Keeping
+  # that work out of shell dispatch prevents the old metadata-vs-execution
+  # drift from returning in a second table.
+  plan_file=$(_checkrun_tempfile) || {
+    echo "autoformat: could not create registry plan temp file" >&2
+    return 1
+  }
+  _checkrun_registry shell-plan --phase format -- "$file" >"$plan_file"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _checkrun_remove "$plan_file"
+    return "$rc"
+  fi
+
+  _format_one_with_plan "$plan_file"
+  rc=$?
+  _checkrun_remove "$plan_file"
+  return "$rc"
+}
+
+_autoformat_pre_plan() {
+  # Plan many files in a single Python invocation. Writes `<index>.plan` per
+  # input file into a fresh dir whose path is echoed on stdout for the caller
+  # to capture. Returns non-zero (and removes the dir) if the planner itself
+  # fails — empty per-file plans are legitimate skips, not failures.
+  local out_dir
+  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/autoformat-plans.XXXXXX") || return 1
+  if ! _checkrun_registry shell-plan --output-dir "$out_dir" --phase format -- "$@"; then
+    rm -rf "$out_dir"
+    return 1
+  fi
+  printf '%s\n' "$out_dir"
 }
 
 _autoformat_main() {
@@ -376,9 +423,31 @@ _autoformat_main() {
     return 1
   fi
 
-  for file in "$@"; do
-    _format_one "$file" || rc=$?
-  done
+  [ "$#" -eq 0 ] && return 0
+
+  # Pre-plan all files in one Python invocation, then dispatch each file from
+  # its pre-built plan. Sequential dispatch is intentional: several formatters
+  # (clang-format, biome, rustfmt) operate on shared project caches and racing
+  # them on the same files corrupts the cache. The win here is only on the
+  # planner cost — N python startups become one — which dominates save-hook
+  # latency for any file count above ~5. If pre-planning fails (broken tmpdir,
+  # registry corruption), fall back to per-file planning so we still produce
+  # the same diagnostic flow. We can pass "$@" directly because any -h/--help
+  # arg would have returned above before reaching this point.
+  local plan_dir=""
+  plan_dir=$(_autoformat_pre_plan "$@") || plan_dir=""
+  if [ -n "$plan_dir" ]; then
+    local idx=0
+    for file in "$@"; do
+      _format_one_with_plan "$plan_dir/$idx.plan" || rc=$?
+      idx=$((idx + 1))
+    done
+    rm -rf "$plan_dir"
+  else
+    for file in "$@"; do
+      _format_one "$file" || rc=$?
+    done
+  fi
 
   return "$rc"
 }

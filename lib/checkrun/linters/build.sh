@@ -19,10 +19,8 @@ _lint_buildifier() {
       out=$(buildifier --lint=warn --format=json --mode=check "$file" 2>/dev/null)
     fi
     tool_rc=$?
-    local has_warnings=0
     if [ -n "$out" ]; then
-      local warn_json
-      warn_json=$(printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
+      printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
         .files[]?.warnings[]? | {
           path: $path,
           line: .start.line,
@@ -33,13 +31,13 @@ _lint_buildifier() {
           code: .category,
           message: .message,
           source: "buildifier"
-        }')
-      if [ -n "$warn_json" ]; then
-        printf '%s\n' "$warn_json"
-        has_warnings=1
-      fi
+        }'
     fi
-    if [ "$tool_rc" -ne 0 ] && [ "$has_warnings" -eq 0 ] && [ -n "$err_out" ] && [ -s "$err_out" ]; then
+    # Surface stderr whenever buildifier failed, regardless of whether lint
+    # warnings were also produced. Previously this only fired when there were
+    # no warnings, which masked real parse/IO errors any time buildifier
+    # happened to emit at least one warning alongside the failure.
+    if [ "$tool_rc" -ne 0 ] && [ -n "$err_out" ] && [ -s "$err_out" ]; then
       local msg
       msg=$(head -1 "$err_out")
       _emit_synth_error "$file" "$msg" "buildifier"
@@ -56,7 +54,12 @@ _lint_buildifier() {
 }
 
 _lint_checkmake() {
-  local file="$1" dir="$2" config_path="${4:-}"
+  # Dispatch passes (file, dir, config_source, config_path) to every lint
+  # adapter so the contract stays uniform. checkmake has no project-vs-fallback
+  # distinction in its policy, so $3 is named-and-ignored rather than skipped
+  # with `${4:-}` — that keeps the positional contract readable against
+  # _lint_dispatch.
+  local file="$1" dir="$2" _config_source="$3" config_path="${4:-}"
   command -v checkmake &>/dev/null || return 0
 
   local args=()
@@ -87,7 +90,11 @@ _lint_checkmake() {
 }
 
 _lint_cmake() {
-  local file="$1" config_path="${4:-}" args=()
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. cmake-lint accepts a single config file regardless of
+  # source, so dir and config_source are taken as named-ignored locals instead
+  # of being skipped via `${4:-}`.
+  local file="$1" _dir="$2" _config_source="$3" config_path="${4:-}" args=()
   command -v cmake-lint &>/dev/null || return 0
 
   [ -n "$config_path" ] && args=(--config-files "$config_path")
@@ -95,7 +102,9 @@ _lint_cmake() {
 }
 
 _lint_dockerfile() {
-  local file="$1" config_path="${4:-}" rc=0 out tool_rc
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. hadolint reads its config from -c regardless of source.
+  local file="$1" _dir="$2" _config_source="$3" config_path="${4:-}" rc=0 out tool_rc
   local args=()
 
   command -v hadolint &>/dev/null || return 0

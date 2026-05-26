@@ -98,16 +98,60 @@ def policy_path() -> Path:
 
 
 def policy_schema_path() -> Path:
-    """Return the schema that defines association policy documents."""
+    """Return the schema that defines association policy documents.
+
+    This is a checkrun-owned constant, not a host-variable path: the schema
+    travels with the checkrun checkout/dependency, so consumers cannot override
+    it. The function form (rather than re-exporting the constant directly)
+    keeps callers from importing a private name and is reserved as a hook for a
+    future override knob if a real need ever appears.
+    """
 
     return _DEFAULT_POLICY_SCHEMA
+
+
+# Per-process stderr notices for shdeps resolution failures. Without this
+# cache, a host running schema validation across N associated files in ONE
+# Python invocation (e.g. the batched planner in registry.py) would log one
+# "schema file not found: shdeps:…" diagnostic per file per dependency. The
+# fallback bogus path is still returned so downstream code does not crash.
+#
+# Note: schema-lint.py invokes itself per file, so the cache only collapses
+# notices *within* one invocation — across N files you can still see N
+# notices. Batching schema-lint to accept multiple files would extend the
+# de-duplication across that path too; not done here.
+_SHDEPS_NOTICES: set[tuple[str, str]] = set()
+
+
+def _shdeps_notice_once(dependency: str, kind: str, detail: str = "") -> None:
+    key = (dependency, kind)
+    if key in _SHDEPS_NOTICES:
+        return
+    _SHDEPS_NOTICES.add(key)
+    suffix = f": {detail}" if detail else ""
+    if kind == "missing":
+        print(
+            f"schema_policy: shdeps not installed; cannot resolve schema asset "
+            f"for dependency {dependency!r}{suffix}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"schema_policy: shdeps failed to resolve dependency {dependency!r} ({kind}){suffix}",
+            file=sys.stderr,
+        )
 
 
 def _dependency_file_path(dependency: str, asset_path: str) -> Path:
     """Resolve a dependency-owned schema asset through shdeps."""
 
+    # The "shdeps:dep/asset" sentinel preserves the legacy contract (callers
+    # always get back a Path), but the stderr notice above ensures operators
+    # see exactly why validation will fail for that dependency — once per cause,
+    # not once per file.
     shdeps = shutil.which("shdeps")
     if shdeps is None:
+        _shdeps_notice_once(dependency, "missing")
         return Path(f"shdeps:{dependency}/{asset_path}")
     try:
         result = subprocess.run(
@@ -117,12 +161,15 @@ def _dependency_file_path(dependency: str, asset_path: str) -> Path:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-    except OSError:
+    except OSError as exc:
+        _shdeps_notice_once(dependency, "oserror", str(exc))
         return Path(f"shdeps:{dependency}/{asset_path}")
     if result.returncode != 0:
+        _shdeps_notice_once(dependency, "exit", f"rc={result.returncode}")
         return Path(f"shdeps:{dependency}/{asset_path}")
     resolved = result.stdout.strip()
     if not resolved:
+        _shdeps_notice_once(dependency, "empty")
         return Path(f"shdeps:{dependency}/{asset_path}")
     return Path(resolved)
 
