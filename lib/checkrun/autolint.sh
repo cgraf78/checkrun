@@ -401,10 +401,14 @@ _autolint_main() {
 
   [ "${#file_args[@]}" -eq 0 ] && return 0
 
-  # Fallback-config dir. Defaults to the same dir autoformat uses because
-  # several backends share one policy file for formatting and linting. Can be
-  # overridden independently via CHECKRUN_AUTOLINT_DIR.
-  CHECKRUN_AUTOLINT_DIR="${CHECKRUN_AUTOLINT_DIR:-$HOME/.config/autoformat}"
+  # Fallback-config dir. Mirrors the resolution logic in registry.py's
+  # `_config_root`: prefer CHECKRUN_AUTOLINT_DIR, then CHECKRUN_AUTOFORMAT_DIR
+  # (because several backends share one policy file for formatting and
+  # linting), then the personal-config default. The bash side needs the
+  # fallback explicitly because we EXPORT the result below so Python sees the
+  # bash-resolved absolute path — without the mirror, exporting a defaulted
+  # AUTOLINT_DIR would shadow Python's AUTOFORMAT_DIR fallback.
+  CHECKRUN_AUTOLINT_DIR="${CHECKRUN_AUTOLINT_DIR:-${CHECKRUN_AUTOFORMAT_DIR:-$HOME/.config/autoformat}}"
 
   # Resolve relative CHECKRUN_AUTOLINT_DIR values before any linter-specific cwd
   # changes. Config paths passed on the CLI should name the same file
@@ -412,6 +416,13 @@ _autolint_main() {
   if [ -d "$CHECKRUN_AUTOLINT_DIR" ]; then
     CHECKRUN_AUTOLINT_DIR=$(_abs_dir "$CHECKRUN_AUTOLINT_DIR")
   fi
+
+  # Export so the Python planner subprocess sees the bash-resolved absolute
+  # path. Without `export`, the variable is shell-local and Python's
+  # os.environ.get() returns None, falling back to its own default — which
+  # works by coincidence but means the bash resolution above is effectively
+  # dead code in that case.
+  export CHECKRUN_AUTOLINT_DIR
 
   for file in "${file_args[@]}"; do
     if lint_file=$(_lintable_path "$file"); then
