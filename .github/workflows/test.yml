@@ -14,6 +14,16 @@ permissions:
 
 jobs:
   shell:
+    # Delegates to the shared shell-ci reusable workflow, which sets up mise
+    # (per .github/mise/checkrun-ci.toml), installs checkrun's own deps, then
+    # runs the test-command argument. Reviewing CI coverage without leaving
+    # this repo is intentional: any change to that workflow shows up here as a
+    # SHA bump rather than as silent drift on @main.
+    #
+    # TODO: pin to an immutable commit SHA instead of @main, then drop the
+    # zizmor suppression. Run locally:
+    #   gh api repos/cgraf78/actions/branches/main --jq '.commit.sha'
+    # and replace the ref below (form: `...@<40-char-sha>`).
     uses: cgraf78/actions/.github/workflows/shell-ci.yml@main # zizmor: ignore[unpinned-uses]
     with:
       setup: checkrun

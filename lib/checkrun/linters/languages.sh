@@ -6,7 +6,9 @@
 # flags instead of maintaining their own global option state.
 
 _lint_ruby() {
-  local file="$1" config_path="${4:-}" args=()
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. rubocop's --config accepts one path regardless of source.
+  local file="$1" _dir="$2" _config_source="$3" config_path="${4:-}" args=()
   command -v rubocop &>/dev/null || return 0
 
   [ -n "$config_path" ] && args=(--config "$config_path")
@@ -18,7 +20,19 @@ _lint_ruby() {
   fi
 }
 
+# Memoize the resolved PHP binary per shell process. Each probe spawns `php -v`
+# for every candidate on PATH plus the homebrew/system fallbacks, which is the
+# bulk of `_lint_php`'s cost. Sentinel "__none__" prevents repeating the probe
+# when no usable PHP exists on this host.
+_CHECKRUN_PHP_CLI_CACHE=""
+
 _php_cli() {
+  if [ -n "$_CHECKRUN_PHP_CLI_CACHE" ]; then
+    [ "$_CHECKRUN_PHP_CLI_CACHE" = "__none__" ] && return 1
+    echo "$_CHECKRUN_PHP_CLI_CACHE"
+    return 0
+  fi
+
   local candidate
 
   # Managed hosts can put a non-PHP compatibility shim ahead of PHP on PATH.
@@ -26,6 +40,7 @@ _php_cli() {
   while IFS= read -r candidate; do
     [[ -n "$candidate" && -x "$candidate" ]] || continue
     "$candidate" -v 2>&1 | grep -q 'HipHop VM' && continue
+    _CHECKRUN_PHP_CLI_CACHE="$candidate"
     echo "$candidate"
     return 0
   done < <(type -P -a php 2>/dev/null | awk '!seen[$0]++')
@@ -37,10 +52,12 @@ _php_cli() {
     /usr/local/bin/php; do
     [[ -x "$candidate" ]] || continue
     "$candidate" -v 2>&1 | grep -q 'HipHop VM' && continue
+    _CHECKRUN_PHP_CLI_CACHE="$candidate"
     echo "$candidate"
     return 0
   done
 
+  _CHECKRUN_PHP_CLI_CACHE="__none__"
   return 1
 }
 
@@ -66,25 +83,15 @@ _lint_rust() {
   cargo clippy --version &>/dev/null || return 0
   manifest_dir="${manifest%/*}"
 
-  # autolint spawns one subshell per changed file in parallel. cargo clippy is
-  # workspace-wide, so N changed .rs files in one workspace produce N redundant
-  # invocations that queue behind Cargo's package-cache lock and print
-  # "Blocking waiting for file lock" N-1 times. Deduplicate with an atomic
-  # mkdir sentinel keyed on the manifest: the first subshell to win creates it
-  # and runs clippy; the rest return 0 immediately. $$ is the parent autolint
-  # PID — shared across all co-batch subshells, distinct between invocations.
-  local sentinel sentinel_hash
-  sentinel_hash=$(printf '%s' "$manifest" | cksum | cut -d' ' -f1)
-  sentinel="${TMPDIR:-/tmp}/autolint-rust-$$-${sentinel_hash}"
-  if ! mkdir "$sentinel" 2>/dev/null; then
-    return 0
-  fi
-  # No cleanup trap: the sentinel must outlive this subshell so that other
-  # co-batch subshells (which may start after this one finishes) still see it
-  # and skip. $$ is the parent autolint PID — unique per invocation — so the
-  # sentinel is naturally scoped to one autolint run and won't block future
-  # runs. /tmp is cleared by the OS; the directories are empty and tiny.
-
+  # JSON mode (editor/unified-diagnostics) is correctness-critical: nvim-lint
+  # needs every file's diagnostics. With the manifest-scoped dedup that the
+  # non-JSON path uses below, losing subshells return 0 immediately while the
+  # winner filters clippy's workspace-wide output down to its own single file —
+  # so diagnostics for sibling .rs files in the same Cargo workspace would be
+  # silently dropped. Skip the dedup in JSON mode and let every subshell run
+  # clippy. Cargo's package-cache lock will serialize them (slower wall-clock,
+  # extra "Blocking waiting for file lock" lines that we discard with 2>/dev/null),
+  # but each file's diagnostics survive into the unified JSON stream.
   if [ "$json" -eq 1 ]; then
     local out tool_rc
     out=$(cargo clippy --message-format=json --manifest-path "$manifest" \
@@ -115,6 +122,23 @@ _lint_rust() {
     return "$tool_rc"
   fi
 
+  # Non-JSON mode: clippy prints the same workspace-wide report on every
+  # invocation. Deduplicate with an atomic mkdir sentinel keyed on the
+  # manifest: the first subshell to win creates it and runs clippy; the rest
+  # return 0 immediately. $$ is the parent autolint PID — shared across all
+  # co-batch subshells, distinct between invocations.
+  local sentinel sentinel_hash
+  sentinel_hash=$(printf '%s' "$manifest" | cksum | cut -d' ' -f1)
+  sentinel="${TMPDIR:-/tmp}/autolint-rust-$$-${sentinel_hash}"
+  if ! mkdir "$sentinel" 2>/dev/null; then
+    return 0
+  fi
+  # No cleanup trap: the sentinel must outlive this subshell so that other
+  # co-batch subshells (which may start after this one finishes) still see it
+  # and skip. $$ is the parent autolint PID — unique per invocation — so the
+  # sentinel is naturally scoped to one autolint run and won't block future
+  # runs. /tmp is cleared by the OS; the directories are empty and tiny.
+
   if [ "$fix" -eq 1 ]; then
     cargo clippy --fix --allow-dirty --allow-staged \
       --manifest-path "$manifest" --all-targets -- -D warnings
@@ -124,7 +148,11 @@ _lint_rust() {
 }
 
 _lint_go() {
-  local file="$1" config_path="${4:-}" rc=0 out tool_rc gc_dir gc_base
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. golangci-lint reads its config from --config regardless of
+  # source, so dir and config_source are named-ignored.
+  local file="$1" _dir="$2" _config_source="$3" config_path="${4:-}"
+  local rc=0 out tool_rc gc_dir
   local args=()
 
   command -v golangci-lint &>/dev/null || return 0
@@ -133,13 +161,22 @@ _lint_go() {
   # golangci-lint expects package paths, not single files. Run from the file's
   # directory on ./... and filter JSON results back to this file.
   gc_dir=$(dirname "$file")
-  gc_base=$(basename "$file")
   if [ "$json" -eq 1 ]; then
     out=$(cd "$gc_dir" && golangci-lint run --output-format=json ${args[@]+"${args[@]}"} ./... 2>/dev/null)
     tool_rc=$?
     if [ -n "$out" ]; then
-      printf '%s' "$out" | jq -c --arg path "$file" --arg base "$gc_base" "$_JQ_SEVLIB"'
-        .Issues[]? | select(.Pos.Filename | endswith($base)) | {
+      # Compare canonical paths, not basenames. The previous `endswith($base)`
+      # filter false-positived on any file whose name ended with the same
+      # string — e.g. `xmain.go` matched `main.go` — and also misattributed
+      # issues from same-basename files in sub-packages reached by ./...
+      # `.Pos.Filename` from golangci-lint is relative to the run directory
+      # (gc_dir), so a clean join gives the absolute path to compare against
+      # the absolute `$file` already normalized by _lintable_path.
+      printf '%s' "$out" | jq -c --arg path "$file" --arg dir "$gc_dir" "$_JQ_SEVLIB"'
+        .Issues[]?
+        | (.Pos.Filename | sub("^\\./"; "")) as $rel
+        | select(($dir + "/" + $rel) == $path or .Pos.Filename == $path)
+        | {
           path: $path,
           line: .Pos.Line,
           col: .Pos.Column,
@@ -198,7 +235,9 @@ _lint_ruff() {
 }
 
 _lint_selene() {
-  local file="$1" config_path="${4:-}" rc=0 out tool_rc
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. selene takes one --config regardless of source.
+  local file="$1" _dir="$2" _config_source="$3" config_path="${4:-}" rc=0 out tool_rc
   local args=()
 
   command -v selene &>/dev/null || return 0

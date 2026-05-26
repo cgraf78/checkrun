@@ -499,6 +499,10 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
         return None
     if not first.startswith("#!"):
         return None
+    # Shebang rules in registry.json are evaluated in document order and the
+    # first match wins. Order matters because narrower interpreters (e.g. zsh)
+    # must appear before broader matchers like containsAny=["bash","/sh"], which
+    # would otherwise capture `#!/usr/bin/env zsh` via the trailing "sh".
     for item in filetypes["shebangs"]:
         if "contains" in item and item["contains"] in first:
             return str(item["filetype"])
@@ -531,7 +535,10 @@ def _selector_matches(path: Path, filetype: str | None, selector: dict[str, Any]
     return bool(filetype and filetype in selector.get("filetypes", []))
 
 
-def _skip(step: dict[str, Any], reason: str, **details: Any) -> dict[str, Any]:
+def _skipped_record(step: dict[str, Any], reason: str, **details: Any) -> dict[str, Any]:
+    # Renamed from `_skip` to read as a record constructor instead of a verb. No
+    # side effects: returns a fresh dict tagged as skipped, preserving the
+    # original step's fields so explain/plan output stays explainable.
     skipped = dict(step)
     skipped["skipped"] = True
     skipped["reason"] = reason
@@ -560,6 +567,15 @@ def _walk_config(dir_path: Path, filename: str) -> Path | None:
     # Project-local policy must win over personal fallback policy. Walking from
     # the target file directory also avoids long-lived editor/agent cwd leaking
     # into config selection.
+    #
+    # NOTE: the walk is intentionally unbounded — it ascends to the filesystem
+    # root. That mirrors how project tools (ruff, biome, …) discover their own
+    # configs, but it also means a stray config file at $HOME (e.g.
+    # ~/.shellcheckrc) will be picked up by ANY file under $HOME that has no
+    # closer project config. If you want personal fallback policy, prefer
+    # putting it under $CHECKRUN_AUTOFORMAT_DIR / $CHECKRUN_AUTOLINT_DIR (the
+    # `envRoot` fallback mechanism in registry.json) so the registry can make
+    # the source explicit instead of relying on the walk's accidental reach.
     current = dir_path.resolve(strict=False)
     previous: Path | None = None
     while current != previous:
@@ -635,20 +651,52 @@ def _resolve_config(
     return {"policy": policy_name, "source": "native"}
 
 
+# Cache parsed ignore-file pattern lists per (config_dir, filename) so repeated
+# `_ignore_match` calls within one planner invocation don't re-stat and re-parse
+# the same files. Lint mode does four calls per file (lint/spell/schema/tool),
+# so even single-file invocations benefit; the batch entrypoint that plans
+# multiple files in one Python process gains an extra Nx multiplier on top.
+# Sentinel `None` means "stat'd, file does not exist" (so we don't re-stat);
+# missing key means "not yet probed".
+_IGNORE_PATTERNS_CACHE: dict[tuple[str, str], list[str] | None] = {}
+
+
+def _load_ignore_patterns(source: Path) -> list[str] | None:
+    key = (str(source.parent), source.name)
+    if key in _IGNORE_PATTERNS_CACHE:
+        return _IGNORE_PATTERNS_CACHE[key]
+    if not source.is_file():
+        _IGNORE_PATTERNS_CACHE[key] = None
+        return None
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        _IGNORE_PATTERNS_CACHE[key] = None
+        return None
+    patterns: list[str] = []
+    for raw in lines:
+        pattern = raw.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        patterns.append(pattern)
+    _IGNORE_PATTERNS_CACHE[key] = patterns
+    return patterns
+
+
 def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
+    # Two filenames per phase: the shared "ignore" applies to every phase,
+    # plus the phase-specific override (e.g. "lint-ignore"). Order matches the
+    # original implementation so a generic `ignore` match still wins over a
+    # phase-specific one for the same pattern, but reporting now uses the cache
+    # rather than re-reading files.
+    str_path = str(path)
     for filename in ("ignore", _PHASE_IGNORE_FILES.get(phase, f"{phase}-ignore")):
         source = config / filename
-        if not source.is_file():
+        patterns = _load_ignore_patterns(source)
+        if patterns is None:
             continue
-        try:
-            lines = source.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for raw in lines:
-            pattern = raw.strip()
-            if not pattern or pattern.startswith("#"):
-                continue
-            if fnmatch.fnmatchcase(str(path), pattern):
+        for pattern in patterns:
+            if fnmatch.fnmatchcase(str_path, pattern):
                 return {"ignored": True, "source": str(source), "pattern": pattern}
     return {"ignored": False}
 
@@ -743,7 +791,7 @@ def _collect_steps(
         for step in selector.get(phase, []):
             if not _path_pattern_matches(path, step.get("pathPatterns", [])):
                 skipped.append(
-                    _skip(
+                    _skipped_record(
                         _planned_step(registry, path, step, phase),
                         "path-pattern",
                         patterns=list(step.get("pathPatterns", [])),
@@ -780,7 +828,8 @@ def _plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None
             if ignored["ignored"]:
                 steps = []
                 skipped.extend(
-                    _skip(step, "phase-ignore", ignore=ignored) for step in candidate_steps
+                    _skipped_record(step, "phase-ignore", ignore=ignored)
+                    for step in candidate_steps
                 )
             else:
                 steps = candidate_steps
@@ -803,13 +852,13 @@ def _plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None
             steps = []
             for step in all_steps:
                 if lint_ignore["ignored"]:
-                    skipped.append(_skip(step, "lint-ignore", ignore=lint_ignore))
+                    skipped.append(_skipped_record(step, "lint-ignore", ignore=lint_ignore))
                 elif step["phase"] == "spell" and spell_ignore["ignored"]:
-                    skipped.append(_skip(step, "phase-ignore", ignore=spell_ignore))
+                    skipped.append(_skipped_record(step, "phase-ignore", ignore=spell_ignore))
                 elif step["phase"] == "schema" and schema_ignore["ignored"]:
-                    skipped.append(_skip(step, "phase-ignore", ignore=schema_ignore))
+                    skipped.append(_skipped_record(step, "phase-ignore", ignore=schema_ignore))
                 elif step["phase"] in {"lint", "tool"} and tool_ignore["ignored"]:
-                    skipped.append(_skip(step, "phase-ignore", ignore=tool_ignore))
+                    skipped.append(_skipped_record(step, "phase-ignore", ignore=tool_ignore))
                 else:
                     steps.append(step)
             schemas = (
@@ -967,29 +1016,68 @@ def _print_human(items: list[dict[str, Any]]) -> None:
             print(f"  schemas: {schema_names}")
 
 
-def _print_shell_plan(registry: dict[str, Any], phase: str, files: list[str]) -> None:
+def _shell_plan_records(
+    registry: dict[str, Any], phase: str, files: list[str]
+) -> list[list[bytes]]:
+    """Return per-input-file NUL-record blobs for the shell dispatch protocol.
+
+    One blob per input file, in the same order as `files`. Each blob is the
+    serialized form of every plan step for that file (already-NUL-delimited);
+    an empty blob means "no steps planned for this file" (ignored / unsupported
+    / no matching selectors). The single-stream and per-file-output modes
+    below both use this builder so the on-disk byte format never drifts.
+    """
+
     planned = plan(registry, files, phase)
+    blobs: list[list[bytes]] = []
     for item in planned["files"]:
+        chunks: list[bytes] = []
         phase_data = item[phase]
-        if phase_data["ignored"]:
-            continue
-        for step in phase_data["steps"]:
-            config = step.get("config", {})
-            fields = [
-                item["path"],
-                item.get("filetype") or "",
-                step["phase"],
-                step["adapter"],
-                config.get("source", ""),
-                config.get("path", ""),
-            ]
-            # This private shell protocol is NUL-delimited because paths can
-            # legally contain spaces, tabs, or newlines. The shell callers read
-            # directly from a temp file instead of command substitution, because
-            # Bash variables cannot safely carry NUL bytes.
-            for field in fields:
-                sys.stdout.buffer.write(str(field).encode("utf-8", "surrogateescape"))
-                sys.stdout.buffer.write(b"\0")
+        if not phase_data["ignored"]:
+            for step in phase_data["steps"]:
+                config = step.get("config", {})
+                fields = [
+                    item["path"],
+                    item.get("filetype") or "",
+                    step["phase"],
+                    step["adapter"],
+                    config.get("source", ""),
+                    config.get("path", ""),
+                ]
+                # NUL-delimited because paths may legally contain spaces, tabs,
+                # or newlines. Shell callers read from a temp file rather than
+                # command substitution since Bash variables cannot safely carry
+                # NUL bytes.
+                for field in fields:
+                    chunks.append(str(field).encode("utf-8", "surrogateescape"))
+                    chunks.append(b"\0")
+        blobs.append(chunks)
+    return blobs
+
+
+def _print_shell_plan(registry: dict[str, Any], phase: str, files: list[str]) -> None:
+    for blob in _shell_plan_records(registry, phase, files):
+        for chunk in blob:
+            sys.stdout.buffer.write(chunk)
+
+
+def _write_shell_plan_dir(
+    registry: dict[str, Any], phase: str, files: list[str], out_dir: Path
+) -> None:
+    """Write per-file plans into `out_dir` as `<index>.plan`.
+
+    Files are numbered by input order so Bash callers know the mapping without
+    a side manifest. Empty plans (no steps for that file) still produce a
+    zero-byte `<index>.plan`; callers check `[ -s "$plan" ]` to short-circuit
+    the dispatch loop the same way they do with the single-file protocol.
+    """
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for index, blob in enumerate(_shell_plan_records(registry, phase, files)):
+        target = out_dir / f"{index}.plan"
+        with target.open("wb") as handle:
+            for chunk in blob:
+                handle.write(chunk)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1019,6 +1107,11 @@ def main(argv: list[str] | None = None) -> int:
         help="private shell transport for Checkrun entrypoints",
     )
     shell_parser.add_argument("--phase", choices=sorted(_PLAN_PHASES), required=True)
+    # --output-dir batches multiple files into one Python invocation. The
+    # planner writes `<index>.plan` per input file (input order) into the
+    # directory; the single-stream stdout path stays unchanged so existing
+    # single-file callers do not have to migrate.
+    shell_parser.add_argument("--output-dir")
     shell_parser.add_argument("files", nargs="*")
 
     args = parser.parse_args(argv)
@@ -1053,7 +1146,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "shell-plan":
-        _print_shell_plan(registry, args.phase, args.files)
+        if args.output_dir:
+            _write_shell_plan_dir(registry, args.phase, args.files, Path(args.output_dir))
+        else:
+            _print_shell_plan(registry, args.phase, args.files)
         return 0
     raise AssertionError(args.command)
 

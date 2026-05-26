@@ -52,7 +52,20 @@ _lint_git_config() {
   _lint_text_command "git config" "$file" git config --file "$file" --list
 }
 
+# Memoize the resolved editorconfig-checker binary per shell process. The probe
+# walks every PATH entry and runs `--version` on every candidate, which is
+# noticeable when the same shell lints many files. The sentinel "__none__"
+# distinguishes "not yet probed" from "probed and not found" so we don't repeat
+# the walk just because the tool is missing.
+_CHECKRUN_EC_CHECKER_CMD_CACHE=""
+
 _editorconfig_checker_cmd() {
+  if [ -n "$_CHECKRUN_EC_CHECKER_CMD_CACHE" ]; then
+    [ "$_CHECKRUN_EC_CHECKER_CMD_CACHE" = "__none__" ] && return 1
+    echo "$_CHECKRUN_EC_CHECKER_CMD_CACHE"
+    return 0
+  fi
+
   local candidate name path_dir
 
   # Version-manager shims can exist before the tool is configured. Probe every
@@ -64,11 +77,13 @@ _editorconfig_checker_cmd() {
       candidate="$path_dir/$name"
       [ -x "$candidate" ] || continue
       "$candidate" --version >/dev/null 2>&1 || continue
+      _CHECKRUN_EC_CHECKER_CMD_CACHE="$candidate"
       echo "$candidate"
       return 0
     done
   done
 
+  _CHECKRUN_EC_CHECKER_CMD_CACHE="__none__"
   return 1
 }
 
@@ -82,6 +97,11 @@ _lint_editorconfig() {
 }
 
 _lint_systemd_unit() {
+  # `systemd-analyze verify` is a host-local load check: it tries to resolve the
+  # unit's dependencies on THIS machine. Third-party units edited on a dev box
+  # often produce false-positive errors about missing dependent units. The
+  # adapter still surfaces real syntax problems; treat dependency-resolution
+  # complaints as informational rather than ground truth.
   local file="$1"
   command -v systemd-analyze &>/dev/null || return 0
   _lint_text_command "systemd-analyze" "$file" systemd-analyze verify "$file"
@@ -100,7 +120,10 @@ _lint_schema() {
 }
 
 _lint_taplo() {
-  local file="$1" config_source="${3:-}" config_path="${4:-}" rc=0 err tool_rc msg
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. taplo wants config_source ("none" triggers --no-schema), so
+  # dir is the only named-ignored local here.
+  local file="$1" _dir="$2" config_source="${3:-}" config_path="${4:-}" rc=0 err tool_rc msg
   local args=()
 
   command -v taplo &>/dev/null || return 0

@@ -6,7 +6,9 @@
 # flags instead of maintaining their own global option state.
 
 _lint_typos() {
-  local file="$1" config_path="${4:-}"
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. typos accepts a single --config regardless of source.
+  local file="$1" _dir="$2" _config_source="$3" config_path="${4:-}"
   command -v typos &>/dev/null || return 0
 
   local args=()
@@ -51,7 +53,9 @@ _lint_typos() {
 }
 
 _lint_rumdl() {
-  local file="$1" config_path="${4:-}" rc=0 out tool_rc
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. rumdl uses one --config regardless of source.
+  local file="$1" _dir="$2" _config_source="$3" config_path="${4:-}" rc=0 out tool_rc
   local args=()
 
   command -v rumdl &>/dev/null || return 0

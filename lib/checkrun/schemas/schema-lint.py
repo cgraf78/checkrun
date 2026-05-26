@@ -67,6 +67,22 @@ def _ensure_optional_deps() -> None:
 
     uv = shutil.which("uv")
     if uv is None:
+        # Without uv we cannot self-bootstrap; without the optional deps we also
+        # cannot validate. Emit a stderr notice instead of silently producing
+        # zero diagnostics — a "schema-lint passes" result on a lean host
+        # previously looked indistinguishable from a real green run.
+        #
+        # schema-lint runs as a separate process per linted file, so this fires
+        # once per invocation, not once per session. That's noisy on truly
+        # lean hosts but is preferable to silent green: a user who can't
+        # install uv or jsonschema gets a clear, repeated signal that the
+        # phase is unenforced. Future batching of schema-lint would naturally
+        # collapse the notice the same way the planner batching does.
+        print(
+            "schema-lint: optional dependencies missing and uv unavailable; "
+            f"schema validation skipped (missing: {', '.join(missing)})",
+            file=sys.stderr,
+        )
         return
 
     env = os.environ.copy()
