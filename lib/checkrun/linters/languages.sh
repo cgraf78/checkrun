@@ -89,9 +89,11 @@ _lint_rust() {
   # winner filters clippy's workspace-wide output down to its own single file —
   # so diagnostics for sibling .rs files in the same Cargo workspace would be
   # silently dropped. Skip the dedup in JSON mode and let every subshell run
-  # clippy. Cargo's package-cache lock will serialize them (slower wall-clock,
-  # extra "Blocking waiting for file lock" lines that we discard with 2>/dev/null),
-  # but each file's diagnostics survive into the unified JSON stream.
+  # clippy. Cargo's per-workspace target-dir lock serializes the concurrent
+  # invocations (extra "Blocking waiting for file lock" lines on stderr, which
+  # we discard with 2>/dev/null); the first cold compile pays the full cost,
+  # subsequent invocations reuse the cache. Slower wall-clock vs the single-
+  # winner approach, but each file's diagnostics survive into the JSON stream.
   if [ "$json" -eq 1 ]; then
     local out tool_rc
     out=$(cargo clippy --message-format=json --manifest-path "$manifest" \
