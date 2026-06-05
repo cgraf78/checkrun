@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# nvim-test — verify Checkrun's optional Neovim protocol adapters.
+
+set -euo pipefail
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+echo "=== checkrun: optional Neovim adapters ==="
+
+if ! command -v nvim >/dev/null 2>&1; then
+  echo "  SKIP: nvim adapter tests require Neovim"
+  _test_summary
+fi
+
+td=$(_tmpdir)
+capabilities_cmd="$td/checkrun-capabilities"
+schema_cmd="$td/checkrun-schema"
+lua_test="$td/checkrun-nvim-test.lua"
+
+cat >"$capabilities_cmd" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{
+  "version": 2,
+  "filetypes": {
+    "format": ["lua"],
+    "lint": ["sh"],
+    "custom": {
+      "filename": {"Dockerfile": "dockerfile"},
+      "extension": {"service": "systemd"},
+      "patterns": [
+        {"pattern": "agent-hook-*", "filetype": "sh", "extensionlessOnly": true},
+        {"pattern": ".github/workflows/*.yml", "filetype": "yaml"}
+      ]
+    }
+  }
+}
+JSON
+SH
+
+cat >"$schema_cmd" <<'SH'
+#!/usr/bin/env bash
+if [[ "${CHECKRUN_NVIM_TEST_ENV:-}" != "present" ]]; then
+  exit 7
+fi
+cat <<'JSON'
+{
+  "json": {"https://example.invalid/json.schema": ["example.json"]},
+  "yaml": {"https://example.invalid/yaml.schema": ["example.yaml"]},
+  "toml": {"https://example.invalid/toml.schema": ["example.toml"]}
+}
+JSON
+SH
+
+chmod +x "$capabilities_cmd" "$schema_cmd"
+
+cat >"$lua_test" <<'LUA'
+local root = assert(os.getenv("CHECKRUN_REPO_ROOT"), "CHECKRUN_REPO_ROOT missing")
+local capabilities_cmd = assert(os.getenv("CHECKRUN_CAPABILITIES_CMD"), "CHECKRUN_CAPABILITIES_CMD missing")
+local schema_cmd = assert(os.getenv("CHECKRUN_SCHEMA_CMD"), "CHECKRUN_SCHEMA_CMD missing")
+local checkrun_nvim = dofile(root .. "/lib/checkrun/nvim.lua")
+
+local function assert_eq(desc, expected, actual)
+  if expected ~= actual then
+    error(desc .. ": expected " .. vim.inspect(expected) .. ", got " .. vim.inspect(actual), 0)
+  end
+end
+
+local capabilities = checkrun_nvim.capabilities({
+  command = { capabilities_cmd },
+})
+assert_eq("capabilities format entry", "lua", capabilities.filetypes.format[1])
+assert_eq("capabilities lint entry", "sh", capabilities.filetypes.lint[1])
+
+local filetypes = checkrun_nvim.filetypes({
+  command = { capabilities_cmd },
+})
+assert_eq("filename filetype", "dockerfile", filetypes.filename.Dockerfile)
+assert_eq("extension filetype", "systemd", filetypes.extension.service)
+assert_eq("normal pattern filetype", "yaml", filetypes.pattern["%.github/workflows/.*%.yml"])
+
+local extensionless = assert(filetypes.pattern["agent%-hook%-.*"], "extensionless callback missing")
+assert_eq("extensionless basename matches", "sh", extensionless("agent-hook-test"))
+assert_eq("extensionless path matches", "sh", extensionless("/tmp/agent-hook-test"))
+assert_eq("extensionless dotted name does not match", nil, extensionless("agent-hook-test.txt"))
+
+local json_schemas = checkrun_nvim.json_schemas({
+  command = { schema_cmd },
+  env = { CHECKRUN_NVIM_TEST_ENV = "present" },
+})
+assert_eq("json schema command output", "example.json", json_schemas["https://example.invalid/json.schema"][1])
+
+local toml_schemas = checkrun_nvim.toml_schema_associations({
+  command = { schema_cmd },
+  env = { CHECKRUN_NVIM_TEST_ENV = "present" },
+})
+assert_eq("toml schema command output", "example.toml", toml_schemas["https://example.invalid/toml.schema"][1])
+
+local before_init = checkrun_nvim.yaml_before_init({
+  command = { schema_cmd },
+  env = { CHECKRUN_NVIM_TEST_ENV = "present" },
+})
+local config = {
+  settings = {
+    yaml = {
+      schemas = {
+        ["https://existing.invalid/schema"] = { "existing.yaml" },
+      },
+    },
+  },
+}
+before_init(nil, config)
+assert_eq(
+  "yaml before_init preserves existing schemas",
+  "existing.yaml",
+  config.settings.yaml.schemas["https://existing.invalid/schema"][1]
+)
+assert_eq(
+  "yaml before_init adds checkrun schemas",
+  "example.yaml",
+  config.settings.yaml.schemas["https://example.invalid/yaml.schema"][1]
+)
+
+print("checkrun nvim adapter lua checks passed")
+LUA
+
+set +e
+output=$(
+  CHECKRUN_REPO_ROOT="$CHECKRUN_REPO_ROOT" \
+    CHECKRUN_CAPABILITIES_CMD="$capabilities_cmd" \
+    CHECKRUN_SCHEMA_CMD="$schema_cmd" \
+    nvim --headless --clean -n -u NONE -i NONE -l "$lua_test" 2>&1
+)
+rc=$?
+set -e
+_assert_exit "nvim adapter: lua checks pass" 0 "$rc"
+_assert_contains "nvim adapter: reports success" "checkrun nvim adapter lua checks passed" "$output"
+
+_test_summary

@@ -80,6 +80,10 @@ own toolchain through the host environment or integration layer.
   and a repo-relative `"schema"` path when a schema is public API owned by a
   shdeps-managed dependency; the interpreter resolves those through
   `shdeps dep-file`.
+- `lib/checkrun/nvim.lua` is the optional Neovim adapter API. It does not
+  depend on shdeps, Sley, LazyVim, Mason, or local editor policy; callers pass
+  explicit commands, environment, and working directories when they do not want
+  the PATH/default-script behavior.
 - `lib/checkrun/schemas/schema-lint.py` validates files through that policy.
 - `share/checkrun/schemas/associations.schema.json` is the JSON Schema for
   schema association policy files.
@@ -94,6 +98,42 @@ dependency manager's contract:
 python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --lsp-schemas
 checkrun capabilities --json
 ```
+
+### Neovim Adapter API
+
+The Neovim module is a protocol adapter, not a complete plugin. It translates
+Checkrun's public capability and schema-policy outputs into Neovim data
+structures while leaving routing policy in the consuming config.
+
+```lua
+local checkrun_nvim = dofile("lib/checkrun/nvim.lua")
+
+vim.filetype.add(checkrun_nvim.filetypes({
+  command = { "checkrun", "capabilities", "--json" },
+}))
+
+local yaml_before_init = checkrun_nvim.yaml_before_init({
+  command = { "python3", "lib/checkrun/schemas/schema_policy.py", "--lsp-schemas" },
+})
+```
+
+Public functions:
+
+- `capabilities(opts)` reads and normalizes `checkrun capabilities --json`.
+- `filetypes(opts)` converts Checkrun custom filetype metadata into
+  `vim.filetype.add` input.
+- `add_filetypes(opts)` registers those filetypes and returns the registered
+  table.
+- `json_schemas(opts)`, `yaml_schemas(opts)`, and
+  `toml_schema_associations(opts)` return the corresponding LSP schema maps.
+- `yaml_before_init(opts)` returns a yamlls `before_init` callback that merges
+  Checkrun's YAML schema policy with SchemaStore when SchemaStore is installed.
+
+Supported options are `command`, `env`, `cwd`, direct `capabilities` or
+`config` tables for tests/pre-fetched callers, and `script`/`python` for the
+default schema-policy command. The module does not choose formatter/linter
+plugin names, Treesitter parsers, LSP servers, package managers, keymaps, or
+workspace roots.
 
 ## Editor And Hook Flow
 
