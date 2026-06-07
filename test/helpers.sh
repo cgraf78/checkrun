@@ -281,7 +281,7 @@ _tmpdir() {
   echo "$d"
 }
 
-_checkrun_default_autoformat_dir() {
+_checkrun_default_config_dir() {
   local dir
   dir=$(_tmpdir)
 

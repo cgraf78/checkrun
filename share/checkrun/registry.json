@@ -111,29 +111,24 @@
   },
   "configPolicies": {
     "biome-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [{ "file": "biome.json" }, { "file": "biome.jsonc" }],
       "fallback": { "file": "biome.json" },
       "selfConfigGuard": true
     },
     "biome-lint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [{ "file": "biome.json" }, { "file": "biome.jsonc" }],
       "fallback": { "file": "biome.json" },
       "selfConfigGuard": true
     },
     "checkmake": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [{ "file": "checkmake.ini" }],
       "fallback": { "file": "checkmake.ini" }
     },
     "clang-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [{ "file": ".clang-format" }, { "file": "_clang-format" }],
       "fallback": { "file": "clang-format" }
     },
     "cmake-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [
         { "file": ".cmake-format.py" },
         { "file": "cmake-format.py" },
@@ -145,7 +140,6 @@
       "fallback": { "file": "cmake-format.py" }
     },
     "cmake-lint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [
         { "file": ".cmake-format.py" },
         { "file": "cmake-format.py" },
@@ -157,7 +151,6 @@
       "fallback": { "file": "cmake-format.py" }
     },
     "golangci-lint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [
         { "file": ".golangci.yml" },
         { "file": ".golangci.yaml" },
@@ -167,17 +160,14 @@
       "fallback": { "file": "golangci-lint.yml" }
     },
     "hadolint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [{ "file": ".hadolint.yaml" }],
       "fallback": { "file": "hadolint.yaml" }
     },
     "php-cs-fixer": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [{ "file": ".php-cs-fixer.php" }, { "file": ".php-cs-fixer.dist.php" }],
       "fallback": { "file": "php-cs-fixer.php" }
     },
     "rubocop-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [
         { "file": ".rubocop.yml" },
         { "file": ".rubocop.yaml" },
@@ -187,7 +177,6 @@
       "fallback": { "file": "rubocop.yml" }
     },
     "rubocop-lint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [
         { "file": ".rubocop.yml" },
         { "file": ".rubocop.yaml" },
@@ -197,7 +186,6 @@
       "fallback": { "file": "rubocop.yml" }
     },
     "ruff-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [
         { "file": "ruff.toml" },
         { "file": ".ruff.toml" },
@@ -209,7 +197,6 @@
       "fallback": { "file": "ruff.toml" }
     },
     "ruff-lint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [
         { "file": "ruff.toml" },
         { "file": ".ruff.toml" },
@@ -221,7 +208,6 @@
       "fallback": { "file": "ruff.toml" }
     },
     "rumdl-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [
         { "file": ".rumdl.toml" },
         { "file": "rumdl.toml" },
@@ -231,7 +217,6 @@
       "fallback": { "file": "rumdl.toml" }
     },
     "rumdl-lint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [
         { "file": ".rumdl.toml" },
         { "file": "rumdl.toml" },
@@ -241,27 +226,22 @@
       "fallback": { "file": "rumdl.toml" }
     },
     "rustfmt": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [{ "file": "rustfmt.toml" }, { "file": ".rustfmt.toml" }],
       "fallback": { "file": "rustfmt.toml" }
     },
     "selene": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [{ "file": "selene.toml" }, { "file": ".selene.toml" }],
       "fallback": { "file": "selene.toml" }
     },
     "shellcheck": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [{ "file": ".shellcheckrc" }],
       "fallback": { "file": "shellcheckrc" }
     },
     "shfmt": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [{ "file": ".editorconfig" }],
       "fallback": { "file": "shfmt.toml" }
     },
     "stylua": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [
         { "file": "stylua.toml" },
         { "file": ".stylua.toml" },
@@ -270,23 +250,19 @@
       "fallback": { "file": "stylua.toml" }
     },
     "taplo-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [{ "file": "taplo.toml" }, { "file": ".taplo.toml" }],
       "fallback": { "file": "taplo.toml" }
     },
     "taplo-lint": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [{ "file": "taplo.toml" }, { "file": ".taplo.toml" }],
       "fallback": { "file": "taplo.toml" },
       "native": "none"
     },
     "typos": {
-      "envRoot": "CHECKRUN_AUTOLINT_DIR",
       "project": [{ "file": ".typos.toml" }, { "file": "typos.toml" }],
       "fallback": { "file": "typos.toml" }
     },
     "yamlfmt": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [{ "file": ".yamlfmt" }],
       "fallback": { "file": "yamlfmt.yaml" }
     }

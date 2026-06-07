@@ -67,9 +67,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "envRoot": {
-          "enum": ["CHECKRUN_AUTOFORMAT_DIR", "CHECKRUN_AUTOLINT_DIR"]
-        },
         "project": {
           "type": "array",
           "items": { "$ref": "#/$defs/configProbe" }

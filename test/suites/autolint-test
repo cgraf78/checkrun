@@ -30,8 +30,8 @@ CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
 _require_compatible_libc "autolint-test"
 
 AUTOLINT="$CHECKRUN_TEST_ROOT/bin/autolint"
-export CHECKRUN_AUTOLINT_DIR
-CHECKRUN_AUTOLINT_DIR=$(_checkrun_default_autoformat_dir)
+export CHECKRUN_CONFIG_DIR
+CHECKRUN_CONFIG_DIR=$(_checkrun_default_config_dir)
 
 # ---------------------------------------------------------------------------
 # Tests: CLI help
@@ -279,7 +279,7 @@ EOF
 chmod +x "$_parallel_mock/yq" "$_parallel_mock/shellcheck"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent AUTOLINT_PARALLEL_SYNC="$_parallel_sync" \
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent AUTOLINT_PARALLEL_SYNC="$_parallel_sync" \
   PATH="$_parallel_mock:$PATH" "$AUTOLINT" "$_parallel_dir/a.sh" "$_parallel_dir/b.sh" 2>&1)
 rc=$?
 set -e
@@ -350,7 +350,7 @@ EOF
 chmod +x "$_parallel_json_mock/yq" "$_parallel_json_mock/shellcheck"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent CHECKRUN_AUTOLINT_JOBS=2 \
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent CHECKRUN_AUTOLINT_JOBS=2 \
   AUTOLINT_PARALLEL_JSON_SYNC="$_parallel_json_sync" \
   PATH="$_parallel_json_mock:$PATH" \
   "$AUTOLINT" --json "$_parallel_json_dir/a.sh" "$_parallel_json_dir/b.sh" 2>&1)
@@ -698,7 +698,7 @@ cat >"$_td/CMakeLists.txt" <<'EOF'
 add_executable(app main.cpp)
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_cmakelint_cfg" PATH="$_cmakelint_mock:$PATH" "$AUTOLINT" "$_td/CMakeLists.txt" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cmakelint_cfg" PATH="$_cmakelint_mock:$PATH" "$AUTOLINT" "$_td/CMakeLists.txt" 2>&1)
 rc=$?
 set -e
 _assert_exit "cmake: CMakeLists.txt exits with cmake-lint status" 7 "$rc"
@@ -709,7 +709,7 @@ _assert_contains_path_arg "cmake: fallback config passed via --config-files" \
 
 echo 'include(foo)' >"$_td/module.cmake"
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_cmakelint_cfg" PATH="$_cmakelint_mock:$PATH" "$AUTOLINT" "$_td/module.cmake" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cmakelint_cfg" PATH="$_cmakelint_mock:$PATH" "$AUTOLINT" "$_td/module.cmake" 2>&1)
 rc=$?
 set -e
 _assert_exit "cmake: .cmake exits with cmake-lint status" 7 "$rc"
@@ -846,14 +846,14 @@ _assert_exit "toml: per-repo .taplo.toml wins — exits 0" 0 "$rc"
 _assert_contains_path_arg "toml: per-repo .taplo.toml passed via --config" \
   "--config " "$_taplo_repo/.taplo.toml" "$output"
 
-# No per-repo config + $CHECKRUN_AUTOLINT_DIR/taplo.toml present → fallback applies.
+# No per-repo config + $CHECKRUN_CONFIG_DIR/taplo.toml present → fallback applies.
 _alt_taplo=$(_tmpdir)
 cat >"$_alt_taplo/taplo.toml" <<'EOF'
 # fallback sentinel
 EOF
 echo 'k = "v"' >"$_td/fb.toml"
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_alt_taplo" PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_td/fb.toml" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_alt_taplo" PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_td/fb.toml" 2>&1)
 rc=$?
 set -e
 _assert_exit "toml: fallback taplo.toml — exits 0" 0 "$rc"
@@ -863,7 +863,7 @@ _assert_contains_path_arg "toml: fallback taplo.toml passed via --config" \
 # No per-repo config + no fallback → --no-schema.
 echo 'k = "v"' >"$_td/ns.toml"
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_td/ns.toml" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent PATH="$_taplo_mockbin:$PATH" "$AUTOLINT" "$_td/ns.toml" 2>&1)
 rc=$?
 set -e
 _assert_exit "toml: no configs → exits 0" 0 "$rc"
@@ -893,12 +893,12 @@ _assert_exit "lua: parent selene.toml — exits 0" 0 "$rc"
 _assert_contains_path_arg "lua: parent selene.toml passed via --config" \
   "--config " "$_selene_parent/selene.toml" "$output"
 
-# No per-repo config + $CHECKRUN_AUTOLINT_DIR/selene.toml present → fallback applies.
+# No per-repo config + $CHECKRUN_CONFIG_DIR/selene.toml present → fallback applies.
 _alt_selene=$(_tmpdir)
 : >"$_alt_selene/selene.toml"
 echo 'print("hi")' >"$_td/fb.lua"
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_alt_selene" PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_td/fb.lua" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_alt_selene" PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_td/fb.lua" 2>&1)
 rc=$?
 set -e
 _assert_exit "lua: fallback selene.toml — exits 0" 0 "$rc"
@@ -908,7 +908,7 @@ _assert_contains_path_arg "lua: fallback selene.toml passed via --config" \
 # No per-repo config + no fallback → no --config arg.
 echo 'print("hi")' >"$_td/nc.lua"
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_td/nc.lua" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent PATH="$_selene_mockbin:$PATH" "$AUTOLINT" "$_td/nc.lua" 2>&1)
 rc=$?
 set -e
 _assert_exit "lua: no configs → exits 0" 0 "$rc"
@@ -1017,7 +1017,7 @@ EOF
 echo 'var x = 1' >"$_biome_rel/project/test.js"
 set +e
 output=$(cd "$_biome_rel/launch" &&
-  CHECKRUN_AUTOLINT_DIR=cfg PATH="$_biome_cfg_mock:$PATH" "$AUTOLINT" "$_biome_rel/project/test.js" 2>&1)
+  CHECKRUN_CONFIG_DIR=cfg PATH="$_biome_cfg_mock:$PATH" "$AUTOLINT" "$_biome_rel/project/test.js" 2>&1)
 rc=$?
 set -e
 _assert_exit "js: relative fallback config dir exits 0 from another cwd" 0 "$rc"
@@ -1032,7 +1032,7 @@ cat >"$_biome_self/biome.json" <<'EOF'
 EOF
 set +e
 output=$(cd "$_biome_self" &&
-  CHECKRUN_AUTOLINT_DIR=/nonexistent PATH="$_biome_cfg_mock:$PATH" "$AUTOLINT" biome.json 2>&1)
+  CHECKRUN_CONFIG_DIR=/nonexistent PATH="$_biome_cfg_mock:$PATH" "$AUTOLINT" biome.json 2>&1)
 rc=$?
 set -e
 _assert_exit "js: relative self config exits 0" 0 "$rc"
@@ -1147,7 +1147,7 @@ all:
 	echo hi
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTOLINT" "$_td/Makefile" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTOLINT" "$_td/Makefile" 2>&1)
 rc=$?
 set -e
 _assert_exit "Makefile: checkmake exit propagates" 6 "$rc"
@@ -1158,7 +1158,7 @@ all:
 	echo hi
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTOLINT" "$_td/rules.mk" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTOLINT" "$_td/rules.mk" 2>&1)
 rc=$?
 set -e
 _assert_exit "mk: checkmake exit propagates" 6 "$rc"
@@ -1184,7 +1184,7 @@ all:
 	echo hi
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_cfg_target/Makefile" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_cfg_target/Makefile" 2>&1)
 rc=$?
 set -e
 _assert_exit "Makefile: fallback checkmake.ini exits 0" 0 "$rc"
@@ -1200,7 +1200,7 @@ all:
 	echo hi
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_repo/Makefile" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_checkmake_cfg" PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_repo/Makefile" 2>&1)
 rc=$?
 set -e
 _assert_exit "Makefile: per-repo checkmake.ini exits 0" 0 "$rc"
@@ -1238,7 +1238,7 @@ all:
 EOF
 set +e
 output=$(cd "$_checkmake_rel/launch" &&
-  CHECKRUN_AUTOLINT_DIR=cfg PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_rel/project/Makefile" 2>&1)
+  CHECKRUN_CONFIG_DIR=cfg PATH="$_checkmake_cfg_mock:$PATH" "$AUTOLINT" "$_checkmake_rel/project/Makefile" 2>&1)
 rc=$?
 set -e
 _assert_exit "Makefile: relative fallback checkmake.ini exits 0 from another cwd" 0 "$rc"
@@ -1619,7 +1619,7 @@ _rubocop_log="$_td/rubocop.log"
 : >"$_ruby_cfg/rubocop.yml"
 echo 'puts "hi"' >"$_td/test.rb"
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_ruby_cfg" RUBOCOP_LOG="$_rubocop_log" PATH="$_rubocop_mock:$PATH" "$AUTOLINT" "$_td/test.rb" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_ruby_cfg" RUBOCOP_LOG="$_rubocop_log" PATH="$_rubocop_mock:$PATH" "$AUTOLINT" "$_td/test.rb" 2>&1)
 rc=$?
 set -e
 _assert_exit "ruby: rubocop exit propagates" 12 "$rc"
@@ -1628,7 +1628,7 @@ _assert_contains_path_arg "ruby: fallback rubocop.yml passed via --config" \
   "--config " "$_ruby_cfg/rubocop.yml" "$output"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_ruby_cfg" RUBOCOP_LOG="$_rubocop_log" PATH="$_rubocop_mock:$PATH" "$AUTOLINT" --fix "$_td/test.rb" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_ruby_cfg" RUBOCOP_LOG="$_rubocop_log" PATH="$_rubocop_mock:$PATH" "$AUTOLINT" --fix "$_td/test.rb" 2>&1)
 rc=$?
 set -e
 _assert_exit "ruby: --fix exits 0 after autocorrect" 0 "$rc"
@@ -1754,7 +1754,7 @@ cat >"$_td/typo.txt" <<'EOF'
 This sentence has zzword.
 EOF
 set +e
-output=$(PATH="$_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/typo.txt" 2>&1)
+output=$(PATH="$_typos_mock:$PATH" CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" "$_td/typo.txt" 2>&1)
 rc=$?
 set -e
 _assert_exit "typos: invoked for plain text file" 7 "$rc"
@@ -1762,7 +1762,7 @@ _assert_contains "typos: command output shown" "MOCK-TYPOS-ARGS:" "$output"
 _assert_contains_path_arg "typos: target path passed" "" "$_td/typo.txt" "$output"
 
 set +e
-output=$(PATH="$_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" --fix "$_td/typo.txt" 2>&1)
+output=$(PATH="$_typos_mock:$PATH" CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" --fix "$_td/typo.txt" 2>&1)
 rc=$?
 set -e
 _assert_exit "typos: --fix maps to --write-changes" 0 "$rc"
@@ -1774,7 +1774,7 @@ cat >"$_typos_cfg_dir/typos.toml" <<'EOF'
 extend-ignore-re = []
 EOF
 set +e
-output=$(PATH="$_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR="$_typos_cfg_dir" "$AUTOLINT" --fix "$_td/typo.txt" 2>&1)
+output=$(PATH="$_typos_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_cfg_dir" "$AUTOLINT" --fix "$_td/typo.txt" 2>&1)
 rc=$?
 set -e
 _assert_exit "typos: fallback config exits 0" 0 "$rc"
@@ -1788,7 +1788,7 @@ extend-ignore-re = []
 EOF
 cp "$_td/typo.txt" "$_typos_repo/"
 set +e
-output=$(PATH="$_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR="$_typos_cfg_dir" "$AUTOLINT" --fix "$_typos_repo/typo.txt" 2>&1)
+output=$(PATH="$_typos_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_cfg_dir" "$AUTOLINT" --fix "$_typos_repo/typo.txt" 2>&1)
 rc=$?
 set -e
 _assert_exit "typos: per-repo config exits 0" 0 "$rc"
@@ -1796,13 +1796,13 @@ _assert_not_contains_path_arg "typos: per-repo config suppresses fallback" \
   "--config " "$_typos_cfg_dir" "$output"
 
 # ---------------------------------------------------------------------------
-# Tests: fallback configs (CHECKRUN_AUTOLINT_DIR) applied when no per-repo config
+# Tests: fallback configs (CHECKRUN_CONFIG_DIR) applied when no per-repo config
 # ---------------------------------------------------------------------------
 
-echo "=== Fallback configs (CHECKRUN_AUTOLINT_DIR) ==="
+echo "=== Fallback configs (CHECKRUN_CONFIG_DIR) ==="
 
-# Build a controlled CHECKRUN_AUTOLINT_DIR so these tests don't depend on the
-# contents of the user's real ~/.config/autoformat/.
+# Build a controlled CHECKRUN_CONFIG_DIR so these tests don't depend on the
+# contents of the user's real ~/.config/checkrun/.
 _alt_dir=$(_tmpdir)
 cat >"$_alt_dir/shellcheckrc" <<'EOF'
 disable=SC1091
@@ -1824,9 +1824,9 @@ cat >"$_td/sc-src.sh" <<'EOF'
 echo "all good"
 EOF
 set +e
-CHECKRUN_AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/sc-src.sh" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR="$_alt_dir" "$AUTOLINT" "$_td/sc-src.sh" >/dev/null 2>&1
 rc=$?
-CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/sc-src.sh" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" "$_td/sc-src.sh" >/dev/null 2>&1
 rc_no_cfg=$?
 set -e
 _assert_exit "sh: fallback shellcheckrc disables SC1091" 0 "$rc"
@@ -1838,7 +1838,7 @@ _sc_repo=$(_tmpdir)
 touch "$_sc_repo/.shellcheckrc"
 cp "$_td/sc-src.sh" "$_sc_repo/"
 set +e
-CHECKRUN_AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_sc_repo/sc-src.sh" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR="$_alt_dir" "$AUTOLINT" "$_sc_repo/sc-src.sh" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "sh: per-repo .shellcheckrc overrides fallback" 1 "$rc"
@@ -1852,9 +1852,9 @@ local x = 1 / 0
 print(x)
 EOF
   set +e
-  CHECKRUN_AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/lint.lua" >/dev/null 2>&1
+  CHECKRUN_CONFIG_DIR="$_alt_dir" "$AUTOLINT" "$_td/lint.lua" >/dev/null 2>&1
   rc=$?
-  CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/lint.lua" >/dev/null 2>&1
+  CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" "$_td/lint.lua" >/dev/null 2>&1
   rc_no_cfg=$?
   set -e
   _assert_exit "lua: fallback selene.toml allows divide_by_zero" 0 "$rc"
@@ -1868,9 +1868,9 @@ if command -v rumdl &>/dev/null; then
 open('$_td/doc.md','w').write('# Title\n\n' + 'x ' * 80 + 'end\n')
 "
   set +e
-  CHECKRUN_AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/doc.md" >/dev/null 2>&1
+  CHECKRUN_CONFIG_DIR="$_alt_dir" "$AUTOLINT" "$_td/doc.md" >/dev/null 2>&1
   rc=$?
-  CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/doc.md" >/dev/null 2>&1
+  CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" "$_td/doc.md" >/dev/null 2>&1
   rc_no_cfg=$?
   set -e
   _assert_exit "md: fallback rumdl.toml disables MD013" 0 "$rc"
@@ -1878,7 +1878,7 @@ open('$_td/doc.md','w').write('# Title\n\n' + 'x ' * 80 + 'end\n')
 
   # Per-repo .markdownlint.json counts as config (rumdl reads it for
   # compat) — fallback should NOT apply. Repo config keeps MD013 on,
-  # so long line fires even with CHECKRUN_AUTOLINT_DIR set.
+  # so long line fires even with CHECKRUN_CONFIG_DIR set.
   _md_repo=$(_tmpdir)
   cat >"$_md_repo/.markdownlint.json" <<'EOF'
 { "MD013": { "line_length": 80 } }
@@ -1887,7 +1887,7 @@ EOF
 open('$_md_repo/doc.md','w').write('# Title\n\n' + 'x ' * 80 + 'end\n')
 "
   set +e
-  CHECKRUN_AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_md_repo/doc.md" >/dev/null 2>&1
+  CHECKRUN_CONFIG_DIR="$_alt_dir" "$AUTOLINT" "$_md_repo/doc.md" >/dev/null 2>&1
   rc=$?
   set -e
   _assert_exit "md: .markdownlint.json overrides fallback" 1 "$rc"
@@ -1897,12 +1897,12 @@ open('$_md_repo/doc.md','w').write('# Title\n\n' + 'x ' * 80 + 'end\n')
 
 Text.
 EOF
-  output=$(CHECKRUN_AUTOLINT_DIR="$_alt_dir" "$AUTOLINT" "$_td/clean.md" 2>&1)
+  output=$(CHECKRUN_CONFIG_DIR="$_alt_dir" "$AUTOLINT" "$_td/clean.md" 2>&1)
   _assert_not_contains "md: clean rumdl output is quiet" "Success:" "$output"
 fi
 
 # hadolint: fallback config routing via mock. Verifies that autolint
-# passes `-c $CHECKRUN_AUTOLINT_DIR/hadolint.yaml` when no per-repo config exists,
+# passes `-c $CHECKRUN_CONFIG_DIR/hadolint.yaml` when no per-repo config exists,
 # and that per-repo `.hadolint.yaml` wins over the fallback.
 _hadolint_mock=$(_mock_bin)
 cat >"$_hadolint_mock/hadolint" <<'EOF'
@@ -1922,7 +1922,7 @@ FROM ubuntu
 EOF
 mv "$_td/fb-Dockerfile" "$_td/Dockerfile.fb"
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$AUTOLINT" "$_td/Dockerfile.fb" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$AUTOLINT" "$_td/Dockerfile.fb" 2>&1)
 rc=$?
 set -e
 _assert_exit "dockerfile: fallback hadolint.yaml — exits 0" 0 "$rc"
@@ -1938,7 +1938,7 @@ cat >"$_hadolint_repo/Dockerfile" <<'EOF'
 FROM ubuntu
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$AUTOLINT" "$_hadolint_repo/Dockerfile" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_alt_hadolint" PATH="$_hadolint_mock:$PATH" "$AUTOLINT" "$_hadolint_repo/Dockerfile" 2>&1)
 rc=$?
 set -e
 _assert_exit "dockerfile: per-repo .hadolint.yaml — exits 0" 0 "$rc"
@@ -1964,7 +1964,7 @@ cat >"$_td/fb.go" <<'EOF'
 package main
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_td/fb.go" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_td/fb.go" 2>&1)
 rc=$?
 set -e
 _assert_exit "go: fallback golangci-lint.yml — exits 0" 0 "$rc"
@@ -1981,7 +1981,7 @@ package main
 EOF
 set +e
 output=$(cd "$_gc_rel/launch" &&
-  CHECKRUN_AUTOLINT_DIR=cfg PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_rel/project/test.go" 2>&1)
+  CHECKRUN_CONFIG_DIR=cfg PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_rel/project/test.go" 2>&1)
 rc=$?
 set -e
 _assert_exit "go: relative fallback config exits 0 from another cwd" 0 "$rc"
@@ -1997,7 +1997,7 @@ cat >"$_gc_repo/test.go" <<'EOF'
 package main
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_repo/test.go" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_repo/test.go" 2>&1)
 rc=$?
 set -e
 _assert_exit "go: per-repo .golangci.yml — exits 0" 0 "$rc"
@@ -2005,7 +2005,7 @@ _assert_not_contains_path_arg "go: per-repo .golangci.yml — no --config fallba
   "--config " "$_alt_gc" "$output"
 
 # ---------------------------------------------------------------------------
-# Tests: ignore file ($CHECKRUN_AUTOLINT_DIR/ignore)
+# Tests: ignore file ($CHECKRUN_CONFIG_DIR/ignore)
 # ---------------------------------------------------------------------------
 
 echo "=== Ignore file ==="
@@ -2023,7 +2023,7 @@ cat >"$_ign_tgt/skipme.sh" <<'EOF'
 echo $undefined  # would normally trip SC2154
 EOF
 set +e
-CHECKRUN_AUTOLINT_DIR="$_ign_al_dir" "$AUTOLINT" "$_ign_tgt/skipme.sh" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR="$_ign_al_dir" "$AUTOLINT" "$_ign_tgt/skipme.sh" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "ignore: glob match skips linting" 0 "$rc"
@@ -2034,7 +2034,7 @@ cat >"$_ign_tgt/keepme.sh" <<'EOF'
 echo $undefined
 EOF
 set +e
-CHECKRUN_AUTOLINT_DIR="$_ign_al_dir" "$AUTOLINT" "$_ign_tgt/keepme.sh" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR="$_ign_al_dir" "$AUTOLINT" "$_ign_tgt/keepme.sh" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "ignore: non-match still lints" 1 "$rc"
@@ -2055,7 +2055,7 @@ cat >"$_ign_rel_repo/sub/other.sh" <<'EOF'
 echo $undefined
 EOF
 set +e
-output=$(cd "$_ign_rel_repo" && CHECKRUN_AUTOLINT_DIR="$_ign_al_dir" \
+output=$(cd "$_ign_rel_repo" && CHECKRUN_CONFIG_DIR="$_ign_al_dir" \
   "$AUTOLINT" sub/skipme.sh 2>&1)
 rc=$?
 set -e
@@ -2063,7 +2063,7 @@ _assert_exit "ignore: relative path still matches ignore glob" 0 "$rc"
 _assert_eq "ignore: relative ignored path emits no output" "" "$output"
 # Control: a non-ignored relative path still lints.
 set +e
-(cd "$_ign_rel_repo" && CHECKRUN_AUTOLINT_DIR="$_ign_al_dir" \
+(cd "$_ign_rel_repo" && CHECKRUN_CONFIG_DIR="$_ign_al_dir" \
   "$AUTOLINT" sub/other.sh >/dev/null 2>&1)
 rc=$?
 set -e
@@ -2131,7 +2131,7 @@ EOF
 chmod +x "$_phase_schema_validator"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" \
+output=$(CHECKRUN_CONFIG_DIR="$_phase_ign_dir" \
   CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
   CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
   "$AUTOLINT" "$_phase_ign_tgt/schema-only.json" 2>&1)
@@ -2142,7 +2142,7 @@ _assert_contains "spell-ignore: schema diagnostic is visible" "schema failed" "$
 _assert_not_contains "spell-ignore: typo checker is skipped" "typos ran" "$output"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" \
+output=$(CHECKRUN_CONFIG_DIR="$_phase_ign_dir" \
   CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
   CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
   "$AUTOLINT" "$_phase_ign_tgt/schema-skipped.json" 2>&1)
@@ -2152,7 +2152,7 @@ _assert_exit "schema-ignore: schema and spell phases can both be skipped" 0 "$rc
 _assert_eq "schema-ignore: no phase output when both are skipped" "" "$output"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" \
+output=$(CHECKRUN_CONFIG_DIR="$_phase_ign_dir" \
   CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
   CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
   "$AUTOLINT" "$_phase_ign_tgt/all-lint-skipped.json" 2>&1)
@@ -2162,7 +2162,7 @@ _assert_exit "lint-ignore: skips every lint phase" 0 "$rc"
 _assert_eq "lint-ignore: emits no output" "" "$output"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_phase_ign_dir" CHECKRUN_AUTOLINT_JOBS=1 \
+output=$(CHECKRUN_CONFIG_DIR="$_phase_ign_dir" CHECKRUN_AUTOLINT_JOBS=1 \
   PATH="$_phase_ign_bin:/usr/bin:/bin" \
   "$AUTOLINT" "$_phase_ign_tgt/tool-skipped.sh" 2>&1)
 rc=$?
@@ -2196,7 +2196,7 @@ _assert_exit "missing file: skips before yq requirement" 0 "$rc"
 _assert_eq "missing file: no yq error" "" "$output"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_ign_al_dir" PATH="$_noyq_noop_bin" \
+output=$(CHECKRUN_CONFIG_DIR="$_ign_al_dir" PATH="$_noyq_noop_bin" \
   "$AUTOLINT" "$_ign_tgt/skipme.sh" 2>&1)
 rc=$?
 set -e
@@ -2208,7 +2208,7 @@ ln -s "$(command -v bash)" "$_nojq_noop_bin/bash"
 ln -s "$(command -v yq)" "$_nojq_noop_bin/yq"
 
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR="$_ign_al_dir" PATH="$_nojq_noop_bin" \
+output=$(CHECKRUN_CONFIG_DIR="$_ign_al_dir" PATH="$_nojq_noop_bin" \
   "$AUTOLINT" --json "$_ign_tgt/skipme.sh" 2>&1)
 rc=$?
 set -e
@@ -2420,12 +2420,12 @@ _assert_exit "missing yq: exits 1" 1 "$rc"
 _assert_contains "missing yq: prints error" "autolint: yq is required" "$output"
 
 # ---------------------------------------------------------------------------
-# Tests: ruff check fallback (CHECKRUN_AUTOLINT_DIR/ruff.toml)
+# Tests: ruff check fallback (CHECKRUN_CONFIG_DIR/ruff.toml)
 # ---------------------------------------------------------------------------
 
 echo "=== ruff check fallback ==="
 
-# Controlled CHECKRUN_AUTOLINT_DIR with a ruff.toml that disables F401
+# Controlled CHECKRUN_CONFIG_DIR with a ruff.toml that disables F401
 # (unused-import). Without fallback, ruff's default rules catch
 # F401; with fallback, it's ignored.
 _ruff_dir=$(_tmpdir)
@@ -2439,9 +2439,9 @@ import os
 x = 1
 EOF
 set +e
-CHECKRUN_AUTOLINT_DIR="$_ruff_dir" "$AUTOLINT" "$_td/py-fallback.py" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR="$_ruff_dir" "$AUTOLINT" "$_td/py-fallback.py" >/dev/null 2>&1
 rc=$?
-CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" "$_td/py-fallback.py" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" "$_td/py-fallback.py" >/dev/null 2>&1
 rc_no_cfg=$?
 set -e
 _assert_exit "py: fallback ruff.toml ignores F401" 0 "$rc"
@@ -2455,7 +2455,7 @@ cat >"$_repo_ruff/ruff.toml" <<'EOF'
 EOF
 cp "$_td/py-fallback.py" "$_repo_ruff/"
 set +e
-CHECKRUN_AUTOLINT_DIR="$_ruff_dir" "$AUTOLINT" "$_repo_ruff/py-fallback.py" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR="$_ruff_dir" "$AUTOLINT" "$_repo_ruff/py-fallback.py" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "py: per-repo ruff.toml overrides fallback" 1 "$rc"
@@ -2467,7 +2467,7 @@ cat >"$_repo_pp/pyproject.toml" <<'EOF'
 EOF
 cp "$_td/py-fallback.py" "$_repo_pp/"
 set +e
-CHECKRUN_AUTOLINT_DIR="$_ruff_dir" "$AUTOLINT" "$_repo_pp/py-fallback.py" >/dev/null 2>&1
+CHECKRUN_CONFIG_DIR="$_ruff_dir" "$AUTOLINT" "$_repo_pp/py-fallback.py" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "py: pyproject[tool.ruff] overrides fallback" 1 "$rc"
@@ -2602,7 +2602,7 @@ import os
 x = 1
 EOF
 set +e
-output=$(CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" --json "$_td/json-bad.py" 2>/dev/null)
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" --json "$_td/json-bad.py" 2>/dev/null)
 rc=$?
 set -e
 _assert_exit "json py: exits non-zero on lint error" 1 "$rc"
@@ -2877,7 +2877,7 @@ cat >"$_td/json-typo.txt" <<'EOF'
 This sentence has zzword.
 EOF
 set +e
-output=$(PATH="$_json_typos_mock:$PATH" CHECKRUN_AUTOLINT_DIR=/nonexistent "$AUTOLINT" --json "$_td/json-typo.txt" 2>/dev/null)
+output=$(PATH="$_json_typos_mock:$PATH" CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" --json "$_td/json-typo.txt" 2>/dev/null)
 rc=$?
 set -e
 _assert_exit "json typos: exits non-zero" 2 "$rc"

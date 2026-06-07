@@ -319,7 +319,7 @@ Validation:
 
 - config fallback tests for Ruff, Biome, Taplo, Rumdl, Rustfmt, CMake,
   RuboCop, Hadolint, GolangCI-Lint, Selene, and yamlfmt
-- tests for relative `CHECKRUN_AUTOFORMAT_DIR` and `CHECKRUN_AUTOLINT_DIR`
+- tests for relative `CHECKRUN_CONFIG_DIR`
 - project-local config wins over fallback config
 - fallback config is used only when the fallback file exists
 - config roots are absolutized before adapter execution
