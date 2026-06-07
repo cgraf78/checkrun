@@ -414,16 +414,16 @@ if [[ -f "$HOME/.config/checkrun/associations.json" ]]; then
   for config_path in \
     ".config/checkrun/associations.json" \
     ".config/lazygit/config.yml" \
-    ".config/autoformat/biome.json" \
+    ".config/checkrun/biome.json" \
     ".config/mise/config.toml" \
     ".config/bottom/bottom.toml" \
-    ".config/autoformat/hadolint.yaml" \
-    ".config/autoformat/ruff.toml" \
-    ".config/autoformat/rustfmt.toml" \
-    ".config/autoformat/stylua.toml" \
-    ".config/autoformat/taplo.toml" \
-    ".config/autoformat/typos.toml" \
-    ".config/autoformat/rumdl.toml"; do
+    ".config/checkrun/hadolint.yaml" \
+    ".config/checkrun/ruff.toml" \
+    ".config/checkrun/rustfmt.toml" \
+    ".config/checkrun/stylua.toml" \
+    ".config/checkrun/taplo.toml" \
+    ".config/checkrun/typos.toml" \
+    ".config/checkrun/rumdl.toml"; do
     set +e
     output=$("$SCRIPT" "$HOME/$config_path" 2>&1)
     rc=$?

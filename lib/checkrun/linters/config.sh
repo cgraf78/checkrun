@@ -127,7 +127,7 @@ _lint_taplo() {
   local args=()
 
   command -v taplo &>/dev/null || return 0
-  # Three-tier: per-repo .taplo.toml -> $CHECKRUN_AUTOLINT_DIR/taplo.toml -> --no-schema.
+  # Three-tier: per-repo .taplo.toml -> $CHECKRUN_CONFIG_DIR/taplo.toml -> --no-schema.
   # --no-schema avoids taplo fetching the remote schema catalog on locked-down
   # hosts and on TOMLs that do not declare a schema anyway. The registry tells us
   # which tier applied; the adapter only spells the taplo CLI flags.

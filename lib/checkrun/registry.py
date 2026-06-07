@@ -46,7 +46,6 @@ _LINTER_ADAPTER_DIR = _CHECKRUN_ROOT / "lib/checkrun/linters"
 # introduced in only one caller, drift comes back immediately.
 _PHASES = {"format", "lint", "spell", "schema", "tool"}
 _PLAN_PHASES = {"format", "lint"}
-_ENV_ROOTS = {"CHECKRUN_AUTOFORMAT_DIR", "CHECKRUN_AUTOLINT_DIR"}
 _DOWNSTREAM_KEYS = {"sley", "nvim"}
 _PHASE_IGNORE_FILES = {
     "format": "format-ignore",
@@ -365,11 +364,6 @@ def _validate_invariants(registry: dict[str, Any]) -> None:
         names = ", ".join(sorted(unused_adapters))
         raise RegistryError(f"unused shell-function adapters are not allowed: {names}")
 
-    for name, policy in config_policies.items():
-        env_root = policy.get("envRoot")
-        if env_root is not None and env_root not in _ENV_ROOTS:
-            raise RegistryError(f"{name}: unknown env root: {env_root}")
-
     for item in registry["filetypes"]["shebangs"]:
         has_contains = "contains" in item
         has_any = "containsAny" in item
@@ -546,16 +540,14 @@ def _skipped_record(step: dict[str, Any], reason: str, **details: Any) -> dict[s
     return skipped
 
 
-def _config_root(env_name: str) -> Path:
-    # Lint defaults through CHECKRUN_AUTOFORMAT_DIR because most personal policy
-    # files live in one dotfiles directory. Resolving roots here, before adapter
-    # execution, protects tools that cd or discover config from process cwd.
-    if env_name == "CHECKRUN_AUTOLINT_DIR":
-        value = os.environ.get("CHECKRUN_AUTOLINT_DIR") or os.environ.get("CHECKRUN_AUTOFORMAT_DIR")
-    else:
-        value = os.environ.get(env_name)
+def _config_root() -> Path:
+    # Resolving roots before adapter execution protects tools that cd or
+    # discover config from process cwd. Shell entrypoints export their resolved
+    # value so planning and execution agree; direct `checkrun plan/explain`
+    # callers use the same default here.
+    value = os.environ.get("CHECKRUN_CONFIG_DIR")
     if not value:
-        value = str(Path.home() / ".config/autoformat")
+        value = str(Path.home() / ".config/checkrun")
     value = os.path.expandvars(os.path.expanduser(value))
     path = Path(value)
     if not path.is_absolute():
@@ -573,8 +565,7 @@ def _walk_config(dir_path: Path, filename: str) -> Path | None:
     # configs, but it also means a stray config file at $HOME (e.g.
     # ~/.shellcheckrc) will be picked up by ANY file under $HOME that has no
     # closer project config. If you want personal fallback policy, prefer
-    # putting it under $CHECKRUN_AUTOFORMAT_DIR / $CHECKRUN_AUTOLINT_DIR (the
-    # `envRoot` fallback mechanism in registry.json) so the registry can make
+    # putting it under $CHECKRUN_CONFIG_DIR so the registry can make
     # the source explicit instead of relying on the walk's accidental reach.
     current = dir_path.resolve(strict=False)
     previous: Path | None = None
@@ -638,8 +629,8 @@ def _resolve_config(
         return {"policy": policy_name, "source": "project", "path": str(found)}
 
     fallback = policy.get("fallback")
-    if fallback and policy.get("envRoot"):
-        root = _config_root(str(policy["envRoot"]))
+    if fallback:
+        root = _config_root()
         candidate = (root / fallback["file"]).resolve(strict=False)
         if candidate.is_file():
             if policy.get("selfConfigGuard") is True and candidate == path.resolve(strict=False):
@@ -820,7 +811,7 @@ def _plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None
     }
     for plan_phase in phases:
         if plan_phase == "format":
-            config = _config_root("CHECKRUN_AUTOFORMAT_DIR")
+            config = _config_root()
             ignored = _ignore_match(path, config, "format")
             candidate_steps, skipped = (
                 _collect_steps(registry, path, filetype, "format") if path.is_file() else ([], [])
@@ -841,7 +832,7 @@ def _plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None
                 "configDir": str(config),
             }
         elif plan_phase == "lint":
-            config = _config_root("CHECKRUN_AUTOLINT_DIR")
+            config = _config_root()
             lint_ignore = _ignore_match(path, config, "lint")
             spell_ignore = _ignore_match(path, config, "spell")
             schema_ignore = _ignore_match(path, config, "schema")

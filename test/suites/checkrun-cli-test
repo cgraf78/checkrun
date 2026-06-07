@@ -125,7 +125,7 @@ touch \
   "$_td/.github/workflows/build.yml" \
   "$_td/.config/example/settings.json"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/keep.py" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/keep.py" 2>&1)
 rc=$?
 _assert_exit "explain: python exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -140,7 +140,7 @@ assert item["format"]["ignored"] is False
 '
 _assert_exit "explain: reports python formatter and linter" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/skip.py" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/skip.py" 2>&1)
 rc=$?
 _assert_exit "explain: ignored format exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -154,7 +154,7 @@ assert item["lint"]["tools"][0]["tool"] == "ruff"
 '
 _assert_exit "explain: reports phase-specific format ignore" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/biome.json" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/biome.json" 2>&1)
 rc=$?
 _assert_exit "explain: tool-ignore exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -169,7 +169,7 @@ assert [step["reason"] for step in item["lint"]["skipped"] if step["tool"] == "b
 	'
 _assert_exit "explain: reports backend tool ignore and skipped step separately" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/plain.yaml" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/plain.yaml" 2>&1)
 rc=$?
 _assert_exit "explain: generic yaml exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -185,7 +185,7 @@ assert all(step["reason"] == "path-pattern" for step in item["lint"]["skipped"])
 	'
 _assert_exit "explain: generic yaml explains skipped workflow-only linters" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/.github/workflows/build.yml" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" explain --json "$_td/.github/workflows/build.yml" 2>&1)
 rc=$?
 _assert_exit "explain: workflow yaml exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -213,7 +213,7 @@ _assert_exit "explain: reports matching schema association" 0 "$?"
 
 echo "=== checkrun: plan ==="
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/keep.py" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/keep.py" 2>&1)
 rc=$?
 _assert_exit "plan: lint phase exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -241,7 +241,7 @@ cat >"$_sc_repo/script.sh" <<'EOF'
 #!/bin/bash
 echo ok
 EOF
-output=$(CHECKRUN_AUTOLINT_DIR="$_sc_cfg" "$CHECKRUN" plan --json --phase lint "$_sc_repo/script.sh" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_sc_cfg" "$CHECKRUN" plan --json --phase lint "$_sc_repo/script.sh" 2>&1)
 rc=$?
 _assert_exit "plan: shellcheck project config exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -255,7 +255,7 @@ assert shellcheck["config"]["path"].endswith("/.shellcheckrc")
 '
 _assert_exit "plan: shellcheck project config suppresses fallback" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
 rc=$?
 _assert_exit "plan: format phase exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -269,7 +269,7 @@ assert item["format"]["steps"][0]["adapter"] == "ruff-format"
 '
 _assert_exit "plan: format phase includes formatter step" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json "$_td/keep.py" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" plan --json "$_td/keep.py" 2>&1)
 rc=$?
 _assert_exit "plan: omitted phase exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -282,7 +282,7 @@ assert "lint" in item
 '
 _assert_exit "plan: omitted phase includes all phases" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/plain.yaml" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/plain.yaml" 2>&1)
 rc=$?
 _assert_exit "plan: generic yaml exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '
@@ -303,7 +303,7 @@ assert all(step["reason"] == "path-pattern" for step in skipped)
 '
 _assert_exit "plan: generic yaml explains workflow-only skips" 0 "$?"
 
-output=$(CHECKRUN_AUTOFORMAT_DIR="$_cfg" CHECKRUN_AUTOLINT_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/.github/workflows/build.yml" 2>&1)
+output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/.github/workflows/build.yml" 2>&1)
 rc=$?
 _assert_exit "plan: workflow yaml exits 0" 0 "$rc"
 printf '%s\n' "$output" | python3 -c '

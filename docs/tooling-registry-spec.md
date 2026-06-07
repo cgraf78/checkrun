@@ -71,7 +71,7 @@ Checkrun owns:
 Dotfiles or project repos own:
 
 - actual config file contents
-- global fallback config files under `~/.config/autoformat`
+- global fallback config files under `~/.config/checkrun`
 - project-local tool configs
 - ignore files under the configured Checkrun config root
 - schema association policy instances under `~/.config/checkrun`
@@ -325,7 +325,6 @@ not own the content of those files.
 {
   "configPolicies": {
     "ruff-format": {
-      "envRoot": "CHECKRUN_AUTOFORMAT_DIR",
       "project": [
         { "file": "ruff.toml" },
         { "file": ".ruff.toml" },
@@ -355,9 +354,7 @@ Adapters still own CLI details such as `--config`, `--config-path`,
 
 Config root semantics:
 
-- `CHECKRUN_AUTOFORMAT_DIR` defaults to `~/.config/autoformat`.
-- `CHECKRUN_AUTOLINT_DIR` defaults to `CHECKRUN_AUTOFORMAT_DIR`, then
-  `~/.config/autoformat`.
+- `CHECKRUN_CONFIG_DIR` defaults to `~/.config/checkrun`.
 - `~` and environment variables in configured roots should be expanded before
   paths are normalized.
 - relative config roots must be resolved to absolute paths before adapters run,
@@ -514,12 +511,12 @@ Example:
             "config": {
               "policy": "ruff-format",
               "source": "fallback",
-              "path": "/home/user/.config/autoformat/ruff.toml"
+              "path": "/home/user/.config/checkrun/ruff.toml"
             }
           }
         ],
         "skipped": [],
-        "configDir": "/home/user/.config/autoformat"
+        "configDir": "/home/user/.config/checkrun"
       }
     }
   ]

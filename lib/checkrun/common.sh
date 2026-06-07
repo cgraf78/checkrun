@@ -47,6 +47,19 @@ _abs_path() {
   fi
 }
 
+_checkrun_config_dir() {
+  local dir="${CHECKRUN_CONFIG_DIR:-$HOME/.config/checkrun}"
+
+  # Resolve existing relative roots once at process startup. Backends may run
+  # from package directories or tool-specific cwd choices, so config paths must
+  # already be cwd-independent before planning hands them to adapters.
+  if [ -d "$dir" ]; then
+    _abs_dir "$dir"
+  else
+    printf '%s\n' "$dir"
+  fi
+}
+
 _checkrun_python_usable() {
   local python="$1"
 
