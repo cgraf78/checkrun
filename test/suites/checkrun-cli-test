@@ -25,6 +25,44 @@ _assert_contains "help: lists capabilities command" "capabilities" "$output"
 _assert_contains "help: lists registry command" "registry" "$output"
 _assert_contains "help: lists plan command" "plan" "$output"
 _assert_contains "help: lists explain command" "explain" "$output"
+_assert_contains "help: lists schema command" "schema" "$output"
+
+output=$("$CHECKRUN" schema --help 2>&1)
+rc=$?
+_assert_exit "schema help: --help exits 0" 0 "$rc"
+_assert_contains "schema help: lists refresh command" "refresh" "$output"
+
+output=$("$CHECKRUN" schema refresh --help 2>&1)
+rc=$?
+_assert_exit "schema refresh help: --help exits 0" 0 "$rc"
+_assert_contains "schema refresh help: lists check mode" "--check" "$output"
+_assert_contains "schema refresh help: lists association filter" "--association" "$output"
+
+_schema_python_bin=$(_mock_bin)
+_schema_python_marker="$_schema_python_bin/selected"
+cat >"$_schema_python_bin/python3-no-tomllib" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-c" && "\${2:-}" == "import tomllib" ]]; then
+  exit 1
+fi
+if [[ "\${1:-}" != "-c" ]]; then
+  touch "$_schema_python_marker"
+fi
+exec "$(command -v python3)" "\$@"
+EOF
+chmod +x "$_schema_python_bin/python3-no-tomllib"
+output=$(CHECKRUN_PYTHON="$_schema_python_bin/python3-no-tomllib" "$CHECKRUN" schema refresh --help 2>&1)
+rc=$?
+_assert_exit "schema refresh: does not require registry tomllib floor" 0 "$rc"
+_assert_file_exists "schema refresh: uses python without tomllib probe" "$_schema_python_marker"
+_assert_contains "schema refresh: selected python still shows help" "--check" "$output"
+
+set +e
+output=$("$CHECKRUN" schema missing 2>&1)
+rc=$?
+set -e
+_assert_exit "schema: unknown subcommand exits usage-style non-zero" 2 "$rc"
+_assert_contains "schema: unknown subcommand is reported" "unknown command: missing" "$output"
 
 echo "=== checkrun: capabilities ==="
 

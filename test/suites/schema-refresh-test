@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# schema-refresh-test — unit tests for public schema payload refresh.
+#
+# Usage: schema-refresh-test
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "schema-refresh-test"
+
+SCRIPT="$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema_refresh.py"
+CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
+
+echo "=== schema-refresh: direct command behavior ==="
+
+_td=$(_tmpdir)
+_home="$_td/home"
+_remote="$_td/remote"
+_schemas="$_home/.local/share/checkrun/schemas"
+_policy="$_home/.config/checkrun/associations.json"
+mkdir -p "$_home/.config/checkrun" "$_remote" "$_schemas"
+
+cat >"$_remote/settings.schema.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"enabled":{"type":"boolean"}}}
+JSON
+cat >"$_remote/extra.schema.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"name":{"type":"string"}}}
+JSON
+cat >"$_remote/bad-json.schema.json" <<'JSON'
+{"$schema":
+JSON
+cat >"$_remote/bad-schema.schema.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-07/schema#","type":"not-a-real-type"}
+JSON
+
+settings_source="file://$_remote/settings.schema.json"
+extra_source="file://$_remote/extra.schema.json"
+bad_json_source="file://$_remote/bad-json.schema.json"
+bad_schema_source="file://$_remote/bad-schema.schema.json"
+
+cat >"$_policy" <<JSON
+{
+  "version": 1,
+  "schemaDataDir": "$_schemas",
+  "associations": [
+    {
+      "name": "Settings",
+      "format": "json",
+      "schema": "settings.schema.json",
+      "source": "$settings_source",
+      "matches": [".config/example/settings.json"],
+      "enforce": true
+    },
+    {
+      "name": "Extra",
+      "format": "json",
+      "schema": "extra.schema.json",
+      "source": "$extra_source",
+      "matches": [".config/example/extra.json"],
+      "enforce": true
+    },
+    {
+      "name": "Dependency-owned",
+      "format": "json",
+      "dependency": "cgraf78/sley",
+      "schema": "share/sley/schemas/verify.schema.json",
+      "source": "$settings_source",
+      "matches": [".config/sley/verify.json"],
+      "enforce": true
+    },
+    {
+      "name": "Local only",
+      "format": "json",
+      "schema": "local-only.schema.json",
+      "matches": [".config/example/local.json"],
+      "enforce": true
+    },
+    {
+      "name": "Bad JSON",
+      "format": "json",
+      "schema": "bad-json.schema.json",
+      "source": "$bad_json_source",
+      "matches": [".config/example/bad-json.json"],
+      "enforce": true
+    },
+    {
+      "name": "Bad Schema",
+      "format": "json",
+      "schema": "bad-schema.schema.json",
+      "source": "$bad_schema_source",
+      "matches": [".config/example/bad-schema.json"],
+      "enforce": true
+    }
+  ]
+}
+JSON
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association Settings 2>&1)
+rc=$?
+set -e
+_assert_exit "refresh: creates missing schema payload" 0 "$rc"
+_assert_contains "refresh: reports created payload" "created Settings" "$output"
+_assert_file_exists "refresh: writes destination schema" "$_schemas/settings.schema.json"
+_assert_contains "refresh: writes canonical JSON" $'\n  "type": "object",' "$(<"$_schemas/settings.schema.json")"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association Settings --check 2>&1)
+rc=$?
+set -e
+_assert_exit "check: current schema exits 0" 0 "$rc"
+_assert_contains "check: current schema is reported" "current Settings" "$output"
+
+cat >"$_remote/settings.schema.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"enabled":{"type":"boolean"},"mode":{"type":"string"}}}
+JSON
+before=$(<"$_schemas/settings.schema.json")
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association Settings --check 2>&1)
+rc=$?
+set -e
+_assert_exit "check: changed schema exits non-zero" 1 "$rc"
+_assert_contains "check: reports pending update" "changed Settings" "$output"
+_assert_contains "check: reports no-write mode" "would update" "$output"
+_assert_eq "check: does not rewrite existing payload" "$before" "$(<"$_schemas/settings.schema.json")"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association Settings 2>&1)
+rc=$?
+set -e
+_assert_exit "refresh: updates changed schema" 0 "$rc"
+_assert_contains "refresh: reports updated payload" "updated Settings" "$output"
+_assert_contains "refresh: updated payload contains new property" '"mode": {' "$(<"$_schemas/settings.schema.json")"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --check 2>&1)
+rc=$?
+set -e
+_assert_exit "check all: missing refreshable payload exits non-zero" 1 "$rc"
+_assert_contains "check all: reports would create" "changed Extra" "$output"
+_assert_not_contains "check all: skips dependency-owned source" "Dependency-owned" "$output"
+_assert_not_contains "check all: skips source-less local schema" "Local only" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association Extra 2>&1)
+rc=$?
+set -e
+_assert_exit "refresh: creates second payload" 0 "$rc"
+_assert_contains "refresh: second payload created" "created Extra" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association "Bad JSON" 2>&1)
+rc=$?
+set -e
+_assert_exit "refresh: invalid JSON exits non-zero" 1 "$rc"
+_assert_contains "refresh: invalid JSON reports parse failure" "schema is not valid JSON" "$output"
+if [[ ! -e "$_schemas/bad-json.schema.json" ]]; then
+  _pass "refresh: invalid JSON does not create payload"
+else
+  _fail "refresh: invalid JSON does not create payload"
+fi
+
+set +e
+python3 - <<'PY'
+import importlib.util
+raise SystemExit(0 if importlib.util.find_spec("jsonschema") else 1)
+PY
+jsonschema_rc=$?
+set -e
+if [[ "$jsonschema_rc" -eq 0 ]]; then
+  cat >"$_schemas/bad-schema.schema.json" <<'JSON'
+{"existing": true}
+JSON
+  set +e
+  output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association "Bad Schema" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "refresh: invalid JSON Schema exits non-zero" 1 "$rc"
+  _assert_contains "refresh: invalid JSON Schema reports validation failure" "invalid JSON Schema" "$output"
+  _assert_eq "refresh: invalid JSON Schema keeps old payload" '{"existing": true}' "$(<"$_schemas/bad-schema.schema.json")"
+else
+  echo "  SKIP: invalid JSON Schema refresh test (jsonschema unavailable)"
+fi
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association Missing 2>&1)
+rc=$?
+set -e
+_assert_exit "selection: missing association exits usage-style non-zero" 2 "$rc"
+_assert_contains "selection: missing association names requested item" "Missing" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --timeout 0 2>&1)
+rc=$?
+set -e
+_assert_exit "args: zero timeout exits usage-style non-zero" 2 "$rc"
+_assert_contains "args: zero timeout reports validation error" "timeout must be greater than zero" "$output"
+
+_bad_home=$(_tmpdir)
+set +e
+output=$(HOME="$_bad_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_home/missing.json" "$SCRIPT" 2>&1)
+rc=$?
+set -e
+_assert_exit "policy: missing policy exits usage-style non-zero" 2 "$rc"
+_assert_contains "policy: missing policy is reported" "schema policy not found" "$output"
+
+echo "=== schema-refresh: checkrun command dispatch ==="
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$CHECKRUN" schema refresh --association Settings --check 2>&1)
+rc=$?
+set -e
+_assert_exit "checkrun schema refresh: dispatches through top-level command" 0 "$rc"
+_assert_contains "checkrun schema refresh: reports current selected schema" "current Settings" "$output"
+
+_test_summary

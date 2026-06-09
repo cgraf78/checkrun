@@ -61,23 +61,23 @@ _checkrun_config_dir() {
 }
 
 _checkrun_python_usable() {
-  local python="$1"
+  local python="$1" probe="${2:-import tomllib}"
 
-  # The registry uses stdlib `tomllib`, so "has a python3 executable" is not a
-  # strong enough contract. macOS still ships older `/usr/bin/python3` versions
-  # on some runner images; using them produces a traceback in constrained-PATH
-  # hook tests before Checkrun can print its own diagnostics.
+  # Callers choose the import probe that matches their dependency floor. The
+  # registry needs stdlib `tomllib`, while maintenance helpers that only use
+  # older stdlib modules should not reject otherwise-good Python 3 installs.
   [ -x "$python" ] || return 1
-  "$python" -c 'import tomllib' >/dev/null 2>&1
+  "$python" -c "$probe" >/dev/null 2>&1
 }
 
 _checkrun_python() {
-  local candidate resolved
+  local candidate resolved probe="${1:-import tomllib}"
 
   # Hooks and tests often constrain PATH to prove missing formatter/linter
-  # behavior. Registry planning still needs Python in those environments, so do
-  # not rely solely on `/usr/bin/env python3` from the registry script shebang.
-  if [ -n "${CHECKRUN_PYTHON:-}" ] && _checkrun_python_usable "$CHECKRUN_PYTHON"; then
+  # behavior. Python entry points still need an interpreter in those
+  # environments, so do not rely solely on `/usr/bin/env python3` from script
+  # shebangs.
+  if [ -n "${CHECKRUN_PYTHON:-}" ] && _checkrun_python_usable "$CHECKRUN_PYTHON" "$probe"; then
     printf '%s\n' "$CHECKRUN_PYTHON"
     return 0
   fi
@@ -85,14 +85,14 @@ _checkrun_python() {
   for candidate in python3 /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
     case "$candidate" in
       */*)
-        _checkrun_python_usable "$candidate" || continue
+        _checkrun_python_usable "$candidate" "$probe" || continue
         printf '%s\n' "$candidate"
         return 0
         ;;
       *)
         if command -v "$candidate" >/dev/null 2>&1; then
           resolved=$(command -v "$candidate")
-          _checkrun_python_usable "$resolved" || continue
+          _checkrun_python_usable "$resolved" "$probe" || continue
           printf '%s\n' "$resolved"
           return 0
         fi
