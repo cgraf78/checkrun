@@ -202,6 +202,35 @@ set -e
 _assert_exit "args: zero timeout exits usage-style non-zero" 2 "$rc"
 _assert_contains "args: zero timeout reports validation error" "timeout must be greater than zero" "$output"
 
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --timeout nan 2>&1)
+rc=$?
+set -e
+_assert_exit "args: NaN timeout exits usage-style non-zero" 2 "$rc"
+_assert_contains "args: NaN timeout reports validation error" "timeout must be finite" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --timeout inf 2>&1)
+rc=$?
+set -e
+_assert_exit "args: infinite timeout exits usage-style non-zero" 2 "$rc"
+_assert_contains "args: infinite timeout reports validation error" "timeout must be finite" "$output"
+
+_bad_policy="$_home/.config/checkrun/bad-associations.json"
+cat >"$_bad_policy" <<JSON
+{
+  "version": 1,
+  "schemaDataDir": "$_schemas",
+  "associations": {}
+}
+JSON
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy" "$SCRIPT" --check 2>&1)
+rc=$?
+set -e
+_assert_exit "policy: malformed associations exits usage-style non-zero" 2 "$rc"
+_assert_contains "policy: malformed associations is reported" "associations must be a list" "$output"
+
 _bad_home=$(_tmpdir)
 set +e
 output=$(HOME="$_bad_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_home/missing.json" "$SCRIPT" 2>&1)
