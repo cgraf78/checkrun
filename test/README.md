@@ -6,8 +6,8 @@ the focused suites under `test/suites/`.
 ## Suite Scope
 
 - `checkrun-cli-test` covers user-facing command behavior.
-- `registry-test`, `capabilities-test`, and `schema-lint-test` cover structured
-  APIs and schema policy.
+- `registry-test`, `capabilities-test`, `schema-lint-test`, and
+  `schema-refresh-test` cover structured APIs and schema policy.
 - `autoformat-test` and `autolint-test` protect the compatibility commands.
 - `nvim-test` covers the optional Neovim Lua adapter.
 

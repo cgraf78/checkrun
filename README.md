@@ -85,6 +85,10 @@ own toolchain through the host environment or integration layer.
   explicit commands, environment, and working directories when they do not want
   the PATH/default-script behavior.
 - `lib/checkrun/schemas/schema-lint.py` validates files through that policy.
+- `lib/checkrun/schemas/schema_refresh.py` refreshes pinned public schema
+  payloads from association `source` URLs. It is exposed as
+  `checkrun schema refresh` so host repos can run the same updater directly or
+  from scheduled CI.
 - `share/checkrun/schemas/associations.schema.json` is the JSON Schema for
   schema association policy files.
 - `share/checkrun/shell.sh` is a stable no-op shell loader for integration
@@ -165,6 +169,27 @@ Set `CHECKRUN_SCHEMA_ASSOCIATIONS` to point at a different policy file for a
 single run, test fixture, or integration harness. Local schema payload names
 resolve under `.local/share/checkrun/schemas` by default; a policy can override
 that with `schemaDataDir`.
+
+Normal schema validation never fetches association `source` URLs. `schema-lint`
+uses local schema payloads through `schema_policy.schema_path()` so hooks and CI
+remain deterministic offline. Editors can still prefer public `source` URLs
+through the `--lsp-schemas` projection.
+
+Refresh pinned public schema payloads explicitly:
+
+```bash
+checkrun schema refresh
+checkrun schema refresh --check
+checkrun schema refresh --association "Ruff fallback config"
+```
+
+The refresh command selects associations that declare `source` and do not
+declare `dependency`; dependency-owned schemas are refreshed by their owning
+repos. Fetched payloads must be valid JSON, and when `jsonschema` is available
+they must also validate as JSON Schemas before replacing the pinned file.
+Writes are atomic and use a canonical generated JSON layout so future diffs are
+stable. `--check` reports drift without writing and is intended for scheduled
+CI in host repos that track schema payloads.
 
 ## Implementation Layout
 

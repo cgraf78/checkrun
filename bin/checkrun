@@ -39,6 +39,15 @@ _run_registry() {
   exec "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"
 }
 
+_run_schema_refresh() {
+  local python
+  python=$(_checkrun_python 'import sys') || {
+    echo "checkrun: python3 is required for schema refresh" >&2
+    exit 127
+  }
+  exec "$python" "$CHECKRUN_LIB_DIR/schemas/schema_refresh.py" "$@"
+}
+
 _usage() {
   cat <<'EOF'
 Usage: checkrun COMMAND [ARGS...]
@@ -50,6 +59,7 @@ Commands:
             print Checkrun capability metadata
   plan      emit formatter/linter execution plans
   explain   explain formatter/linter/schema policy for files
+  schema    schema maintenance commands
   format    run autoformat compatibility entry point
   lint      run autolint compatibility entry point
   check     alias for lint
@@ -91,6 +101,27 @@ case "$cmd" in
   explain)
     shift
     _run_registry explain "$@"
+    ;;
+  schema)
+    shift
+    case "${1:-}" in
+      refresh)
+        shift
+        _run_schema_refresh "$@"
+        ;;
+      -h | --help | help | "")
+        cat <<'EOF'
+Usage: checkrun schema COMMAND [ARGS...]
+
+Commands:
+  refresh   refresh pinned public schema payloads from association sources
+EOF
+        ;;
+      *)
+        printf 'checkrun schema: unknown command: %s\n' "$1" >&2
+        exit 2
+        ;;
+    esac
     ;;
   format | fmt)
     shift
