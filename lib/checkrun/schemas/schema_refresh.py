@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import tempfile
 import urllib.error
@@ -83,7 +84,7 @@ def _refresh_candidates(
 
     associations = policy.get("associations", [])
     if not isinstance(associations, list):
-        return []
+        raise RefreshError("schema policy associations must be a list")
 
     candidates: list[Candidate] = []
     for item in associations:
@@ -251,6 +252,11 @@ def _positive_timeout(value: str) -> float:
         timeout = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("timeout must be a number") from exc
+    if not math.isfinite(timeout):
+        # argparse accepts float spellings like "nan" and "inf", but socket
+        # timeout handling does not. Reject them here so unattended refresh jobs
+        # get a normal usage error instead of a transport-specific traceback.
+        raise argparse.ArgumentTypeError("timeout must be finite")
     if timeout <= 0:
         # The timeout is a reliability control, not a scheduling primitive. A
         # zero or negative value makes urllib fail in transport-specific ways,
@@ -279,7 +285,11 @@ def run(
         print(f"schema refresh: {exc}")
         return 2
 
-    candidates = _refresh_candidates(policy, association_filter=association_filter)
+    try:
+        candidates = _refresh_candidates(policy, association_filter=association_filter)
+    except RefreshError as exc:
+        print(f"schema refresh: {exc}")
+        return 2
     if association_filter and not candidates:
         print(f"schema refresh: no refreshable association named {association_filter!r}")
         return 2
