@@ -67,19 +67,3 @@ _lint_actionlint() {
 
   actionlint "$file"
 }
-
-_lint_github_workflow() {
-  local file="$1" rc=0
-
-  # Kept as a compatibility helper for direct/internal callers. Registry-backed
-  # autolint dispatch now selects `actionlint` and `zizmor` as separate adapter
-  # steps so explain, plan, and execution show the same path-scoped tools.
-  case "$file" in
-    */.github/workflows/*) ;;
-    *) return 0 ;;
-  esac
-
-  _lint_actionlint "$file" || rc=$?
-  _lint_zizmor "$file" || rc=$?
-  return "$rc"
-}

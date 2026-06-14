@@ -754,30 +754,10 @@ _assert_contains_path_arg "toml: relative fallback config path resolved before d
 # Tests: config at search root
 # ---------------------------------------------------------------------------
 
-echo "=== Config at search root ==="
-
-_cfg_root=$(_tmpdir)
-mkdir -p "$_cfg_root/sub"
-cat >"$_cfg_root/.editorconfig" <<'EOF'
-root = true
-[*.sh]
-indent_style = space
-indent_size = 4
-EOF
+echo "=== Config discovery ==="
 
 # shellcheck source=../format/common.sh
 . "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh"
-
-_has_config "$_cfg_root/sub" ".editorconfig" "$_cfg_root"
-rc=$?
-_assert_exit "has_config: checks search root" 0 "$rc"
-
-# Regression: relative root and relative starting dir must terminate.
-set +e
-_has_config "." ".editorconfig" "."
-rc=$?
-set -e
-_assert_exit "has_config: relative root terminates" 1 "$rc"
 
 _find_abs=$(_tmpdir)
 mkdir -p "$_find_abs/project/sub" "$_find_abs/launch"
@@ -1345,7 +1325,7 @@ CHECKRUN_CONFIG_DIR="/nonexistent/path" "$AUTOFORMAT" "$_td/noconfig.sh"
 _assert_contains "no config dir: shfmt uses tabs" "	echo" "$(cat "$_td/noconfig.sh")"
 
 # ---------------------------------------------------------------------------
-# Tests: relative paths terminate (regression for _has_config loop on ".")
+# Tests: relative paths terminate (regression for _find_config loop on ".")
 # ---------------------------------------------------------------------------
 
 echo "=== Relative paths ==="

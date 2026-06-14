@@ -2473,7 +2473,7 @@ set -e
 _assert_exit "py: pyproject[tool.ruff] overrides fallback" 1 "$rc"
 
 # ---------------------------------------------------------------------------
-# Tests: relative paths terminate (regression for _has_config loop on ".")
+# Tests: relative paths terminate (regression for _find_config loop on ".")
 # ---------------------------------------------------------------------------
 
 echo "=== Relative paths ==="
