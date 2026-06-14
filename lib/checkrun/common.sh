@@ -148,27 +148,12 @@ _checkrun_remove() {
   fi
 }
 
-# Walk up from the file's directory looking for a config file. `$root`
-# is an inclusive stop point: configs at `$root/$name` still count.
-# Tracks `prev` so the loop terminates even when `dir` is relative
-# (e.g. "."), where dirname would otherwise never shrink toward root.
-_has_config() {
-  local dir="$1" name="$2" root="${3:-/}" prev=""
-  while [ "$dir" != "$prev" ]; do
-    [ -f "$dir/$name" ] && return 0
-    [ "$dir" = "$root" ] && break
-    prev="$dir"
-    dir=$(dirname "$dir")
-  done
-  return 1
-}
-
-# Like `_has_config`, but prints the absolute path of the found
-# config on success. Useful when a tool's own config discovery
-# differs from our walk semantics and we need to pass the path
-# through explicitly via `--config <path>`. The absolute output is
-# intentional: some callers run the tool from a different cwd after
-# resolving the config.
+# Walk up from the file's directory looking for a config file and print its
+# absolute path on success. `$root` is an inclusive stop point: configs at
+# `$root/$name` still count. Tracks `prev` so the loop terminates even when
+# `dir` is relative (e.g. "."), where dirname would otherwise never shrink
+# toward root. The absolute output is intentional: some callers run the tool
+# from a different cwd after resolving the config.
 _find_config() {
   local dir="$1" name="$2" root="${3:-/}" prev=""
   while [ "$dir" != "$prev" ]; do
@@ -180,69 +165,6 @@ _find_config() {
     prev="$dir"
     dir=$(dirname "$dir")
   done
-  return 1
-}
-
-# cmakelang shares one config file family between cmake-format and
-# cmake-lint. Keep the search order in one helper so the formatter and
-# linter cannot disagree about which policy file owns a CMake source.
-_find_cmake_config() {
-  local dir="$1" fallback_dir="${2:-}" cfg
-
-  cfg=$(_find_config "$dir" ".cmake-format.py" 2>/dev/null ||
-    _find_config "$dir" "cmake-format.py" 2>/dev/null ||
-    _find_config "$dir" ".cmake-format.yaml" 2>/dev/null ||
-    _find_config "$dir" "cmake-format.yaml" 2>/dev/null ||
-    _find_config "$dir" ".cmake-format.json" 2>/dev/null ||
-    _find_config "$dir" "cmake-format.json" 2>/dev/null || true)
-  if [ -n "$cfg" ]; then
-    printf '%s\n' "$cfg"
-    return 0
-  fi
-
-  if [ -n "$fallback_dir" ] && [ -f "$fallback_dir/cmake-format.py" ]; then
-    _abs_path "$fallback_dir/cmake-format.py"
-    return 0
-  fi
-
-  return 1
-}
-
-_find_rubocop_config() {
-  local dir="$1" fallback_dir="${2:-}" cfg
-
-  cfg=$(_find_config "$dir" ".rubocop.yml" 2>/dev/null ||
-    _find_config "$dir" ".rubocop.yaml" 2>/dev/null ||
-    _find_config "$dir" "rubocop.yml" 2>/dev/null ||
-    _find_config "$dir" "rubocop.yaml" 2>/dev/null || true)
-  if [ -n "$cfg" ]; then
-    printf '%s\n' "$cfg"
-    return 0
-  fi
-
-  if [ -n "$fallback_dir" ] && [ -f "$fallback_dir/rubocop.yml" ]; then
-    _abs_path "$fallback_dir/rubocop.yml"
-    return 0
-  fi
-
-  return 1
-}
-
-_find_php_cs_fixer_config() {
-  local dir="$1" fallback_dir="${2:-}" cfg
-
-  cfg=$(_find_config "$dir" ".php-cs-fixer.php" 2>/dev/null ||
-    _find_config "$dir" ".php-cs-fixer.dist.php" 2>/dev/null || true)
-  if [ -n "$cfg" ]; then
-    printf '%s\n' "$cfg"
-    return 0
-  fi
-
-  if [ -n "$fallback_dir" ] && [ -f "$fallback_dir/php-cs-fixer.php" ]; then
-    _abs_path "$fallback_dir/php-cs-fixer.php"
-    return 0
-  fi
-
   return 1
 }
 
@@ -350,36 +272,6 @@ _toml_read_keys() {
     expr="$expr.$k // \"\""
   done
   yq -p toml "$expr" "$file" 2>/dev/null
-}
-
-# Walk up from $dir looking for a $filename whose content (parsed by
-# yq in the given $format: `toml` or `json`) satisfies the yq
-# predicate. Returns 0 on first match. Tracks `prev` to terminate on
-# relative paths, same as `_has_config`.
-#
-# Used to detect per-repo configs that live INSIDE a multi-purpose
-# file — pyproject.toml with a `[tool.ruff]` section, package.json
-# with a `prettier` key, etc. The caller writes the predicate
-# themselves so hyphenated keys / nested paths / `//` coalescing are
-# all supported uniformly:
-#
-#   _walk_config_with_key "$_filedir" pyproject.toml toml \
-#     '.tool.ruff // .tool.ruff.format'
-#   _walk_config_with_key "$_filedir" package.json json '.prettier'
-#   _walk_config_with_key "$_filedir" package.json json \
-#     '."markdownlint-cli2"'
-_walk_config_with_key() {
-  local dir="$1" filename="$2" format="$3" predicate="$4" prev=""
-  while [ "$dir" != "$prev" ]; do
-    if [ -f "$dir/$filename" ] &&
-      yq -p "$format" -e "$predicate" "$dir/$filename" >/dev/null 2>&1; then
-      return 0
-    fi
-    [ "$dir" = "/" ] && break
-    prev="$dir"
-    dir=$(dirname "$dir")
-  done
-  return 1
 }
 
 # Check whether a file is listed in an ignore file. Returns 0 (ignored) if any
