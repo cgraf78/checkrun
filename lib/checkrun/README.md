@@ -22,3 +22,9 @@ reimplementing registry or schema-policy logic.
 `share/checkrun/registry.json` is the durable source of formatter/linter
 vocabulary. Library code may normalize or validate that registry, but callers
 should not duplicate filetype, phase, or tool-selection rules.
+
+Lint adapters selected by the registry run through the fast `autolint` path used
+by editors, hooks, and `checkrun check`. Keep adapter work bounded to the target
+file or cheap owner-project context; broader project analyzers belong in
+`verify.py` or a caller-owned Sley verify workflow instead of registry lint
+selectors.

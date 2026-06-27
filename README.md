@@ -18,7 +18,7 @@ checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
 checkrun verify [--json] [--tool cargo-audit|govulncheck] [PATH...]
 checkrun format FILE [FILE...]
-checkrun lint [--fix] [--json] FILE [FILE...]
+checkrun lint|check [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
 autolint [--fix] [--json] FILE [FILE...]
 ```
@@ -28,7 +28,8 @@ fails so save-time hooks surface stderr without blocking the caller.
 
 `autolint` is read-only by default, applies fixes with `--fix`, and emits
 newline-delimited diagnostics with `--json`. It exits non-zero when lint
-findings exist.
+findings exist. `checkrun lint` and `checkrun check` are aliases for this same
+fast linter path.
 
 `checkrun verify` is the explicit project-check surface for work that should
 not run from save-time editor lint. Its security backends are project-scoped and
@@ -163,6 +164,30 @@ can override that layer for repo-specific policy.
 The important contract is one-way: `checkrun` owns formatter/linter dispatch,
 and consumers decide when to invoke it.
 
+## Fast Check Policy
+
+`checkrun check`, `checkrun lint`, and `autolint` are the fast automatic check
+surface for editors, hooks, and agents. A backend belongs there only when it is
+safe to run from changed-file or save-time workflows:
+
+- it is bounded to the selected file, or to a small owner project that the
+  adapter can discover cheaply from that file
+- it does not require network access, dependency installation, vulnerability
+  database updates, full test suites, or broad repository scans
+- it produces deterministic diagnostics or fixes without hidden repository
+  mutations
+- missing tool binaries remain graceful no-ops
+- project-contextual tools are gated by explicit metadata when running them on
+  standalone files would be noisy, slow, or conceptually wrong
+
+The current automatic lint surface includes schema validation, spelling, and the
+supported file/path-scoped tools in the table below. That includes Python
+`ruff`, GitHub Actions `actionlint` and `zizmor`, and other registry-selected
+linters. Broader analyzers such as dependency vulnerability scanners, package
+audits, full type-check suites, and repository health commands belong in
+`checkrun verify` or in Sley's verify registry unless they can satisfy the same
+fast-check contract.
+
 ## Configs
 
 Global fallback configs live under `~/.config/checkrun` by default. Set
@@ -228,9 +253,13 @@ To add a formatter or linter, update the registry first:
    discovery. Use step-level `pathPatterns` only on selector steps to narrow a
    tool within an already inferred filetype. Use `requiresConfigMatch` for
    tools that should run only when their config policy finds project metadata.
-3. Add the adapter id under `adapters` and implement the named shell function.
-4. Dispatch that adapter id from `autoformat.sh` or `autolint.sh`.
-5. Add registry-plan coverage plus adapter behavior tests.
+3. Confirm lint steps satisfy the fast-check policy above. If the tool is
+   project-wide, network-sensitive, or expected to be slow, add it under
+   `checkrun verify` or a Sley verify registry instead of the automatic lint
+   surface.
+4. Add the adapter id under `adapters` and implement the named shell function.
+5. Dispatch that adapter id from `autoformat.sh` or `autolint.sh`.
+6. Add registry-plan coverage plus adapter behavior tests.
 
 Do not add a second filename or extension decision table in selectors or shell.
 The top-level `filetypes` table answers what the file is; selectors answer which
