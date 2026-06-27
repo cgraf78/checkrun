@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ _SKIP_WALK_DIRS = {
     ".tox",
     ".venv",
     "node_modules",
+    "target",
     "vendor",
 }
 
@@ -34,11 +36,11 @@ def _abs(path: str) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
-def _nearest_go_module(start: Path) -> Path | None:
+def _nearest_project_root(start: Path, required_files: tuple[str, ...]) -> Path | None:
     current = start if start.is_dir() else start.parent
     previous: Path | None = None
     while current != previous:
-        if (current / "go.mod").is_file():
+        if all((current / name).is_file() for name in required_files):
             return current.resolve(strict=False)
         if current.parent == current:
             break
@@ -47,19 +49,35 @@ def _nearest_go_module(start: Path) -> Path | None:
     return None
 
 
-def _walk_go_modules(root: Path) -> list[Path]:
-    modules: list[Path] = []
+def _walk_project_roots(root: Path, required_files: tuple[str, ...]) -> list[Path]:
+    roots: list[Path] = []
     if not root.is_dir():
-        return modules
+        return roots
 
-    # Directory arguments should mean "verify modules under here", while file
-    # arguments mean "verify the nearest owning module". `os.walk` lets us skip
+    # Directory arguments should mean "verify projects under here", while file
+    # arguments mean "verify the nearest owning project". `os.walk` lets us skip
     # dependency/cache trees without depending on `fd` or GNU find at runtime.
     for dir_path, dir_names, file_names in os.walk(root):
         dir_names[:] = [name for name in dir_names if name not in _SKIP_WALK_DIRS]
-        if "go.mod" in file_names:
-            modules.append(Path(dir_path).resolve(strict=False))
-    return modules
+        if all(name in file_names for name in required_files):
+            roots.append(Path(dir_path).resolve(strict=False))
+    return roots
+
+
+def _nearest_go_module(start: Path) -> Path | None:
+    return _nearest_project_root(start, ("go.mod",))
+
+
+def _walk_go_modules(root: Path) -> list[Path]:
+    return _walk_project_roots(root, ("go.mod",))
+
+
+def _nearest_cargo_audit_project(start: Path) -> Path | None:
+    return _nearest_project_root(start, ("Cargo.toml", "Cargo.lock"))
+
+
+def _walk_cargo_audit_projects(root: Path) -> list[Path]:
+    return _walk_project_roots(root, ("Cargo.toml", "Cargo.lock"))
 
 
 def _go_module_path(module: Path) -> str | None:
@@ -98,6 +116,33 @@ def discover_go_modules(paths: list[str]) -> list[Path]:
                 modules.append(module)
 
     return modules
+
+
+def discover_cargo_audit_projects(paths: list[str]) -> list[Path]:
+    projects: list[Path] = []
+    seen: set[str] = set()
+
+    for raw_path in paths or _DEFAULT_PATHS:
+        path = _abs(raw_path)
+        candidates: list[Path] = []
+        if path.is_dir():
+            candidates = _walk_cargo_audit_projects(path)
+            if not candidates:
+                nearest = _nearest_cargo_audit_project(path)
+                if nearest:
+                    candidates = [nearest]
+        elif path.is_file():
+            nearest = _nearest_cargo_audit_project(path.parent)
+            if nearest:
+                candidates = [nearest]
+
+        for project in candidates:
+            key = str(project)
+            if key not in seen:
+                seen.add(key)
+                projects.append(project)
+
+    return projects
 
 
 def _position_from_trace(
@@ -162,16 +207,32 @@ def _finding_message(finding: dict[str, Any], osv: dict[str, dict[str, Any]]) ->
     return vuln_id
 
 
-def _json_error(module: Path, message: str) -> dict[str, Any]:
+def _json_error(path: Path, source: str, message: str) -> dict[str, Any]:
     return {
-        "path": str((module / "go.mod").resolve(strict=False)),
+        "path": str(path.resolve(strict=False)),
         "line": 1,
         "col": 1,
         "severity": "error",
         "code": None,
         "message": message,
-        "source": "govulncheck",
+        "source": source,
     }
+
+
+def _cargo_audit_package_text(record: dict[str, Any], advisory: dict[str, Any]) -> str | None:
+    package = record.get("package")
+    if not isinstance(package, dict):
+        package = {}
+
+    name = package.get("name") or advisory.get("package") or record.get("Crate")
+    version = package.get("version") or record.get("Version")
+    if not isinstance(name, str) or not name:
+        return None
+
+    text = name
+    if isinstance(version, str) and version:
+        text += f" {version}"
+    return text
 
 
 def _parse_govulncheck_json(module: Path, stdout: str) -> list[dict[str, Any]]:
@@ -219,6 +280,141 @@ def _parse_govulncheck_json(module: Path, stdout: str) -> list[dict[str, Any]]:
     return diagnostics
 
 
+def _cargo_audit_message(vulnerability: dict[str, Any]) -> str:
+    advisory = vulnerability.get("advisory")
+    if not isinstance(advisory, dict):
+        advisory = {}
+    versions = vulnerability.get("versions")
+    if not isinstance(versions, dict):
+        versions = {}
+
+    vuln_id = str(advisory.get("id") or vulnerability.get("ID") or "cargo-audit")
+    title = advisory.get("title") or vulnerability.get("Title")
+    parts: list[str] = []
+    if isinstance(title, str) and title:
+        parts.append(title)
+    package_text = _cargo_audit_package_text(vulnerability, advisory)
+    if package_text:
+        parts.append(package_text)
+    patched = versions.get("patched")
+    if isinstance(patched, list):
+        patched_versions = [str(item) for item in patched if str(item)]
+        if patched_versions:
+            parts.append("patched in " + ", ".join(patched_versions))
+    if parts:
+        return f"{vuln_id}: " + "; ".join(parts)
+    return vuln_id
+
+
+def _cargo_audit_warning_message(kind: str, warning: dict[str, Any]) -> str:
+    advisory = warning.get("advisory")
+    if not isinstance(advisory, dict):
+        advisory = {}
+
+    warning_id = str(advisory.get("id") or f"cargo-audit:{kind}")
+    title = advisory.get("title")
+    parts = [kind]
+    if isinstance(title, str) and title:
+        parts.append(title)
+    package_text = _cargo_audit_package_text(warning, advisory)
+    if package_text:
+        parts.append(package_text)
+    return f"{warning_id}: " + "; ".join(parts)
+
+
+def _cargo_audit_vulnerability_list(payload: dict[str, Any]) -> list[Any]:
+    vulnerabilities = payload.get("vulnerabilities")
+    if isinstance(vulnerabilities, dict):
+        vuln_list = vulnerabilities.get("list")
+    else:
+        vuln_list = vulnerabilities
+    return vuln_list if isinstance(vuln_list, list) else []
+
+
+def _cargo_audit_warning_items(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    warnings = payload.get("warnings")
+    items: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(warnings, dict):
+        for kind, records in warnings.items():
+            if not isinstance(records, list):
+                continue
+            for warning in records:
+                if not isinstance(warning, dict):
+                    continue
+                warning_kind = warning.get("kind")
+                if not isinstance(warning_kind, str) or not warning_kind:
+                    warning_kind = str(kind)
+                items.append((warning_kind, warning))
+    elif isinstance(warnings, list):
+        for warning in warnings:
+            if not isinstance(warning, dict):
+                continue
+            warning_kind = warning.get("kind")
+            if not isinstance(warning_kind, str) or not warning_kind:
+                warning_kind = "warning"
+            items.append((warning_kind, warning))
+    return items
+
+
+def _parse_cargo_audit_json(project: Path, stdout: str) -> list[dict[str, Any]]:
+    if not stdout.strip():
+        return []
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    # cargo-audit has kept the useful report data structured, but older examples
+    # and downstream wrappers differ on whether `vulnerabilities` is the list
+    # itself or an object containing `list`. Accept both so Checkrun's contract
+    # is tied to vulnerability records, not one cargo-audit release's wrapper.
+    vuln_list = _cargo_audit_vulnerability_list(payload)
+
+    diagnostics: list[dict[str, Any]] = []
+    lockfile = project / "Cargo.lock"
+    for vulnerability in vuln_list:
+        if not isinstance(vulnerability, dict):
+            continue
+        advisory = vulnerability.get("advisory")
+        if not isinstance(advisory, dict):
+            advisory = {}
+        code = advisory.get("id") or vulnerability.get("ID")
+        diagnostics.append(
+            {
+                "path": str(lockfile.resolve(strict=False)),
+                "line": 1,
+                "col": 1,
+                "severity": "error",
+                "code": str(code) if isinstance(code, str) and code else "cargo-audit",
+                "message": _cargo_audit_message(vulnerability),
+                "source": "cargo-audit",
+            }
+        )
+    # cargo-audit also fails when warnings are denied by policy, but those
+    # records are serialized under stdout's `warnings` map rather than stderr.
+    # Emitting them keeps Checkrun's JSON contract useful for every failing
+    # cargo-audit report, while preserving their native warning severity.
+    for kind, warning in _cargo_audit_warning_items(payload):
+        advisory = warning.get("advisory")
+        if not isinstance(advisory, dict):
+            advisory = {}
+        code = advisory.get("id")
+        diagnostics.append(
+            {
+                "path": str(lockfile.resolve(strict=False)),
+                "line": 1,
+                "col": 1,
+                "severity": "warning",
+                "code": str(code) if isinstance(code, str) and code else f"cargo-audit:{kind}",
+                "message": _cargo_audit_warning_message(kind, warning),
+                "source": "cargo-audit",
+            }
+        )
+    return diagnostics
+
+
 def _merge_rc(current: int, incoming: int) -> int:
     if incoming == 0:
         return current
@@ -227,42 +423,92 @@ def _merge_rc(current: int, incoming: int) -> int:
     return current
 
 
-def run_govulncheck(modules: list[Path], *, json_mode: bool) -> int:
-    if shutil.which("govulncheck") is None:
-        return 0
+def _has_error_diagnostic(diagnostics: list[dict[str, Any]]) -> bool:
+    return any(diagnostic.get("severity") == "error" for diagnostic in diagnostics)
 
+
+def _run_project_tool(
+    projects: list[Path],
+    *,
+    human_command: list[str],
+    json_command: list[str],
+    parse_json: Callable[[Path, str], list[dict[str, Any]]],
+    error_path: Callable[[Path], Path],
+    source: str,
+    json_mode: bool,
+) -> int:
+    """Run a project-scoped verifier and normalize its JSON diagnostics."""
     rc = 0
-    for module in modules:
-        command = ["govulncheck"]
-        if json_mode:
-            command.append("-json")
-        command.append("./...")
-
+    for project in projects:
         if json_mode:
             proc = subprocess.run(
-                command,
-                cwd=module,
+                json_command,
+                cwd=project,
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            diagnostics = _parse_govulncheck_json(module, proc.stdout)
+            diagnostics = parse_json(project, proc.stdout)
             if proc.returncode != 0 and not diagnostics and proc.stderr.strip():
                 # govulncheck's JSON stream is structured when scanning reaches
-                # findings. Transport/setup failures can still arrive only on
-                # stderr; surface one synthetic diagnostic so JSON callers get a
-                # machine-readable failure instead of an empty non-zero run.
-                diagnostics = [_json_error(module, proc.stderr.strip().splitlines()[-1])]
+                # findings; cargo-audit behaves similarly for normal advisory
+                # reports. Transport/setup failures can still arrive only on
+                # stderr, so expose one synthetic diagnostic rather than an
+                # empty non-zero JSON run.
+                diagnostics = [
+                    _json_error(
+                        error_path(project),
+                        source,
+                        proc.stderr.strip().splitlines()[-1],
+                    )
+                ]
             for diagnostic in diagnostics:
                 print(json.dumps(diagnostic, separators=(",", ":"), sort_keys=True))
             if proc.returncode != 0:
                 rc = _merge_rc(rc, proc.returncode)
-            elif diagnostics:
+            elif _has_error_diagnostic(diagnostics):
+                # Some verifiers can report advisory warnings while exiting 0.
+                # Keep those visible in JSON without overriding the tool's own
+                # pass/fail policy; error diagnostics still fail defensive
+                # parsers that found actionable records despite a clean exit.
                 rc = _merge_rc(rc, 1)
         else:
-            proc = subprocess.run(command, cwd=module, check=False)
+            proc = subprocess.run(human_command, cwd=project, check=False)
             rc = _merge_rc(rc, proc.returncode)
     return rc
+
+
+def run_govulncheck(modules: list[Path], *, json_mode: bool) -> int:
+    if shutil.which("govulncheck") is None:
+        return 0
+
+    return _run_project_tool(
+        modules,
+        human_command=["govulncheck", "./..."],
+        json_command=["govulncheck", "-json", "./..."],
+        parse_json=_parse_govulncheck_json,
+        error_path=lambda module: module / "go.mod",
+        source="govulncheck",
+        json_mode=json_mode,
+    )
+
+
+def run_cargo_audit(projects: list[Path], *, json_mode: bool) -> int:
+    # Cargo discovers external subcommands through `cargo-*` binaries, but the
+    # stable user/tool interface is `cargo audit`. Check both names so missing
+    # cargo-audit remains a quiet optional-backend skip instead of a Cargo error.
+    if shutil.which("cargo") is None or shutil.which("cargo-audit") is None:
+        return 0
+
+    return _run_project_tool(
+        projects,
+        human_command=["cargo", "audit"],
+        json_command=["cargo", "audit", "--json"],
+        parse_json=_parse_cargo_audit_json,
+        error_path=lambda project: project / "Cargo.lock",
+        source="cargo-audit",
+        json_mode=json_mode,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -274,14 +520,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tool",
         action="append",
-        choices=["govulncheck"],
+        choices=["cargo-audit", "govulncheck"],
         help="limit verification to one tool; may be repeated",
     )
     parser.add_argument("paths", nargs="*", help="files or directories to verify")
     args = parser.parse_args(argv)
 
-    tools = set(args.tool or ["govulncheck"])
+    tools = set(args.tool or ["cargo-audit", "govulncheck"])
     rc = 0
+    if "cargo-audit" in tools:
+        projects = discover_cargo_audit_projects(args.paths or _DEFAULT_PATHS)
+        rc = _merge_rc(rc, run_cargo_audit(projects, json_mode=args.json))
     if "govulncheck" in tools:
         modules = discover_go_modules(args.paths or _DEFAULT_PATHS)
         rc = _merge_rc(rc, run_govulncheck(modules, json_mode=args.json))
