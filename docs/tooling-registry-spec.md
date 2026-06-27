@@ -99,6 +99,36 @@ Neovim owns:
 Checkrun must not contain downstream-specific keys such as `sley`, `nvim`, or
 dotfiles-only consumer behavior.
 
+## Fast Check Eligibility
+
+Registry lint selectors are Checkrun's automatic fast-check surface. They feed
+`autolint`, `checkrun lint`, and `checkrun check`, so every selected lint step
+must be appropriate for editor saves, hooks, and agent changed-file checks.
+
+A selector-owned lint backend is eligible for that surface when:
+
+- it is bounded to the selected file, or to a small owner project that can be
+  discovered cheaply from that file
+- it runs without network access, package installation, vulnerability database
+  updates, full test suites, or broad repository scans
+- it returns deterministic diagnostics or fixes without hidden repository
+  mutations
+- it can no-op cleanly when the backend binary or optional host toolchain is
+  missing
+- it is gated by project metadata when standalone files would otherwise produce
+  noisy, misleading, or expensive results
+
+This rule is about invocation semantics, not tool branding. A type checker,
+security scanner, or compiler wrapper can belong in the registry only if its
+adapter satisfies the same fast-path contract. Otherwise it belongs in
+`checkrun verify` when Checkrun can provide a generic project analyzer, or in a
+Sley verify registry when the command is workflow-specific to a repo.
+
+Keep this boundary strict because hooks compose Checkrun through Sley. Sley
+decides when to run the fast path and readiness workflows; Checkrun decides
+which file-derived tools are safe to run automatically when that fast path is
+invoked.
+
 ## Registry Schema
 
 The registry should be JSON and validated by:
@@ -556,6 +586,12 @@ Step ordering in plan and JSON diagnostics should be deterministic:
 cross-cutting lint phases run before filetype-specific tool lint, and
 filetype-specific steps retain selector declaration order after duplicate
 deduplication.
+
+### `checkrun lint` and `checkrun check`
+
+Both commands execute the same registry-derived `autolint` behavior. `check` is
+a naming alias for callers that model the fast hook/editor operation as a check
+rather than a lint command; it must not grow a separate tool-selection path.
 
 ## Schema Association API
 
