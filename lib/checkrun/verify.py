@@ -219,6 +219,22 @@ def _json_error(path: Path, source: str, message: str) -> dict[str, Any]:
     }
 
 
+def _cargo_audit_package_text(record: dict[str, Any], advisory: dict[str, Any]) -> str | None:
+    package = record.get("package")
+    if not isinstance(package, dict):
+        package = {}
+
+    name = package.get("name") or advisory.get("package") or record.get("Crate")
+    version = package.get("version") or record.get("Version")
+    if not isinstance(name, str) or not name:
+        return None
+
+    text = name
+    if isinstance(version, str) and version:
+        text += f" {version}"
+    return text
+
+
 def _parse_govulncheck_json(module: Path, stdout: str) -> list[dict[str, Any]]:
     osv: dict[str, dict[str, Any]] = {}
     findings: list[dict[str, Any]] = []
@@ -268,24 +284,17 @@ def _cargo_audit_message(vulnerability: dict[str, Any]) -> str:
     advisory = vulnerability.get("advisory")
     if not isinstance(advisory, dict):
         advisory = {}
-    package = vulnerability.get("package")
-    if not isinstance(package, dict):
-        package = {}
     versions = vulnerability.get("versions")
     if not isinstance(versions, dict):
         versions = {}
 
     vuln_id = str(advisory.get("id") or vulnerability.get("ID") or "cargo-audit")
     title = advisory.get("title") or vulnerability.get("Title")
-    name = package.get("name") or advisory.get("package") or vulnerability.get("Crate")
-    version = package.get("version") or vulnerability.get("Version")
     parts: list[str] = []
     if isinstance(title, str) and title:
         parts.append(title)
-    if isinstance(name, str) and name:
-        package_text = name
-        if isinstance(version, str) and version:
-            package_text += f" {version}"
+    package_text = _cargo_audit_package_text(vulnerability, advisory)
+    if package_text:
         parts.append(package_text)
     patched = versions.get("patched")
     if isinstance(patched, list):
@@ -295,6 +304,56 @@ def _cargo_audit_message(vulnerability: dict[str, Any]) -> str:
     if parts:
         return f"{vuln_id}: " + "; ".join(parts)
     return vuln_id
+
+
+def _cargo_audit_warning_message(kind: str, warning: dict[str, Any]) -> str:
+    advisory = warning.get("advisory")
+    if not isinstance(advisory, dict):
+        advisory = {}
+
+    warning_id = str(advisory.get("id") or f"cargo-audit:{kind}")
+    title = advisory.get("title")
+    parts = [kind]
+    if isinstance(title, str) and title:
+        parts.append(title)
+    package_text = _cargo_audit_package_text(warning, advisory)
+    if package_text:
+        parts.append(package_text)
+    return f"{warning_id}: " + "; ".join(parts)
+
+
+def _cargo_audit_vulnerability_list(payload: dict[str, Any]) -> list[Any]:
+    vulnerabilities = payload.get("vulnerabilities")
+    if isinstance(vulnerabilities, dict):
+        vuln_list = vulnerabilities.get("list")
+    else:
+        vuln_list = vulnerabilities
+    return vuln_list if isinstance(vuln_list, list) else []
+
+
+def _cargo_audit_warning_items(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    warnings = payload.get("warnings")
+    items: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(warnings, dict):
+        for kind, records in warnings.items():
+            if not isinstance(records, list):
+                continue
+            for warning in records:
+                if not isinstance(warning, dict):
+                    continue
+                warning_kind = warning.get("kind")
+                if not isinstance(warning_kind, str) or not warning_kind:
+                    warning_kind = str(kind)
+                items.append((warning_kind, warning))
+    elif isinstance(warnings, list):
+        for warning in warnings:
+            if not isinstance(warning, dict):
+                continue
+            warning_kind = warning.get("kind")
+            if not isinstance(warning_kind, str) or not warning_kind:
+                warning_kind = "warning"
+            items.append((warning_kind, warning))
+    return items
 
 
 def _parse_cargo_audit_json(project: Path, stdout: str) -> list[dict[str, Any]]:
@@ -311,13 +370,7 @@ def _parse_cargo_audit_json(project: Path, stdout: str) -> list[dict[str, Any]]:
     # and downstream wrappers differ on whether `vulnerabilities` is the list
     # itself or an object containing `list`. Accept both so Checkrun's contract
     # is tied to vulnerability records, not one cargo-audit release's wrapper.
-    vulnerabilities = payload.get("vulnerabilities")
-    if isinstance(vulnerabilities, dict):
-        vuln_list = vulnerabilities.get("list")
-    else:
-        vuln_list = vulnerabilities
-    if not isinstance(vuln_list, list):
-        return []
+    vuln_list = _cargo_audit_vulnerability_list(payload)
 
     diagnostics: list[dict[str, Any]] = []
     lockfile = project / "Cargo.lock"
@@ -336,6 +389,26 @@ def _parse_cargo_audit_json(project: Path, stdout: str) -> list[dict[str, Any]]:
                 "severity": "error",
                 "code": str(code) if isinstance(code, str) and code else "cargo-audit",
                 "message": _cargo_audit_message(vulnerability),
+                "source": "cargo-audit",
+            }
+        )
+    # cargo-audit also fails when warnings are denied by policy, but those
+    # records are serialized under stdout's `warnings` map rather than stderr.
+    # Emitting them keeps Checkrun's JSON contract useful for every failing
+    # cargo-audit report, while preserving their native warning severity.
+    for kind, warning in _cargo_audit_warning_items(payload):
+        advisory = warning.get("advisory")
+        if not isinstance(advisory, dict):
+            advisory = {}
+        code = advisory.get("id")
+        diagnostics.append(
+            {
+                "path": str(lockfile.resolve(strict=False)),
+                "line": 1,
+                "col": 1,
+                "severity": "warning",
+                "code": str(code) if isinstance(code, str) and code else f"cargo-audit:{kind}",
+                "message": _cargo_audit_warning_message(kind, warning),
                 "source": "cargo-audit",
             }
         )

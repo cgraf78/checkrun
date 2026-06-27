@@ -343,6 +343,34 @@ _assert_exit "cargo-audit json: findings make clean json run non-zero" 1 "$rc"
 _assert_contains "cargo-audit json: accepts alternate vulnerability shape" \
   '"message":"RUSTSEC-2026-0002: legacy report shape; oldcrate 0.9.0"' "$output"
 
+_cargo_denied_warning_mock=$(_mock_bin)
+cat >"$_cargo_denied_warning_mock/cargo-audit" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_cargo_denied_warning_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "audit" ] && [ "${2:-}" = "--json" ]; then
+  cat <<'JSON'
+{"vulnerabilities":{"found":false,"list":[]},"warnings":{"yanked":[{"kind":"yanked","package":{"name":"badcrate","version":"2.0.0"},"advisory":{"id":"RUSTSEC-2026-0003","title":"crate was yanked"}}]}}
+JSON
+  exit 1
+fi
+exit 0
+EOF
+chmod +x "$_cargo_denied_warning_mock/cargo" "$_cargo_denied_warning_mock/cargo-audit"
+
+set +e
+output=$(PATH="$_cargo_denied_warning_mock:$PATH" "$CHECKRUN" verify --json --tool cargo-audit \
+  "$_rust_root/crate-a/src/lib.rs" 2>&1)
+rc=$?
+set -e
+_assert_exit "cargo-audit json warning: preserves denied warning exit" 1 "$rc"
+_assert_contains "cargo-audit json warning: emits stdout warning diagnostic" \
+  '"message":"RUSTSEC-2026-0003: yanked; crate was yanked; badcrate 2.0.0"' "$output"
+_assert_contains "cargo-audit json warning: keeps warning severity" \
+  '"severity":"warning"' "$output"
+
 _cargo_error_mock=$(_mock_bin)
 cat >"$_cargo_error_mock/cargo-audit" <<'EOF'
 #!/usr/bin/env bash
