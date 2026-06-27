@@ -149,6 +149,7 @@ matrix = {
     "Dockerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
     "CMakeLists.txt": (["cmake-format"], ["typos", "schema-lint", "cmake-lint"]),
     "Makefile": ([], ["typos", "schema-lint", "checkmake"]),
+    "rules.mak": ([], ["typos", "schema-lint", "checkmake"]),
     "service.service": ([], ["typos", "schema-lint", "systemd-analyze"]),
     "README.md": (["rumdl-format"], ["typos", "schema-lint", "rumdl-lint"]),
     "plain.yaml": (["yamlfmt"], ["typos", "schema-lint"]),

@@ -62,7 +62,7 @@ _autolint_usage() {
     "and files whose linter is not installed are skipped." \
     "" \
     "Supported file types:" \
-    "  Build:     .bzl, BUCK, BUILD, CMakeLists.txt, .cmake, Makefile, GNUmakefile, .mk" \
+    "  Build:     .bzl, BUCK, BUILD, CMakeLists.txt, .cmake, Makefile, GNUmakefile, .mk, .mak" \
     "  CI:        .github/workflows/*.yml, .github/workflows/*.yaml" \
     "  Config:    .editorconfig, .toml, git config, tmux.conf, crontab" \
     "  Container: Dockerfile, Containerfile" \
