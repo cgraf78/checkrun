@@ -65,7 +65,8 @@ data = json.load(sys.stdin)
 selectors = {item["id"]: item for item in data["selectors"]}
 assert data["version"] == 1
 assert "sley" not in data
-assert selectors["c-family"].get("lint", []) == []
+assert [item["tool"] for item in selectors["c-family"]["lint"]] == ["clang-tidy"]
+assert selectors["c-family"]["lint"][0]["requiresConfigMatch"] is True
 assert [item["tool"] for item in selectors["yaml"]["lint"]] == ["actionlint", "zizmor"]
 '
 _assert_exit "registry: emits raw registry data" 0 "$?"

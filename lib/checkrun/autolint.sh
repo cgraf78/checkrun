@@ -186,6 +186,7 @@ _lint_dispatch() {
     biome-lint) _lint_biome "$file" "$dir" "$config_source" "$config_path" ;;
     buildifier-lint) _lint_buildifier "$file" ;;
     checkmake) _lint_checkmake "$file" "$dir" "$config_source" "$config_path" ;;
+    clang-tidy) _lint_clang_tidy "$file" "$dir" "$config_source" "$config_path" ;;
     cmake-lint) _lint_cmake "$file" "$dir" "$config_source" "$config_path" ;;
     crontab) _lint_crontab "$file" ;;
     editorconfig-checker) _lint_editorconfig "$file" ;;

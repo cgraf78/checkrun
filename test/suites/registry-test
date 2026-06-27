@@ -79,8 +79,14 @@ assert "systemd" in capabilities["filetypes"]["lint"]
 assert capabilities["filetypes"]["custom"]["filename"]["Dockerfile"] == "dockerfile"
 
 selectors = {selector["id"]: selector for selector in registry["selectors"]}
-assert selectors["c-family"].get("lint", []) == []
-assert "clang-tidy" not in json.dumps(selectors["c-family"])
+assert selectors["c-family"]["lint"] == [
+    {
+        "tool": "clang-tidy",
+        "adapter": "clang-tidy",
+        "config": "clang-tidy",
+        "requiresConfigMatch": True,
+    }
+]
 
 plan = registry_mod.plan(registry, [str(root / "README.md")], "lint")
 steps = plan["files"][0]["lint"]["steps"]
@@ -189,6 +195,33 @@ for relative, (expected_format, expected_lint) in matrix.items():
     lint_steps = registry_mod.plan(registry, [str(target)], "lint")["files"][0]["lint"]["steps"]
     assert [step["adapter"] for step in format_steps] == expected_format, relative
     assert [step["adapter"] for step in lint_steps] == expected_lint, relative
+
+c_with_config = tmp / "with-clang-config" / "src" / "main.cpp"
+c_with_config.parent.mkdir(parents=True, exist_ok=True)
+(c_with_config.parent.parent / ".clang-tidy").write_text("Checks: '*'\n", encoding="utf-8")
+c_with_config.write_text("", encoding="utf-8")
+c_with_plan = registry_mod.plan(registry, [str(c_with_config)], "lint")["files"][0]["lint"]
+assert [step["adapter"] for step in c_with_plan["steps"]] == [
+    "typos",
+    "schema-lint",
+    "clang-tidy",
+]
+clang_step = c_with_plan["steps"][-1]
+assert clang_step["requiresConfigMatch"] is True
+assert clang_step["config"]["source"] == "project"
+assert clang_step["config"]["path"].endswith(".clang-tidy")
+
+c_without_config = tmp / "without-clang-config" / "main.cpp"
+c_without_config.parent.mkdir(parents=True, exist_ok=True)
+c_without_config.write_text("", encoding="utf-8")
+c_without_plan = registry_mod.plan(registry, [str(c_without_config)], "lint")["files"][0]["lint"]
+clang_skips = [
+    step for step in c_without_plan["skipped"] if step["adapter"] == "clang-tidy"
+]
+assert len(clang_skips) == 1
+assert clang_skips[0]["requiresConfigMatch"] is True
+assert clang_skips[0]["reason"] == "missing-config"
+assert clang_skips[0]["config"]["source"] == "none"
 
 dedupe = json.loads(json.dumps(registry))
 dedupe["selectors"].append(

@@ -79,9 +79,8 @@ Files:
 Work:
 
 - model the intended current behavior in `registry.json`
-- resolve existing drift before seeding the registry, including any metadata-only
-  tools such as advertised C/C++ `clang-tidy` linting that shell dispatch does
-  not currently execute
+- resolve existing drift before seeding the registry; metadata-only tools are
+  invalid unless shell dispatch and tests implement the same behavior
 - include filetype maps now hard-coded in `explain.py`
 - include adapter ids for every current tool
 - include config-policy names and fallback file names
@@ -405,8 +404,8 @@ Minimum golden-file matrix:
 | `component.tsx` | `biome` | `typos`, `schema-lint`, `biome` |
 | `style.css` | `biome` | `typos`, `schema-lint`, `biome` |
 | `data.jsonc` | `biome` | `typos`, `schema-lint`, `biome` |
-| `main.c` | `clang-format` | `typos`, `schema-lint` unless C/C++ lint is intentionally added |
-| `main.cpp` | `clang-format` | `typos`, `schema-lint` unless C/C++ lint is intentionally added |
+| `main.c` | `clang-format` | `typos`, `schema-lint`; `clang-tidy` only when project metadata exists |
+| `main.cpp` | `clang-format` | `typos`, `schema-lint`; `clang-tidy` only when project metadata exists |
 | `init.lua` | `stylua` | `typos`, `schema-lint`, `selene` |
 | `main.rs` | `rustfmt` | `typos`, `schema-lint`, `clippy` or existing Rust lint adapter |
 | `Main.java` | `google-java-format` | `typos`, `schema-lint`, `google-java-format` dry-run |
