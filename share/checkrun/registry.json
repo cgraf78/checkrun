@@ -24,6 +24,7 @@
       "json": "json",
       "jsonc": "jsonc",
       "jsx": "javascriptreact",
+      "less": "less",
       "lua": "lua",
       "mak": "make",
       "md": "markdown",
@@ -32,6 +33,8 @@
       "path": "systemd",
       "php": "php",
       "py": "python",
+      "nix": "nix",
+      "proto": "proto",
       "rb": "ruby",
       "rs": "rust",
       "scope": "systemd",
@@ -39,6 +42,7 @@
       "sh": "sh",
       "slice": "systemd",
       "socket": "systemd",
+      "scss": "scss",
       "star": "starlark",
       "swap": "systemd",
       "target": "systemd",
@@ -280,6 +284,8 @@
     "actionlint": { "kind": "shell-function", "function": "_lint_actionlint" },
     "biome-format": { "kind": "shell-function", "function": "_format_biome" },
     "biome-lint": { "kind": "shell-function", "function": "_lint_biome" },
+    "buf-format": { "kind": "shell-function", "function": "_format_buf" },
+    "buf-lint": { "kind": "shell-function", "function": "_lint_buf" },
     "buildifier-format": { "kind": "shell-function", "function": "_format_buildifier" },
     "buildifier-lint": { "kind": "shell-function", "function": "_lint_buildifier" },
     "checkmake": { "kind": "shell-function", "function": "_lint_checkmake" },
@@ -297,6 +303,7 @@
     "google-java-format": { "kind": "shell-function", "function": "_format_java" },
     "google-java-format-lint": { "kind": "shell-function", "function": "_lint_java" },
     "hadolint": { "kind": "shell-function", "function": "_lint_dockerfile" },
+    "nixfmt": { "kind": "shell-function", "function": "_format_nixfmt" },
     "php": { "kind": "shell-function", "function": "_lint_php" },
     "php-cs-fixer": { "kind": "shell-function", "function": "_format_php" },
     "rubocop-format": { "kind": "shell-function", "function": "_format_ruby" },
@@ -310,6 +317,7 @@
     "schema-lint": { "kind": "shell-function", "function": "_lint_schema" },
     "selene": { "kind": "shell-function", "function": "_lint_selene" },
     "shellcheck": { "kind": "shell-function", "function": "_lint_sh" },
+    "statix": { "kind": "shell-function", "function": "_lint_statix" },
     "shfmt": { "kind": "shell-function", "function": "_format_sh" },
     "shfmt-zsh": { "kind": "shell-function", "function": "_format_sh_zsh" },
     "stylua": { "kind": "shell-function", "function": "_format_stylua" },
@@ -360,6 +368,8 @@
         "javascriptreact",
         "json",
         "jsonc",
+        "less",
+        "scss",
         "typescript",
         "typescriptreact"
       ],
@@ -497,6 +507,18 @@
       "id": "tmux",
       "filetypes": ["tmux"],
       "lint": [{ "tool": "tmux", "adapter": "tmux" }]
+    },
+    {
+      "id": "nix",
+      "filetypes": ["nix"],
+      "format": [{ "tool": "nixfmt", "adapter": "nixfmt" }],
+      "lint": [{ "tool": "statix", "adapter": "statix" }]
+    },
+    {
+      "id": "proto",
+      "filetypes": ["proto"],
+      "format": [{ "tool": "buf", "adapter": "buf-format" }],
+      "lint": [{ "tool": "buf", "adapter": "buf-lint" }]
     },
     {
       "id": "text",

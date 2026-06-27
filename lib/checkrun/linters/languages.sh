@@ -385,3 +385,71 @@ _lint_selene() {
 
   return "$rc"
 }
+
+_lint_statix() {
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. statix auto-discovers .statix.toml upward from the file.
+  local file="$1" _dir="$2" _config_source="$3" _config_path="${4:-}" rc=0 out tool_rc
+  command -v statix &>/dev/null || return 0
+
+  if [ "$json" -eq 1 ]; then
+    out=$(statix check --format json "$file" 2>/dev/null)
+    tool_rc=$?
+    if [ -n "$out" ]; then
+      # statix JSON is [{file, report: [{diagnostics: [{at: {from/to: {line, column}},
+      # message, severity, code}]}]}]. Severity is title-cased ("Warn", "Error").
+      printf '%s' "$out" | jq -c --arg path "$file" "$_JQ_SEVLIB"'
+        .[]? | .report[]? | .diagnostics[]? | {
+          path: $path,
+          line: .at.from.line,
+          col: .at.from.column,
+          end_line: .at.to.line,
+          end_col: .at.to.column,
+          severity: sev(.severity),
+          code: (.code | tostring),
+          message: .message,
+          source: "statix"
+        }'
+    fi
+    [ "$tool_rc" -ne 0 ] && rc=$tool_rc
+  elif [ "$fix" -eq 1 ]; then
+    statix fix "$file" || rc=$?
+  else
+    statix check "$file" || rc=$?
+  fi
+
+  return "$rc"
+}
+
+_lint_buf() {
+  # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
+  # $4 config_path. buf auto-discovers buf.yaml from the file's directory tree.
+  local file="$1" _dir="$2" _config_source="$3" _config_path="${4:-}" rc=0 out tool_rc
+  command -v buf &>/dev/null || return 0
+
+  if [ "$json" -eq 1 ]; then
+    out=$(buf lint --error-format=json "$file" 2>/dev/null)
+    tool_rc=$?
+    if [ -n "$out" ]; then
+      # buf lint emits one JSON object per line; each has path, start_line,
+      # start_column, end_line, end_column, type (rule id), message.
+      printf '%s' "$out" | jq -c --arg path "$file" '
+        select(.path? and .message?) | {
+          path: $path,
+          line: (.start_line // 1),
+          col: (.start_column // 1),
+          end_line: .end_line,
+          end_col: .end_column,
+          severity: "warning",
+          code: .type,
+          message: .message,
+          source: "buf"
+        }'
+    fi
+    [ "$tool_rc" -ne 0 ] && rc=$tool_rc
+  else
+    buf lint "$file" || rc=$?
+  fi
+
+  return "$rc"
+}
