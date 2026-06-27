@@ -48,7 +48,7 @@ _assert_contains "help: --help lists supported file types" "Supported file types
 _assert_colon_list_values_aligned "help: --help aligns supported file list" \
   "$output" "Supported file types:"
 _assert_contains "help: --help aligns build category" "Build:     .bzl" "$output"
-_assert_contains "help: --help lists make files" "Makefile, GNUmakefile, .mk" "$output"
+_assert_contains "help: --help lists make files" "Makefile, GNUmakefile, .mk, .mak" "$output"
 _assert_contains "help: --help lists cmake files" "CMakeLists.txt, .cmake" "$output"
 _assert_contains "help: --help aligns ci category" "CI:        .github/workflows" "$output"
 _assert_contains "help: --help aligns container category" "Container: Dockerfile" "$output"
@@ -1163,6 +1163,17 @@ rc=$?
 set -e
 _assert_exit "mk: checkmake exit propagates" 6 "$rc"
 _assert_contains_path_arg "mk: checkmake output shown" "checkmake: " "$_td/rules.mk" "$output"
+
+cat >"$_td/rules.mak" <<'EOF'
+all:
+	echo hi
+EOF
+set +e
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent PATH="$_checkmake_mock:$PATH" "$AUTOLINT" "$_td/rules.mak" 2>&1)
+rc=$?
+set -e
+_assert_exit "mak: checkmake exit propagates" 6 "$rc"
+_assert_contains_path_arg "mak: checkmake output shown" "checkmake: " "$_td/rules.mak" "$output"
 
 # checkmake config routing: fallback applies when no per-repo
 # checkmake.ini exists; per-repo config wins over fallback.

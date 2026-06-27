@@ -25,6 +25,7 @@
       "jsonc": "jsonc",
       "jsx": "javascriptreact",
       "lua": "lua",
+      "mak": "make",
       "md": "markdown",
       "mk": "make",
       "mount": "systemd",

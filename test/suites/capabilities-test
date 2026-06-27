@@ -42,6 +42,7 @@ assert "c" in filetypes["format"]
 assert "c" in filetypes["lint"]
 assert filetypes["custom"]["filename"]["Dockerfile"] == "dockerfile"
 assert filetypes["custom"]["filename"]["CMakeLists.txt"] == "cmake"
+assert filetypes["custom"]["extension"]["mak"] == "make"
 assert filetypes["custom"]["extension"]["service"] == "systemd"
 
 patterns = filetypes["custom"]["patterns"]
