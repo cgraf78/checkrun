@@ -125,6 +125,31 @@ assert diagnostic["path"].endswith("/module-a/pkg/a.go")
 '
 _assert_exit "govulncheck json: emits unified diagnostic" 0 "$?"
 
+_zero_finding_mock=$(_mock_bin)
+cat >"$_zero_finding_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-json" ]; then
+  cat <<'JSON'
+{"finding":{"osv":"GO-2026-0002","trace":[{"position":{"filename":"pkg/a.go","line":9,"column":4}}]}}
+{"osv":{"id":"GO-2026-0002","summary":"summary emitted after finding"}}
+JSON
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$_zero_finding_mock/govulncheck"
+
+set +e
+output=$(PATH="$_zero_finding_mock:$PATH" "$CHECKRUN" verify --json --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" 2>&1)
+rc=$?
+set -e
+_assert_exit "govulncheck json: findings make clean json run non-zero" 1 "$rc"
+_assert_contains "govulncheck json: buffers summary emitted after finding" \
+  '"message":"summary emitted after finding"' "$output"
+_assert_contains "govulncheck json: preserves out-of-order finding code" \
+  '"code":"GO-2026-0002"' "$output"
+
 _error_mock=$(_mock_bin)
 cat >"$_error_mock/govulncheck" <<'EOF'
 #!/usr/bin/env bash

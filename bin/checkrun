@@ -50,8 +50,8 @@ _run_schema_refresh() {
 
 _run_verify() {
   local python
-  python=$(_checkrun_python 'import sys') || {
-    echo "checkrun: python3 is required for verify checks" >&2
+  python=$(_checkrun_python 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)') || {
+    echo "checkrun: python3.11+ is required for verify checks" >&2
     exit 127
   }
   exec "$python" "$CHECKRUN_LIB_DIR/verify.py" "$@"

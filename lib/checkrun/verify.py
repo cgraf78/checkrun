@@ -147,6 +147,7 @@ def _json_error(module: Path, message: str) -> dict[str, Any]:
 
 def _parse_govulncheck_json(module: Path, stdout: str) -> list[dict[str, Any]]:
     osv: dict[str, dict[str, Any]] = {}
+    findings: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
 
     for line in stdout.splitlines():
@@ -165,6 +166,12 @@ def _parse_govulncheck_json(module: Path, stdout: str) -> list[dict[str, Any]]:
         finding = event.get("finding")
         if not isinstance(finding, dict):
             continue
+        findings.append(finding)
+
+    # govulncheck emits a stream, not a sorted document. Buffer findings until
+    # all OSV records are known so summaries survive whichever order the tool
+    # chooses for a particular run or future protocol version.
+    for finding in findings:
         path, line_no, col = _position_from_trace(module, finding)
         vuln_id = _finding_id(finding)
         diagnostics.append(
