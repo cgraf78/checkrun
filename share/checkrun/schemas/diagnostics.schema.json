@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cgraf78.github.io/checkrun/schemas/diagnostics.schema.json",
+  "title": "Checkrun unified diagnostic",
+  "description": "One newline-delimited JSON diagnostic emitted by autolint --json and consumed by editor integrations.",
+  "type": "object",
+  "required": ["path", "line", "col", "severity", "message", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the file the diagnostic belongs to."
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based starting line."
+    },
+    "col": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based starting column."
+    },
+    "end_line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional 1-based ending line."
+    },
+    "end_col": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional 1-based ending column."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["error", "warning", "info", "hint"]
+    },
+    "code": {
+      "type": ["string", "null"],
+      "description": "Optional backend rule or diagnostic code."
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Backend or adapter that produced the diagnostic."
+    }
+  }
+}

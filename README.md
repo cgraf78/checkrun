@@ -100,6 +100,10 @@ own toolchain through the host environment or integration layer.
   editor integrations do not inherit slow or network-sensitive security scans.
 - `share/checkrun/schemas/associations.schema.json` is the JSON Schema for
   schema association policy files.
+- `share/checkrun/schemas/diagnostics.schema.json` is the JSON Schema for one
+  newline-delimited diagnostic emitted by `autolint --json`. Editor adapters use
+  this producer-owned contract when translating Checkrun diagnostics into their
+  native diagnostic APIs.
 - `share/checkrun/shell.sh` is a stable no-op shell loader for integration
   harnesses that source each dependency's shell API uniformly.
 

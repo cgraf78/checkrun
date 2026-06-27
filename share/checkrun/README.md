@@ -9,6 +9,8 @@ Treat them as part of the runtime interface.
   registry.
 - `schemas/registry.schema.json` validates the registry shape.
 - `schemas/associations.schema.json` validates user schema association files.
+- `schemas/diagnostics.schema.json` validates one JSON-line diagnostic emitted
+  by `autolint --json` and consumed by editor integrations.
 - `shell.sh` is a stable loader path for shell integrations. It is intentionally
   small because checkrun behavior lives in `bin/` and `lib/checkrun/`.
 
