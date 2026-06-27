@@ -258,6 +258,21 @@ _format_dockerfmt() {
   _run_fmt dockerfmt -w "$file"
 }
 
+_format_nixfmt() {
+  # Same positional contract — nixfmt has no config knob; it formats in place.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
+  command -v nixfmt &>/dev/null || return 0
+  _run_fmt nixfmt "$file"
+}
+
+_format_buf() {
+  # Same positional contract — buf discovers buf.yaml from the file's directory
+  # tree automatically; no explicit config path is needed.
+  local file="$1" _dir="${2:-}" _config_source="${3:-}" _config_path="${4:-}"
+  command -v buf &>/dev/null || return 0
+  _run_fmt buf format -w "$file"
+}
+
 _format_yamlfmt() {
   local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
   command -v yamlfmt &>/dev/null || return 0
@@ -292,6 +307,7 @@ _format_dispatch() {
   # inside the registry interpreter.
   case "$adapter" in
     biome-format) _format_biome "$file" "$dir" "$config_source" "$config_path" ;;
+    buf-format) _format_buf "$file" "$dir" "$config_source" "$config_path" ;;
     buildifier-format) _format_buildifier "$file" "$dir" "$config_source" "$config_path" ;;
     clang-format) _format_clang "$file" "$dir" "$config_source" "$config_path" ;;
     cmake-format) _format_cmake "$file" "$dir" "$config_source" "$config_path" ;;
@@ -299,6 +315,7 @@ _format_dispatch() {
     gofumpt) _format_gofumpt "$file" "$dir" "$config_source" "$config_path" ;;
     goimports) _format_goimports "$file" "$dir" "$config_source" "$config_path" ;;
     google-java-format) _format_java "$file" "$dir" "$config_source" "$config_path" ;;
+    nixfmt) _format_nixfmt "$file" "$dir" "$config_source" "$config_path" ;;
     php-cs-fixer) _format_php "$file" "$dir" "$config_source" "$config_path" ;;
     rubocop-format) _format_ruby "$file" "$dir" "$config_source" "$config_path" ;;
     ruff-format) _format_ruff "$file" "$dir" "$config_source" "$config_path" ;;

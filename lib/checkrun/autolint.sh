@@ -184,6 +184,7 @@ _lint_dispatch() {
   case "$adapter" in
     actionlint) _lint_actionlint "$file" ;;
     biome-lint) _lint_biome "$file" "$dir" "$config_source" "$config_path" ;;
+    buf-lint) _lint_buf "$file" "$dir" "$config_source" "$config_path" ;;
     buildifier-lint) _lint_buildifier "$file" ;;
     checkmake) _lint_checkmake "$file" "$dir" "$config_source" "$config_path" ;;
     clang-tidy) _lint_clang_tidy "$file" "$dir" "$config_source" "$config_path" ;;
@@ -202,6 +203,7 @@ _lint_dispatch() {
     schema-lint) _lint_schema "$file" ;;
     selene) _lint_selene "$file" "$dir" "$config_source" "$config_path" ;;
     shellcheck) _lint_sh "$file" "$dir" "$(_shellcheck_lang_hint "$file")" "$config_source" "$config_path" ;;
+    statix) _lint_statix "$file" "$dir" "$config_source" "$config_path" ;;
     superhtml-lint) _lint_superhtml "$file" ;;
     systemd-analyze) _lint_systemd_unit "$file" ;;
     taplo-lint) _lint_taplo "$file" "$dir" "$config_source" "$config_path" ;;
