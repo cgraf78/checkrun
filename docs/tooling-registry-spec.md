@@ -140,12 +140,11 @@ cross-object invariants that are awkward in JSON Schema:
 - non-shell `internal` adapters are never selected or dispatched
 - no top-level or selector-level downstream keys such as `sley` or `nvim` exist
 
-The seeded registry must resolve pre-existing metadata drift before it becomes
-authoritative. For example, the old metadata advertised C/C++ linting via
-`clang-tidy`, while shell dispatch does not run a C/C++ linter today. The new
-registry should either model the actual supported behavior or intentionally add
-the adapter and tests. It must not preserve metadata-only tools that execution
-does not support.
+The seeded registry must resolve metadata drift before it becomes authoritative.
+For example, C/C++ `clang-tidy` support is valid only because the registry,
+planner, shell dispatch, and tests now share the same gated execution contract.
+The registry must not preserve metadata-only tools that execution does not
+support.
 
 ### Filetypes
 
@@ -233,6 +232,13 @@ Selectors must not carry their own `extensions`, `filenames`, or `patterns`
 matchers. Step-level `pathPatterns` are selector-only: they narrow an already
 selected filetype-specific step instead of creating a second filetype inference
 table.
+
+Steps may set `requiresConfigMatch` when a tool is not meaningful without
+project metadata discovered by its config policy. The planner keeps such a step
+out of the executable step list when config resolution returns `source: none`,
+and reports it in `skipped` with reason `missing-config`. This keeps project-
+contextual tools such as `clang-tidy` visible in the registry while preventing
+standalone editor saves from running noisy best-effort lint.
 
 Future alternative-tool preference is intentionally out of scope for the first
 registry cutover. Do not add preference or `first-available` machinery until

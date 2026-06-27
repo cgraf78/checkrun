@@ -212,7 +212,8 @@ To add a formatter or linter, update the registry first:
 2. Add a selector for the normalized filetype, then add a step with the tool
    name, adapter id, and config policy when the tool has Checkrun-owned config
    discovery. Use step-level `pathPatterns` only on selector steps to narrow a
-   tool within an already inferred filetype.
+   tool within an already inferred filetype. Use `requiresConfigMatch` for
+   tools that should run only when their config policy finds project metadata.
 3. Add the adapter id under `adapters` and implement the named shell function.
 4. Dispatch that adapter id from `autoformat.sh` or `autolint.sh`.
 5. Add registry-plan coverage plus adapter behavior tests.
@@ -233,7 +234,7 @@ dynamically scoped `fix` and `json` behavior.
 | Zsh | `shfmt` | `zsh -n` |
 | Go | `goimports` + `gofumpt` | `golangci-lint` |
 | Lua | `stylua` | `selene` |
-| C/C++ | `clang-format` | - |
+| C/C++ | `clang-format` | gated `clang-tidy` |
 | CMake | `cmake-format` | `cmake-lint` |
 | Rust | `rustfmt` | `cargo clippy` |
 | Java | `google-java-format` | dry-run format check |
@@ -254,6 +255,11 @@ dynamically scoped `fix` and `json` behavior.
 | Crontab | - | `crontab -T` |
 | Tmux config | - | `tmux source-file -n` |
 | Systemd units | - | `systemd-analyze verify` |
+
+`clang-tidy` is intentionally gated: it runs only when the target file's parent
+chain contains `.clang-tidy`, `compile_commands.json`, or `compile_flags.txt`.
+That keeps save-time editor lint quiet for standalone C/C++ files while still
+using project-owned rule and compile metadata when it exists.
 
 Basename-only files such as `Dockerfile`, `BUCK`, `BUILD`, `TARGETS`,
 `WORKSPACE`, `MODULE.bazel`, and `Containerfile` are dispatched before

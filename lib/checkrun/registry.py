@@ -401,6 +401,8 @@ def _validate_step(
         )
     if "config" in step and step["config"] not in config_policies:
         raise RegistryError(f"{owner}.{phase}: unknown config policy: {step['config']}")
+    if step.get("requiresConfigMatch") is True and "config" not in step:
+        raise RegistryError(f"{owner}.{phase}: requiresConfigMatch requires a config policy")
     if step_phase not in _PHASES:
         raise RegistryError(f"{owner}.{phase}: unknown phase: {step.get('phase')}")
     if step_phase not in allowed_step_phases:
@@ -735,6 +737,7 @@ def _step_key(step: dict[str, Any], default_phase: str) -> tuple[Any, ...]:
         step.get("tool"),
         step.get("adapter"),
         step.get("config"),
+        step.get("requiresConfigMatch") is True,
         tuple(step.get("pathPatterns", [])),
     )
 
@@ -752,6 +755,8 @@ def _planned_step(
         "adapter": step["adapter"],
         "config": _resolve_config(registry, step.get("config"), path),
     }
+    if step.get("requiresConfigMatch") is True:
+        planned["requiresConfigMatch"] = True
     if "pathPatterns" in step:
         planned["pathPatterns"] = list(step["pathPatterns"])
     return planned
@@ -780,19 +785,30 @@ def _collect_steps(
         if not _selector_matches(path, filetype, selector):
             continue
         for step in selector.get(phase, []):
+            planned = _planned_step(registry, path, step, phase)
             if not _path_pattern_matches(path, step.get("pathPatterns", [])):
                 skipped.append(
                     _skipped_record(
-                        _planned_step(registry, path, step, phase),
+                        planned,
                         "path-pattern",
                         patterns=list(step.get("pathPatterns", [])),
                     )
                 )
                 continue
+            if (
+                step.get("requiresConfigMatch") is True
+                and planned["config"].get("source") == "none"
+            ):
+                # Some tools are useful only after a config policy has found
+                # real project metadata. Keeping that gate in the planner makes
+                # `plan`, `explain`, and shell execution describe the same
+                # skip instead of hiding it inside one adapter.
+                skipped.append(_skipped_record(planned, "missing-config"))
+                continue
             key = _step_key(step, phase)
             if key in seen:
                 continue
-            steps.append(_planned_step(registry, path, step, phase))
+            steps.append(planned)
             seen.add(key)
     return steps, skipped
 

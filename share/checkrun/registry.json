@@ -129,6 +129,14 @@
       "project": [{ "file": ".clang-format" }, { "file": "_clang-format" }],
       "fallback": { "file": "clang-format" }
     },
+    "clang-tidy": {
+      "project": [
+        { "file": ".clang-tidy" },
+        { "file": "compile_commands.json" },
+        { "file": "compile_flags.txt" }
+      ],
+      "native": "none"
+    },
     "cmake-format": {
       "project": [
         { "file": ".cmake-format.py" },
@@ -276,6 +284,7 @@
     "buildifier-lint": { "kind": "shell-function", "function": "_lint_buildifier" },
     "checkmake": { "kind": "shell-function", "function": "_lint_checkmake" },
     "clang-format": { "kind": "shell-function", "function": "_format_clang" },
+    "clang-tidy": { "kind": "shell-function", "function": "_lint_clang_tidy" },
     "cmake-format": { "kind": "shell-function", "function": "_format_cmake" },
     "cmake-lint": { "kind": "shell-function", "function": "_lint_cmake" },
     "crontab": { "kind": "shell-function", "function": "_lint_crontab" },
@@ -402,7 +411,14 @@
       "id": "c-family",
       "filetypes": ["c", "cpp"],
       "format": [{ "tool": "clang-format", "adapter": "clang-format", "config": "clang-format" }],
-      "lint": []
+      "lint": [
+        {
+          "tool": "clang-tidy",
+          "adapter": "clang-tidy",
+          "config": "clang-tidy",
+          "requiresConfigMatch": true
+        }
+      ]
     },
     {
       "id": "html",

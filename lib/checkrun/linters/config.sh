@@ -123,7 +123,7 @@ _lint_taplo() {
   # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
   # $4 config_path. taplo wants config_source ("none" triggers --no-schema), so
   # dir is the only named-ignored local here.
-  local file="$1" _dir="$2" config_source="${3:-}" config_path="${4:-}" rc=0 err tool_rc msg
+  local file="$1" _dir="$2" config_source="${3:-}" config_path="${4:-}" rc=0 err tool_rc
   local args=()
 
   command -v taplo &>/dev/null || return 0
@@ -138,13 +138,15 @@ _lint_taplo() {
   fi
 
   if [ "$json" -eq 1 ]; then
-    # taplo has no structured output. Synthesize a minimal file-level error
-    # when it reports non-zero so JSON mode still surfaces broken files.
-    err=$(RUST_LOG=error taplo check ${args[@]+"${args[@]}"} "$file" 2>&1 1>/dev/null)
+    err=$(
+      RUST_LOG=error taplo check --colors never \
+        ${args[@]+"${args[@]}"} "$file" 2>&1 1>/dev/null
+    )
     tool_rc=$?
     if [ "$tool_rc" -ne 0 ]; then
-      msg=${err:-"taplo check failed"}
-      _emit_synth_error "$file" "$msg" "taplo"
+      if ! _taplo_json_diagnostics "$file" "$err"; then
+        _emit_synth_error "$file" "${err:-"taplo check failed"}" "taplo"
+      fi
       rc=$tool_rc
     fi
   else
@@ -152,4 +154,43 @@ _lint_taplo() {
   fi
 
   return "$rc"
+}
+
+_taplo_json_diagnostics() {
+  local file="$1" output="$2" emitted=0 diag loc line col rest msg
+
+  # Taplo prints rich annotated text but no machine format. Anchor on its
+  # location lines after `--colors never`; if the format changes, callers still
+  # fall back to the synthesized file-level diagnostic in _lint_taplo.
+  msg="taplo check failed"
+  while IFS= read -r diag; do
+    if [[ "$diag" == error:* ]]; then
+      msg=${diag#error: }
+      continue
+    fi
+    [[ "$diag" == *"$file":* ]] || continue
+    loc=${diag#*"$file":}
+    line=${loc%%:*}
+    rest=${loc#*:}
+    col=${rest%%[^0-9]*}
+    case "$line:$col" in
+      *[!0-9:]* | :* | *:) continue ;;
+    esac
+    jq -cn \
+      --arg p "$file" \
+      --argjson l "$line" \
+      --argjson c "$col" \
+      --arg m "$msg" \
+      '{
+        path: $p,
+        line: $l,
+        col: $c,
+        severity: "error",
+        message: $m,
+        source: "taplo"
+      }'
+    emitted=1
+  done <<<"$output"
+
+  [ "$emitted" -eq 1 ]
 }

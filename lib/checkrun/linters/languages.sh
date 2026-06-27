@@ -74,6 +74,112 @@ _lint_java() {
     google-java-format --dry-run --set-exit-if-changed "$file"
 }
 
+_clang_tidy_json_diagnostics() {
+  local file="$1" output="$2" emitted=0 diag loc line col rest severity msg code
+
+  # clang-tidy has no stable JSON diagnostics. Parse only its canonical
+  # `path:line:column: severity: message [check]` records so summary chatter
+  # and compiler notes do not become editor diagnostics.
+  while IFS= read -r diag; do
+    [[ "$diag" == *"$file":* ]] || continue
+    loc=${diag#*"$file":}
+    line=${loc%%:*}
+    rest=${loc#*:}
+    col=${rest%%:*}
+    rest=${rest#*:}
+    case "$line:$col" in
+      *[!0-9:]* | :* | *:) continue ;;
+    esac
+    rest=${rest# }
+    severity=${rest%%:*}
+    rest=${rest#*:}
+    msg=${rest# }
+    code=""
+    if [[ "$msg" == *" ["*"]" ]]; then
+      code=${msg##*\[}
+      code=${code%\]}
+      msg=${msg%" [$code]"}
+    fi
+    jq -cn \
+      --arg p "$file" \
+      --argjson l "$line" \
+      --argjson c "$col" \
+      --arg sev "$severity" \
+      --arg code "$code" \
+      --arg m "$msg" \
+      "$_JQ_SEVLIB"'
+      {
+        path: $p,
+        line: $l,
+        col: $c,
+        severity: sev($sev),
+        code: (if $code == "" then null else $code end),
+        message: $m,
+        source: "clang-tidy"
+      }'
+    emitted=1
+  done <<<"$output"
+
+  [ "$emitted" -eq 1 ]
+}
+
+_lint_clang_tidy() {
+  local file="$1" dir="$2" config_source="${3:-}" _config_path="${4:-}"
+  local clang_config compile_db compile_flags compile_root rc=0 out tool_rc
+  local args=()
+
+  command -v clang-tidy &>/dev/null || return 0
+  [ "$config_source" = "none" ] && return 0
+
+  # The registry-level config probe is the single source of truth for whether
+  # clang-tidy may run at all. Once it is allowed, discover rule config and
+  # compile metadata independently because projects commonly have both and
+  # clang-tidy needs them on different CLI flags.
+  clang_config=$(_find_config "$dir" .clang-tidy 2>/dev/null || true)
+  compile_db=$(_find_config "$dir" compile_commands.json 2>/dev/null || true)
+  compile_flags=$(_find_config "$dir" compile_flags.txt 2>/dev/null || true)
+  if [ -n "$compile_db" ]; then
+    compile_root=$(dirname "$compile_db")
+  elif [ -n "$compile_flags" ]; then
+    compile_root=$(dirname "$compile_flags")
+  else
+    compile_root=""
+  fi
+
+  [ -n "$clang_config$compile_root" ] || return 0
+  [ -n "$clang_config" ] && args+=("--config-file=$clang_config")
+  [ -n "$compile_root" ] && args+=("-p=$compile_root")
+
+  if [ "$fix" -eq 1 ]; then
+    args+=(--fix)
+  fi
+
+  out=$(clang-tidy --quiet ${args[@]+"${args[@]}"} "$file" 2>&1)
+  tool_rc=$?
+  if [ "$json" -eq 1 ]; then
+    local parsed=1
+    if [ -n "$out" ]; then
+      _clang_tidy_json_diagnostics "$file" "$out"
+      parsed=$?
+      if [ "$parsed" -ne 0 ] && [ "$tool_rc" -ne 0 ]; then
+        _emit_synth_error "$file" "$out" "clang-tidy"
+      fi
+    fi
+    [ "$tool_rc" -ne 0 ] && rc=$tool_rc
+    if [ "$rc" -eq 0 ] && [ "$parsed" -eq 0 ]; then
+      rc=1
+    fi
+  else
+    [ -n "$out" ] && printf '%s\n' "$out"
+    [ "$tool_rc" -ne 0 ] && rc=$tool_rc
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qF "$file:"; then
+      rc=1
+    fi
+  fi
+
+  return "$rc"
+}
+
 _lint_rust() {
   local file="$1" dir="$2" manifest manifest_dir
   command -v cargo &>/dev/null || return 0

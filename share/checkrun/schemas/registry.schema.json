@@ -169,6 +169,7 @@
         "tool": { "type": "string" },
         "adapter": { "type": "string" },
         "config": { "type": "string" },
+        "requiresConfigMatch": { "type": "boolean" },
         "pathPatterns": {
           "type": "array",
           "items": { "type": "string" }

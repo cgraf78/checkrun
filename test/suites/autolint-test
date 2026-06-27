@@ -869,6 +869,57 @@ set -e
 _assert_exit "toml: no configs → exits 0" 0 "$rc"
 _assert_contains "toml: no configs → --no-schema" "--no-schema" "$output"
 
+# Dispatch-wiring: clang-tidy is editor-safe. It is selected only when
+# C/C++ project metadata exists, then the adapter passes the discovered config
+# and compile database roots explicitly.
+_clang_tidy_mockbin=$(_mock_bin)
+cat >"$_clang_tidy_mockbin/clang-tidy" <<'EOF'
+#!/usr/bin/env bash
+printf 'MOCK-CLANG-TIDY-ARGS:'
+for arg in "$@"; do
+  printf ' [%s]' "$arg"
+done
+printf '\n'
+exit 0
+EOF
+chmod +x "$_clang_tidy_mockbin/clang-tidy"
+
+_clang_no_config=$(_tmpdir)
+echo 'int main() { return 0; }' >"$_clang_no_config/main.cpp"
+set +e
+output=$(PATH="$_clang_tidy_mockbin:$PATH" "$AUTOLINT" "$_clang_no_config/main.cpp" 2>&1)
+rc=$?
+set -e
+_assert_exit "cpp: clang-tidy without metadata exits 0" 0 "$rc"
+_assert_not_contains "cpp: clang-tidy without metadata is skipped" \
+  "MOCK-CLANG-TIDY-ARGS:" "$output"
+
+_clang_with_config=$(_tmpdir)
+mkdir -p "$_clang_with_config/src"
+: >"$_clang_with_config/.clang-tidy"
+echo 'int main() { return 0; }' >"$_clang_with_config/src/main.cpp"
+set +e
+output=$(PATH="$_clang_tidy_mockbin:$PATH" "$AUTOLINT" "$_clang_with_config/src/main.cpp" 2>&1)
+rc=$?
+set -e
+_assert_exit "cpp: clang-tidy with .clang-tidy exits 0" 0 "$rc"
+_assert_contains "cpp: clang-tidy with .clang-tidy runs" \
+  "MOCK-CLANG-TIDY-ARGS:" "$output"
+_assert_contains_path_arg "cpp: clang-tidy receives --config-file" \
+  "--config-file=" "$_clang_with_config/.clang-tidy" "$output"
+
+_clang_with_db=$(_tmpdir)
+mkdir -p "$_clang_with_db/src"
+: >"$_clang_with_db/compile_commands.json"
+echo 'int main() { return 0; }' >"$_clang_with_db/src/main.cpp"
+set +e
+output=$(PATH="$_clang_tidy_mockbin:$PATH" "$AUTOLINT" "$_clang_with_db/src/main.cpp" 2>&1)
+rc=$?
+set -e
+_assert_exit "cpp: clang-tidy with compile database exits 0" 0 "$rc"
+_assert_contains_path_arg "cpp: clang-tidy receives -p compile database root" \
+  "-p=" "$_clang_with_db" "$output"
+
 # Dispatch-wiring: selene config routing. Selene only looks for its
 # config in cwd, not the file's parent chain. Autolint uses _find_config
 # to locate selene.toml in the parent chain and passes --config explicitly.
@@ -2747,7 +2798,34 @@ if command -v taplo &>/dev/null; then
   set -e
   _assert_exit "json toml: exits non-zero on malformed" 1 "$rc"
   _assert_json_lines_valid "json toml: valid unified schema" "$output" "taplo"
+  _assert_contains "json toml: line parsed from taplo output" '"line":1' "$output"
+  _assert_contains "json toml: column parsed from taplo output" '"col":3' "$output"
 fi
+
+# clang-tidy — parsed diagnostics when project metadata enables the linter
+_json_clang_mock=$(_mock_bin)
+cat >"$_json_clang_mock/clang-tidy" <<'EOF'
+#!/usr/bin/env bash
+file="${@: -1}"
+printf '%s:4:2: warning: use nullptr [modernize-use-nullptr]\n' "$file"
+exit 0
+EOF
+chmod +x "$_json_clang_mock/clang-tidy"
+_json_clang_dir=$(_tmpdir)
+: >"$_json_clang_dir/.clang-tidy"
+cat >"$_json_clang_dir/main.cpp" <<'EOF'
+int main() {
+  return 0;
+}
+EOF
+set +e
+output=$(PATH="$_json_clang_mock:$PATH" "$AUTOLINT" --json "$_json_clang_dir/main.cpp" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json clang-tidy: diagnostics make lint non-zero" 1 "$rc"
+_assert_json_lines_valid "json clang-tidy: valid unified schema" "$output" "clang-tidy"
+_assert_contains "json clang-tidy: rule present" '"code":"modernize-use-nullptr"' "$output"
+_assert_contains "json clang-tidy: parsed line" '"line":4' "$output"
 
 # hadolint (Dockerfile via basename dispatch)
 if command -v hadolint &>/dev/null; then
