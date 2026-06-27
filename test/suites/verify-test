@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# verify-test — unit tests for explicit project verification checks.
+#
+# Usage: verify-test
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "verify-test"
+
+CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
+AUTOLINT="$CHECKRUN_REPO_ROOT/bin/autolint"
+
+echo "=== checkrun: verify cli ==="
+
+output=$("$CHECKRUN" --help 2>&1)
+rc=$?
+_assert_exit "top-level help: exits 0" 0 "$rc"
+_assert_contains "top-level help: lists verify command" "verify" "$output"
+
+output=$("$CHECKRUN" verify --help 2>&1)
+rc=$?
+_assert_exit "verify help: exits 0" 0 "$rc"
+_assert_contains "verify help: lists govulncheck tool filter" "govulncheck" "$output"
+
+_missing_tool_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$_missing_tool_bin/bash"
+set +e
+output=$(PATH="$_missing_tool_bin" "$CHECKRUN" verify --tool govulncheck . 2>&1)
+rc=$?
+set -e
+_assert_exit "govulncheck: missing tool is graceful no-op" 0 "$rc"
+_assert_eq "govulncheck: missing tool emits no output" "" "$output"
+
+echo "=== checkrun: govulncheck module discovery ==="
+
+_go_root=$(_tmpdir)
+mkdir -p "$_go_root/module-a/pkg" "$_go_root/module-b/cmd" "$_go_root/outside"
+cat >"$_go_root/module-a/go.mod" <<'EOF'
+module example.com/a
+go 1.21
+EOF
+cat >"$_go_root/module-a/pkg/a.go" <<'EOF'
+package pkg
+EOF
+cat >"$_go_root/module-b/go.mod" <<'EOF'
+module example.com/b
+go 1.21
+EOF
+cat >"$_go_root/module-b/cmd/b.go" <<'EOF'
+package main
+EOF
+cat >"$_go_root/outside/no-module.go" <<'EOF'
+package outside
+EOF
+
+_govuln_mock=$(_mock_bin)
+_govuln_log=$(_tmpdir)/govulncheck-calls.log
+: >"$_govuln_log"
+cat >"$_govuln_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s\n' "$PWD" "$*" >>"$GOVULNCHECK_LOG"
+exit 0
+EOF
+chmod +x "$_govuln_mock/govulncheck"
+
+set +e
+GOVULNCHECK_LOG="$_govuln_log" PATH="$_govuln_mock:$PATH" \
+  "$CHECKRUN" verify --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" \
+  "$_go_root/module-a/pkg/a.go" \
+  "$_go_root/module-b" \
+  "$_go_root/outside/no-module.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "govulncheck: exits 0 for clean modules" 0 "$rc"
+_call_count=$(wc -l <"$_govuln_log" | tr -d ' ')
+_assert_eq "govulncheck: deduplicates repeated files in one module" "2" "$_call_count"
+_assert_contains "govulncheck: runs module-a from module root" \
+  "$_go_root/module-a|./..." "$(cat "$_govuln_log")"
+_assert_contains "govulncheck: runs module-b from module root" \
+  "$_go_root/module-b|./..." "$(cat "$_govuln_log")"
+_assert_not_contains "govulncheck: ignores files outside modules" \
+  "$_go_root/outside" "$(cat "$_govuln_log")"
+
+echo "=== checkrun: govulncheck json diagnostics ==="
+
+_vuln_mock=$(_mock_bin)
+cat >"$_vuln_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-json" ]; then
+  cat <<'JSON'
+{"osv":{"id":"GO-2026-0001","summary":"reachable vulnerable symbol"}}
+{"finding":{"osv":"GO-2026-0001","trace":[{"position":{"filename":"pkg/a.go","line":7,"column":3}}]}}
+JSON
+  exit 3
+fi
+exit 3
+EOF
+chmod +x "$_vuln_mock/govulncheck"
+
+set +e
+output=$(PATH="$_vuln_mock:$PATH" "$CHECKRUN" verify --json --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" 2>&1)
+rc=$?
+set -e
+_assert_exit "govulncheck json: preserves non-zero vulnerability exit" 3 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+diagnostic = json.load(sys.stdin)
+assert diagnostic["source"] == "govulncheck"
+assert diagnostic["code"] == "GO-2026-0001"
+assert diagnostic["message"] == "reachable vulnerable symbol"
+assert diagnostic["line"] == 7
+assert diagnostic["col"] == 3
+assert diagnostic["path"].endswith("/module-a/pkg/a.go")
+'
+_assert_exit "govulncheck json: emits unified diagnostic" 0 "$?"
+
+_zero_finding_mock=$(_mock_bin)
+cat >"$_zero_finding_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-json" ]; then
+  cat <<'JSON'
+{"finding":{"osv":"GO-2026-0002","trace":[{"position":{"filename":"pkg/a.go","line":9,"column":4}}]}}
+{"finding":{"osv":"GO-2026-0003","trace":[{"module":"github.com/example/dep","position":{"filename":"dep.go","line":2,"column":1}},{"module":"example.com/a","position":{"filename":"pkg/a.go","line":11,"column":5}}]}}
+{"osv":{"id":"GO-2026-0002","summary":"summary emitted after finding"}}
+{"osv":{"id":"GO-2026-0003","summary":"dependency trace reaches app"}}
+JSON
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$_zero_finding_mock/govulncheck"
+
+set +e
+output=$(PATH="$_zero_finding_mock:$PATH" "$CHECKRUN" verify --json --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" 2>&1)
+rc=$?
+set -e
+_assert_exit "govulncheck json: findings make clean json run non-zero" 1 "$rc"
+_assert_contains "govulncheck json: buffers summary emitted after finding" \
+  '"message":"summary emitted after finding"' "$output"
+_assert_contains "govulncheck json: preserves out-of-order finding code" \
+  '"code":"GO-2026-0002"' "$output"
+_assert_contains "govulncheck json: uses app module frame after dependency frame" \
+  '/module-a/pkg/a.go' "$output"
+_assert_not_contains "govulncheck json: does not resolve dependency frame under app module" \
+  '/module-a/dep.go' "$output"
+
+_error_mock=$(_mock_bin)
+cat >"$_error_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-json" ]; then
+  echo "network unavailable" >&2
+fi
+exit 2
+EOF
+chmod +x "$_error_mock/govulncheck"
+
+set +e
+output=$(PATH="$_error_mock:$PATH" "$CHECKRUN" verify --json --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "govulncheck json error: preserves tool error exit" 2 "$rc"
+_assert_contains "govulncheck json error: emits synthetic diagnostic" \
+  '"message":"network unavailable"' "$output"
+_assert_contains "govulncheck json error: points at go.mod" \
+  '/module-a/go.mod' "$output"
+
+_warning_mock=$(_mock_bin)
+cat >"$_warning_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-json" ]; then
+  echo "cache warning" >&2
+fi
+exit 0
+EOF
+chmod +x "$_warning_mock/govulncheck"
+
+set +e
+output=$(PATH="$_warning_mock:$PATH" "$CHECKRUN" verify --json --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "govulncheck json warning: exits clean when tool exits clean" 0 "$rc"
+_assert_eq "govulncheck json warning: emits no synthetic diagnostic" "" "$output"
+
+echo "=== checkrun: govulncheck stays out of save-time lint ==="
+
+_autolint_mock=$(_mock_bin)
+_autolint_log=$(_tmpdir)/autolint-govulncheck.log
+: >"$_autolint_log"
+cat >"$_autolint_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+printf 'unexpected govulncheck autolint invocation\n' >>"$GOVULNCHECK_AUTOLINT_LOG"
+exit 9
+EOF
+cat >"$_autolint_mock/yq" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_autolint_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_autolint_mock/golangci-lint" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x \
+  "$_autolint_mock/govulncheck" \
+  "$_autolint_mock/yq" \
+  "$_autolint_mock/typos" \
+  "$_autolint_mock/golangci-lint"
+
+set +e
+GOVULNCHECK_AUTOLINT_LOG="$_autolint_log" CHECKRUN_AUTOLINT_JOBS=1 \
+  PATH="$_autolint_mock:$PATH" "$AUTOLINT" "$_go_root/module-a/pkg/a.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "autolint: go lint still exits independently" 0 "$rc"
+_assert_eq "autolint: does not invoke govulncheck" "" "$(cat "$_autolint_log")"
+
+_test_summary
