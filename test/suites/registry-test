@@ -196,20 +196,32 @@ for relative, (expected_format, expected_lint) in matrix.items():
     assert [step["adapter"] for step in format_steps] == expected_format, relative
     assert [step["adapter"] for step in lint_steps] == expected_lint, relative
 
-c_with_config = tmp / "with-clang-config" / "src" / "main.cpp"
-c_with_config.parent.mkdir(parents=True, exist_ok=True)
-(c_with_config.parent.parent / ".clang-tidy").write_text("Checks: '*'\n", encoding="utf-8")
-c_with_config.write_text("", encoding="utf-8")
-c_with_plan = registry_mod.plan(registry, [str(c_with_config)], "lint")["files"][0]["lint"]
-assert [step["adapter"] for step in c_with_plan["steps"]] == [
-    "typos",
-    "schema-lint",
-    "clang-tidy",
-]
-clang_step = c_with_plan["steps"][-1]
-assert clang_step["requiresConfigMatch"] is True
-assert clang_step["config"]["source"] == "project"
-assert clang_step["config"]["path"].endswith(".clang-tidy")
+clang_config_payloads = {
+    ".clang-tidy": "Checks: '*'\n",
+    "compile_commands.json": "[]\n",
+    "compile_flags.txt": "-std=c++20\n",
+}
+for config_name, config_payload in clang_config_payloads.items():
+    c_with_config = (
+        tmp / f"with-clang-config-{config_name.replace('.', '_')}" / "src" / "main.cpp"
+    )
+    c_with_config.parent.mkdir(parents=True, exist_ok=True)
+    (c_with_config.parent.parent / config_name).write_text(
+        config_payload, encoding="utf-8"
+    )
+    c_with_config.write_text("", encoding="utf-8")
+    c_with_plan = registry_mod.plan(registry, [str(c_with_config)], "lint")["files"][0][
+        "lint"
+    ]
+    assert [step["adapter"] for step in c_with_plan["steps"]] == [
+        "typos",
+        "schema-lint",
+        "clang-tidy",
+    ]
+    clang_step = c_with_plan["steps"][-1]
+    assert clang_step["requiresConfigMatch"] is True
+    assert clang_step["config"]["source"] == "project"
+    assert clang_step["config"]["path"].endswith(config_name)
 
 c_without_config = tmp / "without-clang-config" / "main.cpp"
 c_without_config.parent.mkdir(parents=True, exist_ok=True)
