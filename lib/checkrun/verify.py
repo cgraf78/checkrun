@@ -423,6 +423,10 @@ def _merge_rc(current: int, incoming: int) -> int:
     return current
 
 
+def _has_error_diagnostic(diagnostics: list[dict[str, Any]]) -> bool:
+    return any(diagnostic.get("severity") == "error" for diagnostic in diagnostics)
+
+
 def _run_project_tool(
     projects: list[Path],
     *,
@@ -462,7 +466,11 @@ def _run_project_tool(
                 print(json.dumps(diagnostic, separators=(",", ":"), sort_keys=True))
             if proc.returncode != 0:
                 rc = _merge_rc(rc, proc.returncode)
-            elif diagnostics:
+            elif _has_error_diagnostic(diagnostics):
+                # Some verifiers can report advisory warnings while exiting 0.
+                # Keep those visible in JSON without overriding the tool's own
+                # pass/fail policy; error diagnostics still fail defensive
+                # parsers that found actionable records despite a clean exit.
                 rc = _merge_rc(rc, 1)
         else:
             proc = subprocess.run(human_command, cwd=project, check=False)

@@ -371,6 +371,32 @@ _assert_contains "cargo-audit json warning: emits stdout warning diagnostic" \
 _assert_contains "cargo-audit json warning: keeps warning severity" \
   '"severity":"warning"' "$output"
 
+_cargo_allowed_warning_mock=$(_mock_bin)
+cat >"$_cargo_allowed_warning_mock/cargo-audit" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_cargo_allowed_warning_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "audit" ] && [ "${2:-}" = "--json" ]; then
+  cat <<'JSON'
+{"vulnerabilities":{"found":false,"list":[]},"warnings":{"unmaintained":[{"kind":"unmaintained","package":{"name":"oldcrate","version":"0.1.0"},"advisory":{"id":"RUSTSEC-2026-0004","title":"crate is unmaintained"}}]}}
+JSON
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$_cargo_allowed_warning_mock/cargo" "$_cargo_allowed_warning_mock/cargo-audit"
+
+set +e
+output=$(PATH="$_cargo_allowed_warning_mock:$PATH" "$CHECKRUN" verify --json --tool cargo-audit \
+  "$_rust_root/crate-a/src/lib.rs" 2>&1)
+rc=$?
+set -e
+_assert_exit "cargo-audit json warning: allowed warnings keep clean exit" 0 "$rc"
+_assert_contains "cargo-audit json warning: allowed warnings still emit diagnostics" \
+  '"message":"RUSTSEC-2026-0004: unmaintained; crate is unmaintained; oldcrate 0.1.0"' "$output"
+
 _cargo_error_mock=$(_mock_bin)
 cat >"$_cargo_error_mock/cargo-audit" <<'EOF'
 #!/usr/bin/env bash
