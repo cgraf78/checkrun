@@ -48,6 +48,15 @@ _run_schema_refresh() {
   exec "$python" "$CHECKRUN_LIB_DIR/schemas/schema_refresh.py" "$@"
 }
 
+_run_verify() {
+  local python
+  python=$(_checkrun_python 'import sys') || {
+    echo "checkrun: python3 is required for verify checks" >&2
+    exit 127
+  }
+  exec "$python" "$CHECKRUN_LIB_DIR/verify.py" "$@"
+}
+
 _usage() {
   cat <<'EOF'
 Usage: checkrun COMMAND [ARGS...]
@@ -60,6 +69,7 @@ Commands:
   plan      emit formatter/linter execution plans
   explain   explain formatter/linter/schema policy for files
   schema    schema maintenance commands
+  verify    run explicit project verification checks
   format    run autoformat compatibility entry point
   lint      run autolint compatibility entry point
   check     alias for lint
@@ -122,6 +132,10 @@ EOF
         exit 2
         ;;
     esac
+    ;;
+  verify)
+    shift
+    _run_verify "$@"
     ;;
   format | fmt)
     shift

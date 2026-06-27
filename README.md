@@ -16,6 +16,7 @@ checkrun registry --json
 checkrun capabilities --json
 checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
+checkrun verify [--json] [--tool govulncheck] [PATH...]
 checkrun format FILE [FILE...]
 checkrun lint [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
@@ -28,6 +29,11 @@ fails so save-time hooks surface stderr without blocking the caller.
 `autolint` is read-only by default, applies fixes with `--fix`, and emits
 newline-delimited diagnostics with `--json`. It exits non-zero when lint
 findings exist.
+
+`checkrun verify` is the explicit project-check surface for work that should
+not run from save-time editor lint. Its initial backend is `govulncheck`: it
+discovers Go module roots from the requested paths, runs once per module, and
+deduplicates repeated files from the same module.
 
 Both commands ignore missing, deleted, or explicitly ignored files. Missing
 language tools are treated as graceful no-ops so a host without a language
@@ -89,6 +95,9 @@ own toolchain through the host environment or integration layer.
   payloads from association `source` URLs. It is exposed as
   `checkrun schema refresh` so host repos can run the same updater directly or
   from scheduled CI.
+- `lib/checkrun/verify.py` runs explicit project-scope verification checks.
+  These checks are intentionally separate from registry lint capabilities so
+  editor integrations do not inherit slow or network-sensitive security scans.
 - `share/checkrun/schemas/associations.schema.json` is the JSON Schema for
   schema association policy files.
 - `share/checkrun/shell.sh` is a stable no-op shell loader for integration
@@ -260,6 +269,11 @@ dynamically scoped `fix` and `json` behavior.
 chain contains `.clang-tidy`, `compile_commands.json`, or `compile_flags.txt`.
 That keeps save-time editor lint quiet for standalone C/C++ files while still
 using project-owned rule and compile metadata when it exists.
+
+`govulncheck` is intentionally not listed as a Go linter. Run it explicitly
+with `checkrun verify [PATH...]`; Checkrun walks to `go.mod` roots and runs
+`govulncheck ./...` once per module. Missing `govulncheck` is a no-op, matching
+the rest of Checkrun's optional backend policy.
 
 Basename-only files such as `Dockerfile`, `BUCK`, `BUILD`, `TARGETS`,
 `WORKSPACE`, `MODULE.bazel`, and `Containerfile` are dispatched before
