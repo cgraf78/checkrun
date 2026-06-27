@@ -2605,6 +2605,14 @@ _assert_exit "rel js: terminates with biome on PATH" 0 "$rc"
 
 echo "=== --json: unified schema per filetype ==="
 
+DIAGNOSTICS_SCHEMA="$CHECKRUN_TEST_ROOT/share/checkrun/schemas/diagnostics.schema.json"
+_assert_file_exists "diagnostics schema: repo schema file is tracked" "$DIAGNOSTICS_SCHEMA"
+set +e
+jq empty "$DIAGNOSTICS_SCHEMA" >/dev/null
+rc=$?
+set -e
+_assert_exit "diagnostics schema: schema is valid json" 0 "$rc"
+
 # Shared assertion: every non-empty line of $1 parses as JSON with
 # the required fields and sensible types/values.
 _assert_json_lines_valid() {
@@ -2618,13 +2626,18 @@ _assert_json_lines_valid() {
   # find, or "ok" if every record is well-formed. `inputs` + `-n`
   # streams JSON-lines safely even when a record contains nested
   # objects that span no newlines.
-  check=$(printf '%s\n' "$output" | jq -nr --arg src "$expected_source" '
+  check=$(printf '%s\n' "$output" | jq -nr --arg src "$expected_source" --slurpfile schema "$DIAGNOSTICS_SCHEMA" '
+    def severities: ($schema[0].properties.severity.enum // []);
     def problem:
       if type != "object" then "not-object"
+      elif (keys_unsorted - ["path","line","col","end_line","end_col","severity","code","message","source"] | length) > 0 then "unknown-field"
       elif (.path | type) != "string" then "bad-path"
-      elif (.line | type) != "number" or .line < 1 then "bad-line"
-      elif (.col  | type) != "number" or .col  < 1 then "bad-col"
-      elif ([.severity] | inside(["error","warning","info","hint"]) | not) then "bad-severity: " + (.severity|tostring)
+      elif (.line | type) != "number" or .line < 1 or (.line % 1) != 0 then "bad-line"
+      elif (.col  | type) != "number" or .col  < 1 or (.col % 1) != 0 then "bad-col"
+      elif (has("end_line") and ((.end_line | type) != "number" or .end_line < 1 or (.end_line % 1) != 0)) then "bad-end-line"
+      elif (has("end_col") and ((.end_col | type) != "number" or .end_col < 1 or (.end_col % 1) != 0)) then "bad-end-col"
+      elif (has("code") and ((.code | type) != "string" and (.code | type) != "null")) then "bad-code"
+      elif ([.severity] | inside(severities) | not) then "bad-severity: " + (.severity|tostring)
       elif (.message | type) != "string" or (.message | length) == 0 then "bad-message"
       elif .source != $src then "bad-source: " + (.source|tostring)
       else "ok"

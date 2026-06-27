@@ -45,12 +45,11 @@ CHECKRUN_LIB_DIR="${BASH_SOURCE[0]%/*}"
 # surprise fixes. Pass `--fix` explicitly — e.g. from the CLI — when
 # the caller wants ruff/biome/rumdl to also apply fixes.
 #
-# `--json` emits one JSON object per diagnostic on stdout, in a unified
-# schema: {path,line,col,end_line?,end_col?,severity,code?,message,source}.
-# Line/col are 1-based. Designed for nvim-lint so the editor's
-# diagnostics are produced by exactly the same dispatch path as the
-# post-edit and pre-commit hooks. Tool stderr is suppressed in json
-# mode so the output stream stays parseable.
+# `--json` emits one JSON object per diagnostic on stdout. The durable contract
+# lives in share/checkrun/schemas/diagnostics.schema.json so editor adapters and
+# shell producers can validate the same 1-based diagnostic shape instead of
+# retyping it from this comment. Tool stderr is suppressed in json mode so the
+# output stream stays parseable.
 #
 # Every file arg is linted independently. The final exit code is
 # non-zero if any file reports diagnostics or tool errors.
