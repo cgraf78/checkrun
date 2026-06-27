@@ -26,6 +26,12 @@ _assert_contains "help: lists registry command" "registry" "$output"
 _assert_contains "help: lists plan command" "plan" "$output"
 _assert_contains "help: lists explain command" "explain" "$output"
 _assert_contains "help: lists schema command" "schema" "$output"
+_assert_contains "help: lists check alias" "check     alias for lint" "$output"
+
+output=$("$CHECKRUN" check --help 2>&1)
+rc=$?
+_assert_exit "check alias: --help exits 0" 0 "$rc"
+_assert_contains "check alias: dispatches to autolint" "Usage: autolint" "$output"
 
 output=$("$CHECKRUN" schema --help 2>&1)
 rc=$?

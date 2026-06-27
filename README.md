@@ -36,9 +36,9 @@ not run from save-time editor lint. Its security backends are project-scoped and
 deduplicated by owner root: `cargo-audit` runs once per Rust project with
 `Cargo.toml` and `Cargo.lock`, and `govulncheck` runs once per Go module root.
 
-Both commands ignore missing, deleted, or explicitly ignored files. Missing
-language tools are treated as graceful no-ops so a host without a language
-toolchain does not break unrelated workflows.
+The formatter and linter entry points ignore missing, deleted, or explicitly
+ignored files. Missing language tools are treated as graceful no-ops so a host
+without a language toolchain does not break unrelated workflows.
 
 `checkrun registry --json` emits the raw registry for debugging and tests.
 `checkrun capabilities --json` emits machine-readable filetype metadata for
