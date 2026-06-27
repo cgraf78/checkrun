@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -61,6 +62,17 @@ def _walk_go_modules(root: Path) -> list[Path]:
     return modules
 
 
+def _go_module_path(module: Path) -> str | None:
+    try:
+        content = (module / "go.mod").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"(?m)^\s*module\s+([^\s]+)", content)
+    if match:
+        return match.group(1)
+    return None
+
+
 def discover_go_modules(paths: list[str]) -> list[Path]:
     modules: list[Path] = []
     seen: set[str] = set()
@@ -88,9 +100,26 @@ def discover_go_modules(paths: list[str]) -> list[Path]:
     return modules
 
 
-def _position_from_trace(module: Path, finding: dict[str, Any]) -> tuple[str, int, int]:
+def _position_from_trace(
+    module: Path,
+    module_path: str | None,
+    finding: dict[str, Any],
+) -> tuple[str, int, int]:
     for frame in finding.get("trace", []) or []:
         if not isinstance(frame, dict):
+            continue
+        # govulncheck trace positions are relative to the enclosing frame's
+        # module, and traces start at the vulnerable dependency before walking
+        # back to the user's entry point. Only resolve positions from the module
+        # we scanned; dependency positions would otherwise become fake paths
+        # under this repository.
+        frame_module = frame.get("module")
+        if (
+            module_path
+            and isinstance(frame_module, str)
+            and frame_module
+            and frame_module != module_path
+        ):
             continue
         position = frame.get("position")
         if not isinstance(position, dict):
@@ -171,8 +200,9 @@ def _parse_govulncheck_json(module: Path, stdout: str) -> list[dict[str, Any]]:
     # govulncheck emits a stream, not a sorted document. Buffer findings until
     # all OSV records are known so summaries survive whichever order the tool
     # chooses for a particular run or future protocol version.
+    module_path = _go_module_path(module)
     for finding in findings:
-        path, line_no, col = _position_from_trace(module, finding)
+        path, line_no, col = _position_from_trace(module, module_path, finding)
         vuln_id = _finding_id(finding)
         diagnostics.append(
             {

@@ -131,7 +131,9 @@ cat >"$_zero_finding_mock/govulncheck" <<'EOF'
 if [ "${1:-}" = "-json" ]; then
   cat <<'JSON'
 {"finding":{"osv":"GO-2026-0002","trace":[{"position":{"filename":"pkg/a.go","line":9,"column":4}}]}}
+{"finding":{"osv":"GO-2026-0003","trace":[{"module":"github.com/example/dep","position":{"filename":"dep.go","line":2,"column":1}},{"module":"example.com/a","position":{"filename":"pkg/a.go","line":11,"column":5}}]}}
 {"osv":{"id":"GO-2026-0002","summary":"summary emitted after finding"}}
+{"osv":{"id":"GO-2026-0003","summary":"dependency trace reaches app"}}
 JSON
   exit 0
 fi
@@ -149,6 +151,10 @@ _assert_contains "govulncheck json: buffers summary emitted after finding" \
   '"message":"summary emitted after finding"' "$output"
 _assert_contains "govulncheck json: preserves out-of-order finding code" \
   '"code":"GO-2026-0002"' "$output"
+_assert_contains "govulncheck json: uses app module frame after dependency frame" \
+  '/module-a/pkg/a.go' "$output"
+_assert_not_contains "govulncheck json: does not resolve dependency frame under app module" \
+  '/module-a/dep.go' "$output"
 
 _error_mock=$(_mock_bin)
 cat >"$_error_mock/govulncheck" <<'EOF'
