@@ -920,6 +920,18 @@ _assert_exit "cpp: clang-tidy with compile database exits 0" 0 "$rc"
 _assert_contains_path_arg "cpp: clang-tidy receives -p compile database root" \
   "-p=" "$_clang_with_db" "$output"
 
+_clang_with_flags=$(_tmpdir)
+mkdir -p "$_clang_with_flags/src"
+: >"$_clang_with_flags/compile_flags.txt"
+echo 'int main() { return 0; }' >"$_clang_with_flags/src/main.cpp"
+set +e
+output=$(PATH="$_clang_tidy_mockbin:$PATH" "$AUTOLINT" "$_clang_with_flags/src/main.cpp" 2>&1)
+rc=$?
+set -e
+_assert_exit "cpp: clang-tidy with compile flags exits 0" 0 "$rc"
+_assert_contains_path_arg "cpp: clang-tidy receives -p compile flags root" \
+  "-p=" "$_clang_with_flags" "$output"
+
 # Dispatch-wiring: selene config routing. Selene only looks for its
 # config in cwd, not the file's parent chain. Autolint uses _find_config
 # to locate selene.toml in the parent chain and passes --config explicitly.
@@ -2808,6 +2820,7 @@ cat >"$_json_clang_mock/clang-tidy" <<'EOF'
 #!/usr/bin/env bash
 file="${@: -1}"
 printf '%s:4:2: warning: use nullptr [modernize-use-nullptr]\n' "$file"
+printf '%s:5:3: note: compiler context only [clang-diagnostic-note]\n' "$file"
 exit 0
 EOF
 chmod +x "$_json_clang_mock/clang-tidy"
@@ -2826,6 +2839,8 @@ _assert_exit "json clang-tidy: diagnostics make lint non-zero" 1 "$rc"
 _assert_json_lines_valid "json clang-tidy: valid unified schema" "$output" "clang-tidy"
 _assert_contains "json clang-tidy: rule present" '"code":"modernize-use-nullptr"' "$output"
 _assert_contains "json clang-tidy: parsed line" '"line":4' "$output"
+_assert_not_contains "json clang-tidy: compiler notes are not diagnostics" \
+  "clang-diagnostic-note" "$output"
 
 # hadolint (Dockerfile via basename dispatch)
 if command -v hadolint &>/dev/null; then

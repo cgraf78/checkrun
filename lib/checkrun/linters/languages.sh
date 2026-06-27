@@ -92,6 +92,13 @@ _clang_tidy_json_diagnostics() {
     esac
     rest=${rest# }
     severity=${rest%%:*}
+    # Same-file compiler notes use the same location shape as clang-tidy
+    # findings, but they are supporting context for a real warning/error. Do
+    # not promote them into standalone editor diagnostics.
+    case "$severity" in
+      warning | error) ;;
+      *) continue ;;
+    esac
     rest=${rest#*:}
     msg=${rest# }
     code=""
