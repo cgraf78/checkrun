@@ -54,6 +54,10 @@ The physical `capabilities.json` file should be retired. `checkrun capabilities
 
 ## Ownership Boundaries
 
+The durable cross-surface ownership contract is documented in
+[`workflow-contract.md`](workflow-contract.md). The registry details below are
+the Checkrun-owned implementation of that contract.
+
 Checkrun owns:
 
 - supported filetype identifiers
