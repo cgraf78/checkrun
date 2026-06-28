@@ -17,6 +17,10 @@ _require_compatible_libc "verify-test"
 CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
 AUTOLINT="$CHECKRUN_REPO_ROOT/bin/autolint"
 
+_realpath_dir() {
+  (cd -- "$1" && pwd -P)
+}
+
 echo "=== checkrun: verify cli ==="
 
 output=$("$CHECKRUN" --help 2>&1)
@@ -79,7 +83,7 @@ _assert_eq "clang-tidy: missing tool emits no output" "" "$output"
 
 echo "=== checkrun: govulncheck module discovery ==="
 
-_go_root=$(_tmpdir)
+_go_root=$(_realpath_dir "$(_tmpdir)")
 mkdir -p "$_go_root/module-a/pkg" "$_go_root/module-b/cmd" "$_go_root/outside"
 cat >"$_go_root/module-a/go.mod" <<'EOF'
 module example.com/a
@@ -132,7 +136,7 @@ echo "=== checkrun: golangci-lint module discovery ==="
 
 _golangci_mock=$(_mock_bin)
 _golangci_log=$(_tmpdir)/golangci-lint-calls.log
-_golangci_config_root=$(_tmpdir)
+_golangci_config_root=$(_realpath_dir "$(_tmpdir)")
 : >"$_golangci_log"
 cat >"$_golangci_config_root/golangci-lint.yml" <<'EOF'
 version: "2"
@@ -166,7 +170,7 @@ _assert_not_contains "golangci-lint: ignores files outside modules" \
 
 echo "=== checkrun: cargo-audit project discovery ==="
 
-_rust_root=$(_tmpdir)
+_rust_root=$(_realpath_dir "$(_tmpdir)")
 mkdir -p "$_rust_root/crate-a/src" "$_rust_root/crate-b/src" "$_rust_root/unlocked/src"
 cat >"$_rust_root/crate-a/Cargo.toml" <<'EOF'
 [package]
@@ -279,8 +283,8 @@ _assert_contains "cargo-clippy: does not require Cargo.lock" \
 
 echo "=== checkrun: clang-tidy file discovery ==="
 
-_cpp_root=$(_tmpdir)
-_cpp_unconfigured_root=$(_tmpdir)
+_cpp_root=$(_realpath_dir "$(_tmpdir)")
+_cpp_unconfigured_root=$(_realpath_dir "$(_tmpdir)")
 mkdir -p "$_cpp_root/src" "$_cpp_root/include" "$_cpp_unconfigured_root"
 : >"$_cpp_root/.clang-tidy"
 cat >"$_cpp_root/src/main.cpp" <<'EOF'
@@ -316,9 +320,9 @@ _assert_exit "clang-tidy: exits 0 for clean files" 0 "$rc"
 _clang_tidy_call_count=$(wc -l <"$_clang_tidy_log" | tr -d ' ')
 _assert_eq "clang-tidy: deduplicates repeated files" "2" "$_clang_tidy_call_count"
 _assert_contains "clang-tidy: runs selected source file with project config" \
-  "--config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
 _assert_contains "clang-tidy: walks selected directories for C++ headers" \
-  "--config-file=$_cpp_root/.clang-tidy $_cpp_root/include/demo.hpp" "$(cat "$_clang_tidy_log")"
+  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/include/demo.hpp" "$(cat "$_clang_tidy_log")"
 _assert_not_contains "clang-tidy: skips C++ files without metadata gate" \
   "$_cpp_unconfigured_root/no-config.cpp" "$(cat "$_clang_tidy_log")"
 
