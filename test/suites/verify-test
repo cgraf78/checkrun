@@ -168,6 +168,38 @@ _assert_contains "golangci-lint: runs module-b from module root" \
 _assert_not_contains "golangci-lint: ignores files outside modules" \
   "$_go_root/outside" "$(cat "$_golangci_log")"
 
+: >"$_golangci_log"
+set +e
+GOLANGCI_LINT_LOG="$_golangci_log" CHECKRUN_CONFIG_DIR="$_golangci_config_root" \
+  PATH="$_golangci_mock:$PATH" \
+  "$CHECKRUN" verify --tool golangci-lint "$_go_root/module-a/pkg/deleted.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "golangci-lint: deleted file scope exits 0" 0 "$rc"
+_assert_contains "golangci-lint: deleted file scopes to owning module" \
+  "$_go_root/module-a|run --config $_golangci_config_root/golangci-lint.yml ./..." "$(cat "$_golangci_log")"
+
+: >"$_golangci_log"
+set +e
+GOLANGCI_LINT_LOG="$_golangci_log" CHECKRUN_CONFIG_DIR="$_golangci_config_root" \
+  PATH="$_golangci_mock:$PATH" \
+  "$CHECKRUN" verify --tool golangci-lint "$_go_root/module-a/removed/pkg/deleted.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "golangci-lint: deleted parent scope exits 0" 0 "$rc"
+_assert_contains "golangci-lint: deleted parent scopes to owning module" \
+  "$_go_root/module-a|run --config $_golangci_config_root/golangci-lint.yml ./..." "$(cat "$_golangci_log")"
+
+: >"$_golangci_log"
+set +e
+GOLANGCI_LINT_LOG="$_golangci_log" CHECKRUN_CONFIG_DIR="$_golangci_config_root" \
+  PATH="$_golangci_mock:$PATH" \
+  "$CHECKRUN" verify --tool golangci-lint "$_go_root/module-a/docs/deleted.md" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "golangci-lint: deleted non-go path exits 0" 0 "$rc"
+_assert_eq "golangci-lint: deleted non-go path is not a module scope hint" "" "$(cat "$_golangci_log")"
+
 echo "=== checkrun: cargo-audit project discovery ==="
 
 _rust_root=$(_realpath_dir "$(_tmpdir)")
@@ -241,6 +273,16 @@ _assert_contains "cargo-audit: runs crate-b from project root" \
 _assert_not_contains "cargo-audit: ignores Cargo.toml without lockfile" \
   "$_rust_root/unlocked" "$(cat "$_cargo_audit_log")"
 
+: >"$_cargo_audit_log"
+set +e
+CARGO_AUDIT_LOG="$_cargo_audit_log" PATH="$_cargo_audit_mock:$PATH" \
+  "$CHECKRUN" verify --tool cargo-audit "$_rust_root/crate-a/src/deleted.rs" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "cargo-audit: deleted file scope exits 0" 0 "$rc"
+_assert_contains "cargo-audit: deleted file scopes to owning locked project" \
+  "$_rust_root/crate-a|audit" "$(cat "$_cargo_audit_log")"
+
 echo "=== checkrun: cargo-clippy project discovery ==="
 
 _cargo_clippy_mock=$(_mock_bin)
@@ -280,6 +322,26 @@ _assert_contains "cargo-clippy: runs crate-b from project root" \
 _assert_contains "cargo-clippy: does not require Cargo.lock" \
   "$_rust_root/unlocked|clippy --manifest-path $_rust_root/unlocked/Cargo.toml --all-targets -- -D warnings" \
   "$(cat "$_cargo_clippy_log")"
+
+: >"$_cargo_clippy_log"
+set +e
+CARGO_CLIPPY_LOG="$_cargo_clippy_log" PATH="$_cargo_clippy_mock:$PATH" \
+  "$CHECKRUN" verify --tool cargo-clippy "$_rust_root/crate-a/src/deleted.rs" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "cargo-clippy: deleted file scope exits 0" 0 "$rc"
+_assert_contains "cargo-clippy: deleted file scopes to owning project" \
+  "$_rust_root/crate-a|clippy --manifest-path $_rust_root/crate-a/Cargo.toml --all-targets -- -D warnings" \
+  "$(cat "$_cargo_clippy_log")"
+
+: >"$_cargo_clippy_log"
+set +e
+CARGO_CLIPPY_LOG="$_cargo_clippy_log" PATH="$_cargo_clippy_mock:$PATH" \
+  "$CHECKRUN" verify --tool cargo-clippy "$_rust_root/crate-a/docs/deleted.md" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "cargo-clippy: deleted non-rust path exits 0" 0 "$rc"
+_assert_eq "cargo-clippy: deleted non-rust path is not a project scope hint" "" "$(cat "$_cargo_clippy_log")"
 
 echo "=== checkrun: clang-tidy file discovery ==="
 
@@ -325,6 +387,42 @@ _assert_contains "clang-tidy: walks selected directories for C++ headers" \
   "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/include/demo.hpp" "$(cat "$_clang_tidy_log")"
 _assert_not_contains "clang-tidy: skips C++ files without metadata gate" \
   "$_cpp_unconfigured_root/no-config.cpp" "$(cat "$_clang_tidy_log")"
+
+: >"$_clang_tidy_log"
+set +e
+CLANG_TIDY_LOG="$_clang_tidy_log" PATH="$_clang_tidy_mock:$PATH" \
+  "$CHECKRUN" verify --tool clang-tidy "$_cpp_root/src/deleted.cpp" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "clang-tidy: deleted file scope exits 0" 0 "$rc"
+_assert_contains "clang-tidy: deleted file scopes to surviving directory context" \
+  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+_assert_not_contains "clang-tidy: deleted file does not lint missing path" \
+  "$_cpp_root/src/deleted.cpp" "$(cat "$_clang_tidy_log")"
+
+: >"$_clang_tidy_log"
+set +e
+CLANG_TIDY_LOG="$_clang_tidy_log" PATH="$_clang_tidy_mock:$PATH" \
+  "$CHECKRUN" verify --tool clang-tidy "$_cpp_root/src/removed/deleted.cpp" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "clang-tidy: deleted parent scope exits 0" 0 "$rc"
+_assert_contains "clang-tidy: deleted parent scopes to surviving directory context" \
+  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+_assert_not_contains "clang-tidy: deleted parent does not lint missing path" \
+  "$_cpp_root/src/removed/deleted.cpp" "$(cat "$_clang_tidy_log")"
+
+: >"$_clang_tidy_log"
+set +e
+(
+  cd "$_cpp_root"
+  CLANG_TIDY_LOG="$_clang_tidy_log" PATH="$_clang_tidy_mock:$PATH" \
+    "$CHECKRUN" verify --tool clang-tidy removed/deleted.cpp >/dev/null 2>&1
+)
+rc=$?
+set -e
+_assert_exit "clang-tidy: deleted top-level parent exits 0" 0 "$rc"
+_assert_eq "clang-tidy: deleted top-level parent does not scan invocation root" "" "$(cat "$_clang_tidy_log")"
 
 echo "=== checkrun: golangci-lint json diagnostics ==="
 
