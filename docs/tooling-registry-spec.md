@@ -151,6 +151,7 @@ Recommended top-level shape:
 {
   "version": 1,
   "filetypes": {},
+  "editorLanguageIds": { "vscode": {} },
   "selectors": [],
   "crossCutting": {},
   "configPolicies": {},
