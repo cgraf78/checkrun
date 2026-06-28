@@ -16,7 +16,7 @@ checkrun registry --json
 checkrun capabilities --json
 checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
-checkrun verify [--json] [--tool cargo-audit|govulncheck] [PATH...]
+checkrun verify [--json] [--tool cargo-audit|cargo-clippy|clang-tidy|golangci-lint|govulncheck] [PATH...]
 checkrun format FILE [FILE...]
 checkrun lint|check [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
@@ -32,9 +32,10 @@ findings exist. `checkrun lint` and `checkrun check` are aliases for this same
 fast linter path.
 
 `checkrun verify` is the explicit project-check surface for work that should
-not run from save-time editor lint. Its security backends are project-scoped and
-deduplicated by owner root: `cargo-audit` runs once per Rust project with
-`Cargo.toml` and `Cargo.lock`, and `govulncheck` runs once per Go module root.
+not run from save-time editor lint. Its project backends are deduplicated by
+owner root: Go analyzers run once per `go.mod`, Rust analyzers run once per
+`Cargo.toml`, and C/C++ `clang-tidy` runs for selected C/C++ files only when
+project metadata makes the invocation meaningful.
 
 The formatter and linter entry points ignore missing, deleted, or explicitly
 ignored files. Missing language tools are treated as graceful no-ops so a host
@@ -107,7 +108,7 @@ own toolchain through the host environment or integration layer.
   from scheduled CI.
 - `lib/checkrun/verify.py` runs explicit project-scope verification checks.
   These checks are intentionally separate from registry lint capabilities so
-  editor integrations do not inherit slow or network-sensitive security scans.
+  editor integrations do not inherit slow, broad, or network-sensitive scans.
 - `share/checkrun/schemas/associations.schema.json` is the JSON Schema for
   schema association policy files.
 - `share/checkrun/schemas/diagnostics.schema.json` is the JSON Schema for one
@@ -198,6 +199,12 @@ audits, full type-check suites, and repository health commands belong in
 `checkrun verify` or in Sley's verify registry unless they can satisfy the same
 fast-check contract.
 
+The registry encodes that policy with adapter `executionScope` metadata.
+Automatic lint selectors may only use file-scoped adapters; broader generic
+analyzers live behind `checkrun verify`, which accepts files or directories and
+chooses the owning project checks itself. This keeps Sley, editor adapters, and
+hooks from needing their own Go/Rust/C++ tool-selection tables.
+
 ## Configs
 
 Global fallback configs live under `~/.config/checkrun` by default. Set
@@ -267,7 +274,8 @@ To add a formatter or linter, update the registry first:
    discovery. Use step-level `pathPatterns` only on selector steps to narrow a
    tool within an already inferred filetype. Use `requiresConfigMatch` for
    tools that should run only when their config policy finds project metadata.
-4. Confirm lint steps satisfy the fast-check policy above. If the tool is
+4. Confirm lint steps satisfy the fast-check policy above, and mark their
+   adapter with `executionScope: "file"` when they do. If the tool is
    project-wide, network-sensitive, or expected to be slow, add it under
    `checkrun verify` or a Sley verify registry instead of the automatic lint
    surface.
@@ -289,11 +297,11 @@ dynamically scoped `fix` and `json` behavior.
 | Python | `ruff format` | `ruff check` |
 | Shell | `shfmt` | `shellcheck` |
 | Zsh | `shfmt` | `zsh -n` |
-| Go | `goimports` + `gofumpt` | `golangci-lint` |
+| Go | `goimports` + `gofumpt` | - |
 | Lua | `stylua` | `selene` |
 | C/C++ | `clang-format` | gated `clang-tidy` |
 | CMake | `cmake-format` | `cmake-lint` |
-| Rust | `rustfmt` | `cargo clippy` |
+| Rust | `rustfmt` | - |
 | Java | `google-java-format` | dry-run format check |
 | PHP | `php-cs-fixer` | `php -l` |
 | Ruby | `rubocop` layout autocorrect | `rubocop` |
@@ -318,15 +326,22 @@ chain contains `.clang-tidy`, `compile_commands.json`, or `compile_flags.txt`.
 That keeps save-time editor lint quiet for standalone C/C++ files while still
 using project-owned rule and compile metadata when it exists.
 
-Security scanners are intentionally not listed as file linters. Run them
+Broad project analyzers are intentionally not listed as file linters. Run them
 explicitly with `checkrun verify [PATH...]` or `--tool` filters:
 
+- `golangci-lint` walks to `go.mod` roots and runs `golangci-lint run ./...`
+  once per module.
+- `govulncheck` walks to `go.mod` roots and runs `govulncheck ./...` once per
+  module.
+- `cargo clippy` walks to Rust project roots that have `Cargo.toml`, then runs
+  `cargo clippy --all-targets` once per project.
 - `cargo-audit` walks to Rust project roots that have both `Cargo.toml` and
   `Cargo.lock`, then runs `cargo audit` once per project. The lockfile gate is
   intentional: dependency-audit results belong to locked project state, not
   standalone Rust source files.
-- `govulncheck` walks to `go.mod` roots and runs `govulncheck ./...` once per
-  module.
+- Verify-time `clang-tidy` walks selected C/C++ files and directories while
+  preserving the same `.clang-tidy`, `compile_commands.json`, or
+  `compile_flags.txt` metadata gate as fast lint.
 
 Missing verification tools are no-ops, matching the rest of Checkrun's optional
 backend policy.

@@ -57,7 +57,9 @@ editor operation as a check, but it must not grow separate tool selection from
 
 `checkrun verify` is the explicit project-check path. It is for checks that are
 generic enough for Checkrun to own, but too broad, slow, or project-scoped to run
-implicitly from save-time or changed-file hooks.
+from save-time editor lint. The command accepts changed files or directories and
+then chooses the owning Go modules, Rust projects, and C/C++ files itself so
+callers do not need to know language-specific analyzer rules.
 
 Sley may call these surfaces, but it should not invoke underlying tools such as
 `ruff`, `mypy`, `actionlint`, `zizmor`, `cargo-audit`, or `govulncheck`
@@ -81,7 +83,14 @@ files. A Checkrun registry lint step belongs there only when it:
 
 This is a semantic rule, not a tool-category rule. A type checker or compiler
 wrapper can be automatic when its adapter satisfies the same fast-path contract.
-Otherwise it belongs in `checkrun verify` or in a Sley verify registry.
+Otherwise it belongs in `checkrun verify` or in a Sley verify registry. Registry
+lint adapters mark this explicitly with `executionScope: "file"`; validation
+rejects automatic lint selectors that point at broader adapters.
+
+Verify-time checks may still be automatic at the workflow layer. Sley can pass
+its changed-file set to `checkrun verify`, and Checkrun decides which broader
+generic analyzers apply. That keeps hook policy automatic without moving
+low-level language invocation back into Sley.
 
 ## Consistency Requirements
 
@@ -111,8 +120,8 @@ When changing language or workflow policy:
 2. Keep `checkrun capabilities`, `checkrun explain`, `checkrun plan`,
    `autoformat`, and `autolint` derived from the same registry behavior.
 3. Verify each new automatic lint step satisfies the fast-check contract.
-4. Put broad project analyzers in `checkrun verify` or Sley verify instead of
-   automatic lint.
+4. Put broad generic project analyzers in `checkrun verify`; reserve Sley
+   verify registry entries for repo-specific workflows.
 5. Update editor and hook integrations to consume the public Checkrun or Sley
    API, not copied policy.
 6. Add consistency tests when more than one surface depends on the behavior.

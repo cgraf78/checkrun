@@ -296,56 +296,102 @@
     }
   },
   "adapters": {
-    "actionlint": { "kind": "shell-function", "function": "_lint_actionlint" },
+    "actionlint": {
+      "kind": "shell-function",
+      "function": "_lint_actionlint",
+      "executionScope": "file"
+    },
     "biome-format": { "kind": "shell-function", "function": "_format_biome" },
-    "biome-lint": { "kind": "shell-function", "function": "_lint_biome" },
+    "biome-lint": { "kind": "shell-function", "function": "_lint_biome", "executionScope": "file" },
     "buf-format": { "kind": "shell-function", "function": "_format_buf" },
-    "buf-lint": { "kind": "shell-function", "function": "_lint_buf" },
+    "buf-lint": { "kind": "shell-function", "function": "_lint_buf", "executionScope": "file" },
     "buildifier-format": { "kind": "shell-function", "function": "_format_buildifier" },
-    "buildifier-lint": { "kind": "shell-function", "function": "_lint_buildifier" },
-    "checkmake": { "kind": "shell-function", "function": "_lint_checkmake" },
+    "buildifier-lint": {
+      "kind": "shell-function",
+      "function": "_lint_buildifier",
+      "executionScope": "file"
+    },
+    "checkmake": {
+      "kind": "shell-function",
+      "function": "_lint_checkmake",
+      "executionScope": "file"
+    },
     "clang-format": { "kind": "shell-function", "function": "_format_clang" },
-    "clang-tidy": { "kind": "shell-function", "function": "_lint_clang_tidy" },
+    "clang-tidy": {
+      "kind": "shell-function",
+      "function": "_lint_clang_tidy",
+      "executionScope": "file"
+    },
     "cmake-format": { "kind": "shell-function", "function": "_format_cmake" },
-    "cmake-lint": { "kind": "shell-function", "function": "_lint_cmake" },
-    "crontab": { "kind": "shell-function", "function": "_lint_crontab" },
+    "cmake-lint": { "kind": "shell-function", "function": "_lint_cmake", "executionScope": "file" },
+    "crontab": { "kind": "shell-function", "function": "_lint_crontab", "executionScope": "file" },
     "dockerfmt": { "kind": "shell-function", "function": "_format_dockerfmt" },
-    "editorconfig-checker": { "kind": "shell-function", "function": "_lint_editorconfig" },
-    "git-config": { "kind": "shell-function", "function": "_lint_git_config" },
+    "editorconfig-checker": {
+      "kind": "shell-function",
+      "function": "_lint_editorconfig",
+      "executionScope": "file"
+    },
+    "git-config": {
+      "kind": "shell-function",
+      "function": "_lint_git_config",
+      "executionScope": "file"
+    },
     "gofumpt": { "kind": "shell-function", "function": "_format_gofumpt" },
     "goimports": { "kind": "shell-function", "function": "_format_goimports" },
-    "golangci-lint": { "kind": "shell-function", "function": "_lint_go" },
     "google-java-format": { "kind": "shell-function", "function": "_format_java" },
-    "google-java-format-lint": { "kind": "shell-function", "function": "_lint_java" },
-    "hadolint": { "kind": "shell-function", "function": "_lint_dockerfile" },
+    "google-java-format-lint": {
+      "kind": "shell-function",
+      "function": "_lint_java",
+      "executionScope": "file"
+    },
+    "hadolint": {
+      "kind": "shell-function",
+      "function": "_lint_dockerfile",
+      "executionScope": "file"
+    },
     "nixfmt": { "kind": "shell-function", "function": "_format_nixfmt" },
-    "php": { "kind": "shell-function", "function": "_lint_php" },
+    "php": { "kind": "shell-function", "function": "_lint_php", "executionScope": "file" },
     "php-cs-fixer": { "kind": "shell-function", "function": "_format_php" },
     "rubocop-format": { "kind": "shell-function", "function": "_format_ruby" },
-    "rubocop-lint": { "kind": "shell-function", "function": "_lint_ruby" },
+    "rubocop-lint": {
+      "kind": "shell-function",
+      "function": "_lint_ruby",
+      "executionScope": "file"
+    },
     "ruff-format": { "kind": "shell-function", "function": "_format_ruff" },
-    "ruff-lint": { "kind": "shell-function", "function": "_lint_ruff" },
+    "ruff-lint": { "kind": "shell-function", "function": "_lint_ruff", "executionScope": "file" },
     "rumdl-format": { "kind": "shell-function", "function": "_format_rumdl" },
-    "rumdl-lint": { "kind": "shell-function", "function": "_lint_rumdl" },
+    "rumdl-lint": { "kind": "shell-function", "function": "_lint_rumdl", "executionScope": "file" },
     "rustfmt": { "kind": "shell-function", "function": "_format_rustfmt" },
-    "rust-clippy": { "kind": "shell-function", "function": "_lint_rust" },
-    "schema-lint": { "kind": "shell-function", "function": "_lint_schema" },
-    "selene": { "kind": "shell-function", "function": "_lint_selene" },
-    "shellcheck": { "kind": "shell-function", "function": "_lint_sh" },
-    "statix": { "kind": "shell-function", "function": "_lint_statix" },
+    "schema-lint": {
+      "kind": "shell-function",
+      "function": "_lint_schema",
+      "executionScope": "file"
+    },
+    "selene": { "kind": "shell-function", "function": "_lint_selene", "executionScope": "file" },
+    "shellcheck": { "kind": "shell-function", "function": "_lint_sh", "executionScope": "file" },
+    "statix": { "kind": "shell-function", "function": "_lint_statix", "executionScope": "file" },
     "shfmt": { "kind": "shell-function", "function": "_format_sh" },
     "shfmt-zsh": { "kind": "shell-function", "function": "_format_sh_zsh" },
     "stylua": { "kind": "shell-function", "function": "_format_stylua" },
     "superhtml-format": { "kind": "shell-function", "function": "_format_superhtml" },
-    "superhtml-lint": { "kind": "shell-function", "function": "_lint_superhtml" },
-    "systemd-analyze": { "kind": "shell-function", "function": "_lint_systemd_unit" },
+    "superhtml-lint": {
+      "kind": "shell-function",
+      "function": "_lint_superhtml",
+      "executionScope": "file"
+    },
+    "systemd-analyze": {
+      "kind": "shell-function",
+      "function": "_lint_systemd_unit",
+      "executionScope": "file"
+    },
     "taplo-format": { "kind": "shell-function", "function": "_format_taplo" },
-    "taplo-lint": { "kind": "shell-function", "function": "_lint_taplo" },
-    "tmux": { "kind": "shell-function", "function": "_lint_tmux_config" },
-    "typos": { "kind": "shell-function", "function": "_lint_typos" },
+    "taplo-lint": { "kind": "shell-function", "function": "_lint_taplo", "executionScope": "file" },
+    "tmux": { "kind": "shell-function", "function": "_lint_tmux_config", "executionScope": "file" },
+    "typos": { "kind": "shell-function", "function": "_lint_typos", "executionScope": "file" },
     "yamlfmt": { "kind": "shell-function", "function": "_format_yamlfmt" },
-    "zizmor": { "kind": "shell-function", "function": "_lint_zizmor" },
-    "zsh-lint": { "kind": "shell-function", "function": "_lint_zsh" }
+    "zizmor": { "kind": "shell-function", "function": "_lint_zizmor", "executionScope": "file" },
+    "zsh-lint": { "kind": "shell-function", "function": "_lint_zsh", "executionScope": "file" }
   },
   "selectors": [
     {
@@ -373,7 +419,7 @@
         { "tool": "goimports", "adapter": "goimports" },
         { "tool": "gofumpt", "adapter": "gofumpt" }
       ],
-      "lint": [{ "tool": "golangci-lint", "adapter": "golangci-lint", "config": "golangci-lint" }]
+      "lint": []
     },
     {
       "id": "web",
@@ -430,7 +476,7 @@
       "id": "rust",
       "filetypes": ["rust"],
       "format": [{ "tool": "rustfmt", "adapter": "rustfmt", "config": "rustfmt" }],
-      "lint": [{ "tool": "cargo", "adapter": "rust-clippy" }]
+      "lint": []
     },
     {
       "id": "c-family",

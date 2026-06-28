@@ -28,6 +28,9 @@ output=$("$CHECKRUN" verify --help 2>&1)
 rc=$?
 _assert_exit "verify help: exits 0" 0 "$rc"
 _assert_contains "verify help: lists cargo-audit tool filter" "cargo-audit" "$output"
+_assert_contains "verify help: lists cargo-clippy tool filter" "cargo-clippy" "$output"
+_assert_contains "verify help: lists clang-tidy tool filter" "clang-tidy" "$output"
+_assert_contains "verify help: lists golangci-lint tool filter" "golangci-lint" "$output"
 _assert_contains "verify help: lists govulncheck tool filter" "govulncheck" "$output"
 
 _missing_tool_bin=$(_mock_bin)
@@ -45,6 +48,34 @@ rc=$?
 set -e
 _assert_exit "cargo-audit: missing tool is graceful no-op" 0 "$rc"
 _assert_eq "cargo-audit: missing tool emits no output" "" "$output"
+
+set +e
+output=$(PATH="$_missing_tool_bin" "$CHECKRUN" verify --tool golangci-lint . 2>&1)
+rc=$?
+set -e
+_assert_exit "golangci-lint: missing tool is graceful no-op" 0 "$rc"
+_assert_eq "golangci-lint: missing tool emits no output" "" "$output"
+
+set +e
+output=$(PATH="$_missing_tool_bin" "$CHECKRUN" verify --tool cargo-clippy . 2>&1)
+rc=$?
+set -e
+_assert_exit "cargo-clippy: missing tool is graceful no-op" 0 "$rc"
+_assert_eq "cargo-clippy: missing tool emits no output" "" "$output"
+
+_cpp_missing_root=$(_tmpdir)
+mkdir -p "$_cpp_missing_root/src"
+: >"$_cpp_missing_root/.clang-tidy"
+cat >"$_cpp_missing_root/src/main.cpp" <<'EOF'
+int main() { return 0; }
+EOF
+
+set +e
+output=$(PATH="$_missing_tool_bin" "$CHECKRUN" verify --tool clang-tidy "$_cpp_missing_root/src/main.cpp" 2>&1)
+rc=$?
+set -e
+_assert_exit "clang-tidy: missing tool is graceful no-op" 0 "$rc"
+_assert_eq "clang-tidy: missing tool emits no output" "" "$output"
 
 echo "=== checkrun: govulncheck module discovery ==="
 
@@ -96,6 +127,42 @@ _assert_contains "govulncheck: runs module-b from module root" \
   "$_go_root/module-b|./..." "$(cat "$_govuln_log")"
 _assert_not_contains "govulncheck: ignores files outside modules" \
   "$_go_root/outside" "$(cat "$_govuln_log")"
+
+echo "=== checkrun: golangci-lint module discovery ==="
+
+_golangci_mock=$(_mock_bin)
+_golangci_log=$(_tmpdir)/golangci-lint-calls.log
+_golangci_config_root=$(_tmpdir)
+: >"$_golangci_log"
+cat >"$_golangci_config_root/golangci-lint.yml" <<'EOF'
+version: "2"
+EOF
+cat >"$_golangci_mock/golangci-lint" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s\n' "$PWD" "$*" >>"$GOLANGCI_LINT_LOG"
+exit 0
+EOF
+chmod +x "$_golangci_mock/golangci-lint"
+
+set +e
+GOLANGCI_LINT_LOG="$_golangci_log" CHECKRUN_CONFIG_DIR="$_golangci_config_root" \
+  PATH="$_golangci_mock:$PATH" \
+  "$CHECKRUN" verify --tool golangci-lint \
+  "$_go_root/module-a/pkg/a.go" \
+  "$_go_root/module-a/pkg/a.go" \
+  "$_go_root/module-b" \
+  "$_go_root/outside/no-module.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "golangci-lint: exits 0 for clean modules" 0 "$rc"
+_golangci_call_count=$(wc -l <"$_golangci_log" | tr -d ' ')
+_assert_eq "golangci-lint: deduplicates repeated files in one module" "2" "$_golangci_call_count"
+_assert_contains "golangci-lint: runs module-a from module root" \
+  "$_go_root/module-a|run --config $_golangci_config_root/golangci-lint.yml ./..." "$(cat "$_golangci_log")"
+_assert_contains "golangci-lint: runs module-b from module root" \
+  "$_go_root/module-b|run --config $_golangci_config_root/golangci-lint.yml ./..." "$(cat "$_golangci_log")"
+_assert_not_contains "golangci-lint: ignores files outside modules" \
+  "$_go_root/outside" "$(cat "$_golangci_log")"
 
 echo "=== checkrun: cargo-audit project discovery ==="
 
@@ -169,6 +236,200 @@ _assert_contains "cargo-audit: runs crate-b from project root" \
   "$_rust_root/crate-b|audit" "$(cat "$_cargo_audit_log")"
 _assert_not_contains "cargo-audit: ignores Cargo.toml without lockfile" \
   "$_rust_root/unlocked" "$(cat "$_cargo_audit_log")"
+
+echo "=== checkrun: cargo-clippy project discovery ==="
+
+_cargo_clippy_mock=$(_mock_bin)
+_cargo_clippy_log=$(_tmpdir)/cargo-clippy-calls.log
+: >"$_cargo_clippy_log"
+cat >"$_cargo_clippy_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "clippy --version") exit 0 ;;
+  clippy*)
+    printf '%s|%s\n' "$PWD" "$*" >>"$CARGO_CLIPPY_LOG"
+    exit 0
+    ;;
+esac
+exit 0
+EOF
+chmod +x "$_cargo_clippy_mock/cargo"
+
+set +e
+CARGO_CLIPPY_LOG="$_cargo_clippy_log" PATH="$_cargo_clippy_mock:$PATH" \
+  "$CHECKRUN" verify --tool cargo-clippy \
+  "$_rust_root/crate-a/src/lib.rs" \
+  "$_rust_root/crate-a/src/lib.rs" \
+  "$_rust_root/crate-b" \
+  "$_rust_root/unlocked/src/lib.rs" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "cargo-clippy: exits 0 for clean projects" 0 "$rc"
+_cargo_clippy_call_count=$(wc -l <"$_cargo_clippy_log" | tr -d ' ')
+_assert_eq "cargo-clippy: deduplicates repeated files in one project" "3" "$_cargo_clippy_call_count"
+_assert_contains "cargo-clippy: runs crate-a from project root" \
+  "$_rust_root/crate-a|clippy --manifest-path $_rust_root/crate-a/Cargo.toml --all-targets -- -D warnings" \
+  "$(cat "$_cargo_clippy_log")"
+_assert_contains "cargo-clippy: runs crate-b from project root" \
+  "$_rust_root/crate-b|clippy --manifest-path $_rust_root/crate-b/Cargo.toml --all-targets -- -D warnings" \
+  "$(cat "$_cargo_clippy_log")"
+_assert_contains "cargo-clippy: does not require Cargo.lock" \
+  "$_rust_root/unlocked|clippy --manifest-path $_rust_root/unlocked/Cargo.toml --all-targets -- -D warnings" \
+  "$(cat "$_cargo_clippy_log")"
+
+echo "=== checkrun: clang-tidy file discovery ==="
+
+_cpp_root=$(_tmpdir)
+_cpp_unconfigured_root=$(_tmpdir)
+mkdir -p "$_cpp_root/src" "$_cpp_root/include" "$_cpp_unconfigured_root"
+: >"$_cpp_root/.clang-tidy"
+cat >"$_cpp_root/src/main.cpp" <<'EOF'
+int main() { return 0; }
+EOF
+cat >"$_cpp_root/include/demo.hpp" <<'EOF'
+int demo();
+EOF
+cat >"$_cpp_unconfigured_root/no-config.cpp" <<'EOF'
+int no_config();
+EOF
+
+_clang_tidy_mock=$(_mock_bin)
+_clang_tidy_log=$(_tmpdir)/clang-tidy-calls.log
+: >"$_clang_tidy_log"
+cat >"$_clang_tidy_mock/clang-tidy" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CLANG_TIDY_LOG"
+exit 0
+EOF
+chmod +x "$_clang_tidy_mock/clang-tidy"
+
+set +e
+CLANG_TIDY_LOG="$_clang_tidy_log" PATH="$_clang_tidy_mock:$PATH" \
+  "$CHECKRUN" verify --tool clang-tidy \
+  "$_cpp_root/src/main.cpp" \
+  "$_cpp_root/src/main.cpp" \
+  "$_cpp_root/include" \
+  "$_cpp_unconfigured_root/no-config.cpp" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "clang-tidy: exits 0 for clean files" 0 "$rc"
+_clang_tidy_call_count=$(wc -l <"$_clang_tidy_log" | tr -d ' ')
+_assert_eq "clang-tidy: deduplicates repeated files" "2" "$_clang_tidy_call_count"
+_assert_contains "clang-tidy: runs selected source file with project config" \
+  "--config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+_assert_contains "clang-tidy: walks selected directories for C++ headers" \
+  "--config-file=$_cpp_root/.clang-tidy $_cpp_root/include/demo.hpp" "$(cat "$_clang_tidy_log")"
+_assert_not_contains "clang-tidy: skips C++ files without metadata gate" \
+  "$_cpp_unconfigured_root/no-config.cpp" "$(cat "$_clang_tidy_log")"
+
+echo "=== checkrun: golangci-lint json diagnostics ==="
+
+_golangci_issue_mock=$(_mock_bin)
+cat >"$_golangci_issue_mock/golangci-lint" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"--output-format=json"* ]]; then
+  cat <<'JSON'
+{"Issues":[{"Pos":{"Filename":"pkg/a.go","Line":4,"Column":2},"Severity":"error","FromLinter":"govet","Text":"unreachable code"}]}
+JSON
+  exit 1
+fi
+exit 1
+EOF
+chmod +x "$_golangci_issue_mock/golangci-lint"
+
+set +e
+output=$(CHECKRUN_CONFIG_DIR="$_golangci_config_root" PATH="$_golangci_issue_mock:$PATH" \
+  "$CHECKRUN" verify --json --tool golangci-lint "$_go_root/module-a/pkg/a.go" 2>&1)
+rc=$?
+set -e
+_assert_exit "golangci-lint json: preserves non-zero lint exit" 1 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+diagnostic = json.load(sys.stdin)
+assert diagnostic["source"] == "golangci-lint"
+assert diagnostic["code"] == "govet"
+assert diagnostic["message"] == "unreachable code"
+assert diagnostic["line"] == 4
+assert diagnostic["col"] == 2
+assert diagnostic["path"].endswith("/module-a/pkg/a.go")
+'
+_assert_exit "golangci-lint json: emits unified diagnostic" 0 "$?"
+
+echo "=== checkrun: cargo-clippy json diagnostics ==="
+
+_clippy_issue_mock=$(_mock_bin)
+cat >"$_clippy_issue_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "clippy --version") exit 0 ;;
+esac
+if [[ "$*" == *"--message-format=json"* ]]; then
+  cat <<'JSON'
+{"reason":"compiler-message","message":{"level":"warning","message":"avoid demo pattern","code":{"code":"clippy::demo"},"spans":[{"file_name":"src/lib.rs","is_primary":true,"line_start":3,"column_start":1,"line_end":3,"column_end":7}]}}
+JSON
+  exit 1
+fi
+exit 1
+EOF
+chmod +x "$_clippy_issue_mock/cargo"
+
+set +e
+output=$(PATH="$_clippy_issue_mock:$PATH" \
+  "$CHECKRUN" verify --json --tool cargo-clippy "$_rust_root/crate-a/src/lib.rs" 2>&1)
+rc=$?
+set -e
+_assert_exit "cargo-clippy json: preserves non-zero lint exit" 1 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+diagnostic = json.load(sys.stdin)
+assert diagnostic["source"] == "clippy"
+assert diagnostic["code"] == "clippy::demo"
+assert diagnostic["message"] == "avoid demo pattern"
+assert diagnostic["severity"] == "warning"
+assert diagnostic["line"] == 3
+assert diagnostic["col"] == 1
+assert diagnostic["path"].endswith("/crate-a/src/lib.rs")
+'
+_assert_exit "cargo-clippy json: emits unified diagnostic" 0 "$?"
+
+echo "=== checkrun: clang-tidy json diagnostics ==="
+
+_clang_tidy_issue_mock=$(_mock_bin)
+cat >"$_clang_tidy_issue_mock/clang-tidy" <<'EOF'
+#!/usr/bin/env bash
+file="${@: -1}"
+printf '%s:6:4: warning: use nullptr [modernize-use-nullptr]\n' "$file"
+printf '%s:7:2: note: expanded from macro\n' "$file"
+exit 0
+EOF
+chmod +x "$_clang_tidy_issue_mock/clang-tidy"
+
+set +e
+output=$(PATH="$_clang_tidy_issue_mock:$PATH" \
+  "$CHECKRUN" verify --json --tool clang-tidy "$_cpp_root/src/main.cpp" 2>&1)
+rc=$?
+set -e
+_assert_exit "clang-tidy json: diagnostics make clean run non-zero" 1 "$rc"
+printf '%s\n' "$output" | python3 -c '
+import json
+import sys
+
+diagnostic = json.load(sys.stdin)
+assert diagnostic["source"] == "clang-tidy"
+assert diagnostic["code"] == "modernize-use-nullptr"
+assert diagnostic["message"] == "use nullptr"
+assert diagnostic["severity"] == "warning"
+assert diagnostic["line"] == 6
+assert diagnostic["col"] == 4
+assert diagnostic["path"].endswith("/src/main.cpp")
+'
+_assert_exit "clang-tidy json: emits unified diagnostic" 0 "$?"
+_assert_not_contains "clang-tidy json: filters compiler notes out of diagnostics" \
+  "expanded from macro" "$output"
 
 echo "=== checkrun: govulncheck json diagnostics ==="
 

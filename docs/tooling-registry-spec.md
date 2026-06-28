@@ -132,6 +132,11 @@ adapter satisfies the same fast-path contract. Otherwise it belongs in
 `checkrun verify` when Checkrun can provide a generic project analyzer, or in a
 Sley verify registry when the command is workflow-specific to a repo.
 
+Eligible lint adapters must declare `executionScope: "file"`. The metadata is
+not display text; registry validation uses it as the machine-readable gate that
+prevents broad project analyzers from drifting back into `checkrun lint` or
+`checkrun check` by accident.
+
 Keep this boundary strict because hooks compose Checkrun through Sley. Sley
 decides when to run the fast path and readiness workflows; Checkrun decides
 which file-derived tools are safe to run automatically when that fast path is
@@ -465,6 +470,10 @@ The registry should not attempt to encode every command argument as JSON. Tool
 quirks are real and already tested in shell adapters. The registry decides that
 `ruff-format` applies; the adapter decides how to run it.
 
+Lint adapters that are selected by automatic lint selectors must set
+`executionScope: "file"`. Omit that field for formatters, internal adapters, or
+project analyzers that are intentionally kept out of `autolint`.
+
 This boundary is important for simplicity. The registry should stay small:
 matching rules, phase order, adapter ids, path scopes, and config-policy names.
 It should not become a generic command language.
@@ -637,6 +646,11 @@ deduplication.
 Both commands execute the same registry-derived `autolint` behavior. `check` is
 a naming alias for callers that model the fast hook/editor operation as a check
 rather than a lint command; it must not grow a separate tool-selection path.
+
+`checkrun verify` is the companion path for generic analyzers that are useful in
+readiness workflows but too broad for the automatic lint contract. Callers pass
+files or directories; Checkrun discovers the owning projects and decides which
+verify-time tools apply.
 
 ## Schema Association API
 

@@ -71,6 +71,7 @@ assert registry_mod.__all__ == [
     "plan",
     "capabilities",
     "explain_items",
+    "resolve_config",
 ]
 assert capabilities["version"] == 2
 assert "sley" not in capabilities
@@ -151,7 +152,7 @@ assert selected_lint <= dispatch_arms(lint_dispatch, "_lint_dispatch()")
 
 matrix = {
     "app.py": (["ruff-format"], ["typos", "schema-lint", "ruff-lint"]),
-    "main.go": (["goimports", "gofumpt"], ["typos", "schema-lint", "golangci-lint"]),
+    "main.go": (["goimports", "gofumpt"], ["typos", "schema-lint"]),
     "script.sh": (["shfmt"], ["typos", "schema-lint", "shellcheck"]),
     ".zshrc": (["shfmt-zsh"], ["typos", "schema-lint", "zsh-lint"]),
     "Dockerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
@@ -172,7 +173,7 @@ matrix = {
     "main.c": (["clang-format"], ["typos", "schema-lint"]),
     "main.cpp": (["clang-format"], ["typos", "schema-lint"]),
     "init.lua": (["stylua"], ["typos", "schema-lint", "selene"]),
-    "main.rs": (["rustfmt"], ["typos", "schema-lint", "rust-clippy"]),
+    "main.rs": (["rustfmt"], ["typos", "schema-lint"]),
     "Main.java": (["google-java-format"], ["typos", "schema-lint", "google-java-format-lint"]),
     "index.php": (["php-cs-fixer"], ["typos", "schema-lint", "php"]),
     "app.rb": (["rubocop-format"], ["typos", "schema-lint", "rubocop-lint"]),
@@ -413,7 +414,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 data = json.loads(path.read_text())
-data["adapters"]["ruff-lint"]["function"] = "_lint_go"
+data["adapters"]["ruff-lint"]["function"] = "_lint_php"
 path.write_text(json.dumps(data))
 PY
 
@@ -421,6 +422,23 @@ output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2
 rc=$?
 _assert_exit "registry: dispatch function mismatch exits non-zero" 2 "$rc"
 _assert_contains "registry: dispatch function mismatch reports error" "function mismatch" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+del data["adapters"]["ruff-lint"]["executionScope"]
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: automatic lint requires execution scope" 2 "$rc"
+_assert_contains "registry: automatic lint scope error is clear" "automatic lint adapter" "$output"
 
 python3 - "$CHECKRUN_REPO_ROOT" "$REGISTRY" "$_td/unknown-dispatch.sh" <<'PY'
 import importlib.util

@@ -76,7 +76,8 @@
       "required": ["kind"],
       "properties": {
         "kind": { "enum": ["shell-function", "internal"] },
-        "function": { "type": "string" }
+        "function": { "type": "string" },
+        "executionScope": { "enum": ["file"] }
       }
     },
     "configPolicy": {

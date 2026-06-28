@@ -19,6 +19,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import registry as tooling_registry
+
 _DEFAULT_PATHS = ["."]
 _SKIP_WALK_DIRS = {
     ".git",
@@ -30,6 +32,7 @@ _SKIP_WALK_DIRS = {
     "target",
     "vendor",
 }
+_CPP_FILETYPES = {"c", "cpp"}
 
 
 def _abs(path: str) -> Path:
@@ -64,12 +67,46 @@ def _walk_project_roots(root: Path, required_files: tuple[str, ...]) -> list[Pat
     return roots
 
 
+def _cpp_extensions(registry: dict[str, Any]) -> set[str]:
+    return {
+        f".{extension}"
+        for extension, filetype in registry["filetypes"]["extension"].items()
+        if filetype in _CPP_FILETYPES
+    }
+
+
+def _cpp_file(path: Path, registry: dict[str, Any]) -> bool:
+    return path.suffix in _cpp_extensions(registry)
+
+
+def _walk_cpp_files(root: Path, registry: dict[str, Any]) -> list[Path]:
+    files: list[Path] = []
+    if not root.is_dir():
+        return files
+    for dir_path, dir_names, file_names in os.walk(root):
+        dir_names[:] = [name for name in dir_names if name not in _SKIP_WALK_DIRS]
+        directory = Path(dir_path)
+        for name in file_names:
+            candidate = directory / name
+            if _cpp_file(candidate, registry):
+                files.append(candidate.resolve(strict=False))
+    return files
+
+
 def _nearest_go_module(start: Path) -> Path | None:
     return _nearest_project_root(start, ("go.mod",))
 
 
 def _walk_go_modules(root: Path) -> list[Path]:
     return _walk_project_roots(root, ("go.mod",))
+
+
+def _nearest_cargo_project(start: Path) -> Path | None:
+    return _nearest_project_root(start, ("Cargo.toml",))
+
+
+def _walk_cargo_projects(root: Path) -> list[Path]:
+    return _walk_project_roots(root, ("Cargo.toml",))
 
 
 def _nearest_cargo_audit_project(start: Path) -> Path | None:
@@ -145,6 +182,59 @@ def discover_cargo_audit_projects(paths: list[str]) -> list[Path]:
     return projects
 
 
+def discover_cargo_projects(paths: list[str]) -> list[Path]:
+    projects: list[Path] = []
+    seen: set[str] = set()
+
+    for raw_path in paths or _DEFAULT_PATHS:
+        path = _abs(raw_path)
+        candidates: list[Path] = []
+        if path.is_dir():
+            candidates = _walk_cargo_projects(path)
+            if not candidates:
+                nearest = _nearest_cargo_project(path)
+                if nearest:
+                    candidates = [nearest]
+        elif path.is_file():
+            nearest = _nearest_cargo_project(path.parent)
+            if nearest:
+                candidates = [nearest]
+
+        for project in candidates:
+            key = str(project)
+            if key not in seen:
+                seen.add(key)
+                projects.append(project)
+
+    return projects
+
+
+def discover_cpp_files(paths: list[str]) -> list[Path]:
+    try:
+        registry = tooling_registry.load_registry()
+    except tooling_registry.RegistryError:
+        return []
+
+    files: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in paths or _DEFAULT_PATHS:
+        path = _abs(raw_path)
+        candidates: list[Path]
+        if path.is_dir():
+            candidates = _walk_cpp_files(path, registry)
+        elif path.is_file() and _cpp_file(path, registry):
+            candidates = [path.resolve(strict=False)]
+        else:
+            candidates = []
+
+        for candidate in candidates:
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                files.append(candidate)
+    return files
+
+
 def _position_from_trace(
     module: Path,
     module_path: str | None,
@@ -217,6 +307,169 @@ def _json_error(path: Path, source: str, message: str) -> dict[str, Any]:
         "message": message,
         "source": source,
     }
+
+
+def _severity(value: Any) -> str:
+    text = str(value or "").lower()
+    if text in {"error", "warning", "info", "hint"}:
+        return text
+    if text in {"fatal", "failure"}:
+        return "error"
+    return "info"
+
+
+def _golangci_config(module: Path) -> list[str]:
+    try:
+        registry = tooling_registry.load_registry()
+        config = tooling_registry.resolve_config(
+            registry,
+            "golangci-lint",
+            module / "go.mod",
+        )
+    except tooling_registry.RegistryError:
+        return []
+
+    path = config.get("path")
+    if isinstance(path, str) and path:
+        return ["--config", path]
+    return []
+
+
+def _parse_golangci_lint_json(module: Path, stdout: str) -> list[dict[str, Any]]:
+    if not stdout.strip():
+        return []
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    diagnostics: list[dict[str, Any]] = []
+    for issue in payload.get("Issues", []) or []:
+        if not isinstance(issue, dict):
+            continue
+        position = issue.get("Pos")
+        if not isinstance(position, dict):
+            position = {}
+        filename = position.get("Filename")
+        if not isinstance(filename, str) or not filename:
+            continue
+        path = Path(filename)
+        if not path.is_absolute():
+            path = module / filename.removeprefix("./")
+        diagnostics.append(
+            {
+                "path": str(path.resolve(strict=False)),
+                "line": int(position.get("Line") or 1),
+                "col": int(position.get("Column") or 1),
+                "severity": _severity(issue.get("Severity") or "error"),
+                "code": str(issue.get("FromLinter") or "golangci-lint"),
+                "message": str(issue.get("Text") or "golangci-lint finding"),
+                "source": "golangci-lint",
+            }
+        )
+    return diagnostics
+
+
+def _parse_cargo_clippy_json(project: Path, stdout: str) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for raw in stdout.splitlines():
+        if not raw.strip():
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("reason") != "compiler-message":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        spans = message.get("spans")
+        if not isinstance(spans, list):
+            continue
+        primary = next(
+            (span for span in spans if isinstance(span, dict) and span.get("is_primary") is True),
+            None,
+        )
+        if not isinstance(primary, dict):
+            continue
+        filename = primary.get("file_name")
+        if not isinstance(filename, str) or not filename:
+            continue
+        path = Path(filename)
+        if not path.is_absolute():
+            path = project / path
+        code = message.get("code")
+        if isinstance(code, dict):
+            code = code.get("code")
+        diagnostics.append(
+            {
+                "path": str(path.resolve(strict=False)),
+                "line": int(primary.get("line_start") or 1),
+                "col": int(primary.get("column_start") or 1),
+                "end_line": int(primary.get("line_end") or primary.get("line_start") or 1),
+                "end_col": int(primary.get("column_end") or primary.get("column_start") or 1),
+                "severity": _severity(message.get("level")),
+                "code": str(code) if isinstance(code, str) and code else None,
+                "message": str(message.get("message") or "clippy finding"),
+                "source": "clippy",
+            }
+        )
+    return diagnostics
+
+
+def _clang_tidy_args(file: Path) -> list[str] | None:
+    try:
+        registry = tooling_registry.load_registry()
+        config = tooling_registry.resolve_config(registry, "clang-tidy", file)
+    except tooling_registry.RegistryError:
+        return None
+    if config.get("source") == "none":
+        return None
+
+    clang_config = _nearest_project_root(file, (".clang-tidy",))
+    compile_db = _nearest_project_root(file, ("compile_commands.json",))
+    compile_flags = _nearest_project_root(file, ("compile_flags.txt",))
+    if not clang_config and not compile_db and not compile_flags:
+        return None
+
+    args = ["--quiet"]
+    if clang_config:
+        args.append(f"--config-file={clang_config / '.clang-tidy'}")
+    if compile_db:
+        args.append(f"-p={compile_db}")
+    elif compile_flags:
+        args.append(f"-p={compile_flags}")
+    return args
+
+
+def _parse_clang_tidy_text(file: Path, output: str) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    path_text = str(file)
+    pattern = re.compile(
+        rf"{re.escape(path_text)}:(\d+):(\d+):\s+([^:]+):\s+(.*?)(?:\s+\[([^\]]+)\])?$"
+    )
+    for line in output.splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        severity = match.group(3).strip()
+        if severity not in {"warning", "error"}:
+            continue
+        diagnostics.append(
+            {
+                "path": path_text,
+                "line": int(match.group(1)),
+                "col": int(match.group(2)),
+                "severity": _severity(severity),
+                "code": match.group(5),
+                "message": match.group(4).strip(),
+                "source": "clang-tidy",
+            }
+        )
+    return diagnostics
 
 
 def _cargo_audit_package_text(record: dict[str, Any], advisory: dict[str, Any]) -> str | None:
@@ -430,8 +683,8 @@ def _has_error_diagnostic(diagnostics: list[dict[str, Any]]) -> bool:
 def _run_project_tool(
     projects: list[Path],
     *,
-    human_command: list[str],
-    json_command: list[str],
+    human_command: list[str] | Callable[[Path], list[str]],
+    json_command: list[str] | Callable[[Path], list[str]],
     parse_json: Callable[[Path, str], list[dict[str, Any]]],
     error_path: Callable[[Path], Path],
     source: str,
@@ -440,9 +693,11 @@ def _run_project_tool(
     """Run a project-scoped verifier and normalize its JSON diagnostics."""
     rc = 0
     for project in projects:
+        human_args = human_command(project) if callable(human_command) else human_command
+        json_args = json_command(project) if callable(json_command) else json_command
         if json_mode:
             proc = subprocess.run(
-                json_command,
+                json_args,
                 cwd=project,
                 text=True,
                 capture_output=True,
@@ -473,12 +728,129 @@ def _run_project_tool(
                 # parsers that found actionable records despite a clean exit.
                 rc = _merge_rc(rc, 1)
         else:
-            proc = subprocess.run(human_command, cwd=project, check=False)
+            proc = subprocess.run(human_args, cwd=project, check=False)
             rc = _merge_rc(rc, proc.returncode)
     return rc
 
 
+def run_golangci_lint(modules: list[Path], *, json_mode: bool) -> int:
+    if not modules:
+        return 0
+    if shutil.which("golangci-lint") is None:
+        return 0
+
+    return _run_project_tool(
+        modules,
+        human_command=lambda module: ["golangci-lint", "run", *_golangci_config(module), "./..."],
+        json_command=lambda module: [
+            "golangci-lint",
+            "run",
+            "--output-format=json",
+            *_golangci_config(module),
+            "./...",
+        ],
+        parse_json=_parse_golangci_lint_json,
+        error_path=lambda module: module / "go.mod",
+        source="golangci-lint",
+        json_mode=json_mode,
+    )
+
+
+def run_cargo_clippy(projects: list[Path], *, json_mode: bool) -> int:
+    if not projects:
+        return 0
+    if shutil.which("cargo") is None:
+        return 0
+    if (
+        subprocess.run(
+            ["cargo", "clippy", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        != 0
+    ):
+        return 0
+
+    def human_command(project: Path) -> list[str]:
+        return [
+            "cargo",
+            "clippy",
+            "--manifest-path",
+            str(project / "Cargo.toml"),
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]
+
+    def json_command(project: Path) -> list[str]:
+        return [
+            "cargo",
+            "clippy",
+            "--message-format=json",
+            "--manifest-path",
+            str(project / "Cargo.toml"),
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]
+
+    return _run_project_tool(
+        projects,
+        human_command=human_command,
+        json_command=json_command,
+        parse_json=_parse_cargo_clippy_json,
+        error_path=lambda project: project / "Cargo.toml",
+        source="clippy",
+        json_mode=json_mode,
+    )
+
+
+def run_clang_tidy(files: list[Path], *, json_mode: bool) -> int:
+    if not files:
+        return 0
+    if shutil.which("clang-tidy") is None:
+        return 0
+
+    rc = 0
+    for file in files:
+        args = _clang_tidy_args(file)
+        if not args:
+            continue
+        proc = subprocess.run(
+            ["clang-tidy", *args, str(file)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        output = "\n".join(item for item in (proc.stdout, proc.stderr) if item)
+        diagnostics = _parse_clang_tidy_text(file, output)
+        if json_mode:
+            for diagnostic in diagnostics:
+                print(json.dumps(diagnostic, separators=(",", ":"), sort_keys=True))
+            if proc.returncode != 0 and not diagnostics and output.strip():
+                print(
+                    json.dumps(
+                        _json_error(file, "clang-tidy", output.strip().splitlines()[-1]),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+        elif output:
+            print(output)
+
+        if proc.returncode != 0:
+            rc = _merge_rc(rc, proc.returncode)
+        elif diagnostics:
+            rc = _merge_rc(rc, 1)
+    return rc
+
+
 def run_govulncheck(modules: list[Path], *, json_mode: bool) -> int:
+    if not modules:
+        return 0
     if shutil.which("govulncheck") is None:
         return 0
 
@@ -494,6 +866,8 @@ def run_govulncheck(modules: list[Path], *, json_mode: bool) -> int:
 
 
 def run_cargo_audit(projects: list[Path], *, json_mode: bool) -> int:
+    if not projects:
+        return 0
     # Cargo discovers external subcommands through `cargo-*` binaries, but the
     # stable user/tool interface is `cargo audit`. Check both names so missing
     # cargo-audit remains a quiet optional-backend skip instead of a Cargo error.
@@ -520,17 +894,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tool",
         action="append",
-        choices=["cargo-audit", "govulncheck"],
+        choices=["cargo-audit", "cargo-clippy", "clang-tidy", "golangci-lint", "govulncheck"],
         help="limit verification to one tool; may be repeated",
     )
     parser.add_argument("paths", nargs="*", help="files or directories to verify")
     args = parser.parse_args(argv)
 
-    tools = set(args.tool or ["cargo-audit", "govulncheck"])
+    tools = set(
+        args.tool or ["cargo-audit", "cargo-clippy", "clang-tidy", "golangci-lint", "govulncheck"]
+    )
     rc = 0
     if "cargo-audit" in tools:
         projects = discover_cargo_audit_projects(args.paths or _DEFAULT_PATHS)
         rc = _merge_rc(rc, run_cargo_audit(projects, json_mode=args.json))
+    if "cargo-clippy" in tools:
+        projects = discover_cargo_projects(args.paths or _DEFAULT_PATHS)
+        rc = _merge_rc(rc, run_cargo_clippy(projects, json_mode=args.json))
+    if "clang-tidy" in tools:
+        files = discover_cpp_files(args.paths or _DEFAULT_PATHS)
+        rc = _merge_rc(rc, run_clang_tidy(files, json_mode=args.json))
+    if "golangci-lint" in tools:
+        modules = discover_go_modules(args.paths or _DEFAULT_PATHS)
+        rc = _merge_rc(rc, run_golangci_lint(modules, json_mode=args.json))
     if "govulncheck" in tools:
         modules = discover_go_modules(args.paths or _DEFAULT_PATHS)
         rc = _merge_rc(rc, run_govulncheck(modules, json_mode=args.json))

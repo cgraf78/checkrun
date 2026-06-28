@@ -127,6 +127,13 @@ cat >"$_policy" <<JSON
       "enforce": false
     },
     {
+      "name": "Editor-only settings",
+      "format": "json",
+      "editorSource": "vscode://schemas/settings/user",
+      "matches": [".config/example/schema.d/editor-only-settings.json"],
+      "enforce": false
+    },
+    {
       "name": "Test YAML",
       "format": "yaml",
       "schema": "yaml.schema.json",
@@ -388,6 +395,7 @@ _assert_exit "editor config: policy interpreter exits 0" 0 "$rc"
 _assert_contains "editor config: prefers public source urls" '"url":"https://example.invalid/settings.schema.json"' "$output"
 _assert_contains "editor config: prefers editor-only source urls" '"url":"vscode://schemas/settings/user"' "$output"
 _assert_contains "editor config: expands recursive matches" '"**/.config/example/schema.d/test-settings-*.json"' "$output"
+_assert_contains "editor config: preserves editor-only schema urls" '"url":"vscode://schemas/settings/user"' "$output"
 _assert_contains "editor config: resolves source-less local schema" '"file://'"$_schemas"'/yaml.schema.json"' "$output"
 _assert_contains "editor config: preserves local file schema urls" '"file://'"$_schemas"'/file-url.schema.json"' "$output"
 _assert_contains "editor config: resolves dependency schema" \
