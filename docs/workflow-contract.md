@@ -62,7 +62,7 @@ then chooses the owning Go modules, Rust projects, and C/C++ files itself so
 callers do not need to know language-specific analyzer rules. Missing paths are
 preserved as scope hints: deleted or renamed Go/Rust files still select the
 nearest surviving owning module/project, and deleted C/C++ files select the
-nearest surviving directory context for metadata-gated `clang-tidy`.
+nearest surviving non-root directory context for metadata-gated `clang-tidy`.
 
 Sley may call these surfaces, but it should not invoke underlying tools such as
 `ruff`, `mypy`, `actionlint`, `zizmor`, `cargo-audit`, or `govulncheck`

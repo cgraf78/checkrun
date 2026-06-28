@@ -412,6 +412,18 @@ _assert_contains "clang-tidy: deleted parent scopes to surviving directory conte
 _assert_not_contains "clang-tidy: deleted parent does not lint missing path" \
   "$_cpp_root/src/removed/deleted.cpp" "$(cat "$_clang_tidy_log")"
 
+: >"$_clang_tidy_log"
+set +e
+(
+  cd "$_cpp_root"
+  CLANG_TIDY_LOG="$_clang_tidy_log" PATH="$_clang_tidy_mock:$PATH" \
+    "$CHECKRUN" verify --tool clang-tidy removed/deleted.cpp >/dev/null 2>&1
+)
+rc=$?
+set -e
+_assert_exit "clang-tidy: deleted top-level parent exits 0" 0 "$rc"
+_assert_eq "clang-tidy: deleted top-level parent does not scan invocation root" "" "$(cat "$_clang_tidy_log")"
+
 echo "=== checkrun: golangci-lint json diagnostics ==="
 
 _golangci_issue_mock=$(_mock_bin)

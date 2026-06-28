@@ -81,6 +81,21 @@ def _nearest_existing_dir(path: Path) -> Path | None:
     return None
 
 
+def _git_root(start: Path) -> Path | None:
+    if shutil.which("git") is None:
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    root = result.stdout.strip()
+    return Path(root).resolve(strict=False) if root else None
+
+
 def _project_candidates(
     path: Path,
     *,
@@ -146,6 +161,14 @@ def _cpp_context_for_missing(path: Path, registry: dict[str, Any]) -> list[Path]
     # A deleted C/C++ file cannot be linted directly. Walking the nearest
     # surviving directory keeps commit-time verification tied to the changed
     # area without promoting clang-tidy to an unconditional repo-wide scan.
+    # If the only surviving context is the repo or invocation root, a no-op is
+    # safer than making hook-time verification depend on unrelated C++ files.
+    if context.parent == context:
+        return []
+    git_root = _git_root(context)
+    invocation_root = Path.cwd().resolve(strict=False)
+    if context == git_root or context == invocation_root:
+        return []
     return _walk_cpp_files(context, registry)
 
 

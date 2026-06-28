@@ -652,7 +652,8 @@ readiness workflows but too broad for the automatic lint contract. Callers pass
 files or directories; Checkrun discovers the owning projects and decides which
 verify-time tools apply. Missing paths are kept as verify scope hints so
 commit-time checks still cover the nearest surviving project context for
-deleted or renamed language files.
+deleted or renamed language files. Deleted C/C++ paths intentionally stop before
+repo-root fallback so `clang-tidy` does not become a broad scan by accident.
 
 ## Schema Association API
 
