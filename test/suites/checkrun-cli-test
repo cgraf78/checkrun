@@ -82,6 +82,7 @@ import sys
 data = json.load(sys.stdin)
 assert data["version"] == 2
 assert "sley" not in data
+assert data["editorLanguageIds"]["vscode"]["sh"] == ["shellscript"]
 assert "python" in data["filetypes"]["format"]
 assert "systemd" in data["filetypes"]["lint"]
 assert data["filetypes"]["custom"]["filename"]["Dockerfile"] == "dockerfile"

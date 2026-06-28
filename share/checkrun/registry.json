@@ -99,6 +99,21 @@
       { "containsAny": ["bash", "/sh"], "filetype": "bash" }
     ]
   },
+  "editorLanguageIds": {
+    "vscode": {
+      "bash": ["shellscript"],
+      "bzl": ["starlark", "bzl"],
+      "editorconfig": ["editorconfig"],
+      "gitconfig": ["gitconfig"],
+      "make": ["makefile"],
+      "sh": ["shellscript"],
+      "starlark": ["starlark", "bzl"],
+      "systemd": ["systemd"],
+      "text": ["plaintext"],
+      "tmux": ["tmux"],
+      "zsh": ["shellscript"]
+    }
+  },
   "crossCutting": {
     "lint": [
       {

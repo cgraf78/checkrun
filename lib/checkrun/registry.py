@@ -256,10 +256,8 @@ def _validate_invariants(registry: dict[str, Any]) -> None:
         keys = ", ".join(sorted(_DOWNSTREAM_KEYS.intersection(registry)))
         raise RegistryError(f"downstream-specific registry keys are not allowed: {keys}")
 
-    declared_filetypes = set(registry["filetypes"]["extension"].values())
-    declared_filetypes.update(registry["filetypes"]["filename"].values())
-    declared_filetypes.update(item["filetype"] for item in registry["filetypes"]["patterns"])
-    declared_filetypes.update(item["filetype"] for item in registry["filetypes"]["shebangs"])
+    declared_filetypes = _declared_filetypes(registry)
+    _validate_editor_language_ids(registry, declared_filetypes)
 
     adapters = registry["adapters"]
     config_policies = registry["configPolicies"]
@@ -369,6 +367,43 @@ def _validate_invariants(registry: dict[str, Any]) -> None:
         has_any = "containsAny" in item
         if has_contains == has_any:
             raise RegistryError("shebang rule must contain exactly one matcher")
+
+
+def _declared_filetypes(registry: dict[str, Any]) -> set[str]:
+    """Return filetypes that Checkrun can infer directly from a file."""
+
+    filetypes = registry["filetypes"]
+    declared = set(filetypes["extension"].values())
+    declared.update(filetypes["filename"].values())
+    declared.update(item["filetype"] for item in filetypes["patterns"])
+    declared.update(item["filetype"] for item in filetypes["shebangs"])
+    return declared
+
+
+def _validate_editor_language_ids(
+    registry: dict[str, Any],
+    declared_filetypes: set[str],
+) -> None:
+    """Validate editor language aliases against Checkrun's normalized filetypes."""
+
+    # Editor language IDs are aliases for Checkrun's own filetypes, not a second
+    # inference layer. Validating them here keeps VS Code, Neovim, hooks, and
+    # CLI output on one vocabulary even as individual editors spell a few
+    # languages differently.
+    for editor, aliases in registry["editorLanguageIds"].items():
+        for filetype, language_ids in aliases.items():
+            if filetype not in declared_filetypes:
+                raise RegistryError(f"editorLanguageIds.{editor}: undeclared filetype: {filetype}")
+            duplicates = sorted(
+                language_id
+                for language_id in set(language_ids)
+                if language_ids.count(language_id) > 1
+            )
+            if duplicates:
+                names = ", ".join(duplicates)
+                raise RegistryError(
+                    f"editorLanguageIds.{editor}.{filetype}: duplicate language ids: {names}"
+                )
 
 
 def _validate_step(
@@ -936,6 +971,12 @@ def capabilities(registry: dict[str, Any]) -> dict[str, Any]:
     custom = registry["filetypes"]
     return {
         "version": 2,
+        "editorLanguageIds": {
+            editor: {
+                filetype: list(language_ids) for filetype, language_ids in sorted(aliases.items())
+            }
+            for editor, aliases in sorted(registry["editorLanguageIds"].items())
+        },
         "filetypes": {
             "format": sorted(format_filetypes),
             "lint": sorted(lint_filetypes),

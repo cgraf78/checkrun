@@ -77,6 +77,8 @@ assert "sley" not in capabilities
 assert "python" in capabilities["filetypes"]["format"]
 assert "systemd" in capabilities["filetypes"]["lint"]
 assert capabilities["filetypes"]["custom"]["filename"]["Dockerfile"] == "dockerfile"
+assert capabilities["editorLanguageIds"]["vscode"]["bash"] == ["shellscript"]
+assert capabilities["editorLanguageIds"]["vscode"]["bzl"] == ["starlark", "bzl"]
 
 selectors = {selector["id"]: selector for selector in registry["selectors"]}
 assert selectors["c-family"]["lint"] == [
@@ -333,6 +335,40 @@ output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2
 rc=$?
 _assert_exit "registry: selector filetypes cannot be empty" 2 "$rc"
 _assert_contains "registry: empty selector filetypes reports error" "at least one filetype" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["editorLanguageIds"]["vscode"]["ghost"] = ["ghost"]
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: editor alias filetypes must be declared" 2 "$rc"
+_assert_contains "registry: editor alias filetype error is clear" "undeclared filetype" "$output"
+
+cp "$REGISTRY" "$_td/registry.json"
+python3 - "$_td/registry.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["editorLanguageIds"]["vscode"]["bash"] = ["shellscript", "shellscript"]
+path.write_text(json.dumps(data))
+PY
+
+output=$(CHECKRUN_REGISTRY="$_td/registry.json" "$REGISTRY_PY" registry --json 2>&1)
+rc=$?
+_assert_exit "registry: editor aliases cannot duplicate language ids" 2 "$rc"
+_assert_contains "registry: editor alias duplicate error is clear" "duplicate language ids" "$output"
 
 cp "$REGISTRY" "$_td/registry.json"
 python3 - "$_td/registry.json" <<'PY'

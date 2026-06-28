@@ -57,6 +57,7 @@ The physical `capabilities.json` file should be retired. `checkrun capabilities
 Checkrun owns:
 
 - supported filetype identifiers
+- editor language-ID aliases for those supported filetypes
 - filename, extension, pattern, and shebang matching
 - validation phases
 - tool identity and ordering
@@ -97,7 +98,10 @@ Neovim owns:
 - editor-specific parser/LSP setup
 
 Checkrun must not contain downstream-specific keys such as `sley`, `nvim`, or
-dotfiles-only consumer behavior.
+dotfiles-only consumer behavior. Editor language IDs are the exception because
+they are not consumer policy: they are aliases for Checkrun's normalized
+filetype vocabulary, owned beside filetype inference so all editor surfaces use
+the same translation table.
 
 ## Fast Check Eligibility
 
@@ -147,6 +151,7 @@ Recommended top-level shape:
 {
   "version": 1,
   "filetypes": {},
+  "editorLanguageIds": { "vscode": {} },
   "selectors": [],
   "crossCutting": {},
   "configPolicies": {},
@@ -168,7 +173,10 @@ cross-object invariants that are awkward in JSON Schema:
 - selector-local filename, extension, and pattern matchers are rejected
 - every selected shell adapter is implemented and dispatchable
 - non-shell `internal` adapters are never selected or dispatched
-- no top-level or selector-level downstream keys such as `sley` or `nvim` exist
+- no top-level or selector-level consumer-policy keys such as `sley` or `nvim`
+  exist
+- every `editorLanguageIds` alias references a declared Checkrun filetype and
+  has no duplicate editor IDs within a filetype
 
 The seeded registry must resolve metadata drift before it becomes authoritative.
 For example, C/C++ `clang-tidy` support is valid only because the registry,
@@ -219,6 +227,31 @@ Extensionless binary files should be classified as unknown without reading them
 as text. Special extensionless files such as `.profile`, `.envrc`, `envrc-*`,
 and agent hook files should be covered by registry data instead of hard-coded
 consumer logic.
+
+### Editor Language IDs
+
+Editors sometimes use language IDs that differ from Checkrun's normalized
+filetypes. For example, VS Code calls shell files `shellscript`, Makefiles
+`makefile`, and plain text `plaintext`.
+
+Those aliases belong under `editorLanguageIds` in the registry:
+
+```json
+{
+  "editorLanguageIds": {
+    "vscode": {
+      "sh": ["shellscript"],
+      "make": ["makefile"],
+      "text": ["plaintext"]
+    }
+  }
+}
+```
+
+The key is still Checkrun-owned metadata. It does not decide which formatter,
+linter, hook, plugin, or editor setting to use; it only translates a supported
+Checkrun filetype into editor-native identifiers so consumers do not maintain
+their own parallel language maps.
 
 ### Selectors
 
@@ -480,6 +513,12 @@ Print a generic integration projection:
 ```json
 {
   "version": 2,
+  "editorLanguageIds": {
+    "vscode": {
+      "sh": ["shellscript"],
+      "text": ["plaintext"]
+    }
+  },
   "filetypes": {
     "format": ["python", "go"],
     "lint": ["python", "go", "systemd"],
@@ -492,7 +531,9 @@ Print a generic integration projection:
 }
 ```
 
-No downstream-specific key should appear in this output.
+No downstream consumer-policy key should appear in this output. Checkrun-owned
+editor language aliases are allowed only because they expose the shared
+filetype vocabulary to editor adapters without duplicating policy.
 
 Capabilities output should be sorted and stable so consumers can cache or diff
 it. Unknown or unsupported future registry fields should not leak through this
