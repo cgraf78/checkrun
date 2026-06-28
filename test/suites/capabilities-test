@@ -44,6 +44,9 @@ assert filetypes["custom"]["filename"]["Dockerfile"] == "dockerfile"
 assert filetypes["custom"]["filename"]["CMakeLists.txt"] == "cmake"
 assert filetypes["custom"]["extension"]["mak"] == "make"
 assert filetypes["custom"]["extension"]["service"] == "systemd"
+assert data["editorLanguageIds"]["vscode"]["bash"] == ["shellscript"]
+assert data["editorLanguageIds"]["vscode"]["bzl"] == ["starlark", "bzl"]
+assert data["editorLanguageIds"]["vscode"]["text"] == ["plaintext"]
 
 patterns = filetypes["custom"]["patterns"]
 assert any(item["pattern"] == "agent-hook-*" and item["filetype"] == "sh" for item in patterns)
@@ -83,6 +86,7 @@ data["selectors"] = [
     selector for selector in data["selectors"] if selector["id"] != "text"
 ]
 data["filetypes"]["extension"].pop("txt", None)
+data["editorLanguageIds"]["vscode"].pop("text", None)
 path.write_text(json.dumps(data))
 PY
 

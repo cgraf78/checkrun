@@ -4,7 +4,15 @@
   "title": "Checkrun Tooling Registry",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "filetypes", "selectors", "crossCutting", "configPolicies", "adapters"],
+  "required": [
+    "version",
+    "filetypes",
+    "editorLanguageIds",
+    "selectors",
+    "crossCutting",
+    "configPolicies",
+    "adapters"
+  ],
   "properties": {
     "version": { "const": 1 },
     "filetypes": {
@@ -28,6 +36,14 @@
           "type": "array",
           "items": { "$ref": "#/$defs/shebang" }
         }
+      }
+    },
+    "editorLanguageIds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vscode"],
+      "properties": {
+        "vscode": { "$ref": "#/$defs/editorLanguageIdMap" }
       }
     },
     "selectors": {
@@ -113,6 +129,17 @@
         "pattern": { "type": "string" },
         "filetype": { "type": "string" },
         "extensionlessOnly": { "type": "boolean" }
+      }
+    },
+    "editorLanguageIdMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "selector": {

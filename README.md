@@ -41,9 +41,10 @@ ignored files. Missing language tools are treated as graceful no-ops so a host
 without a language toolchain does not break unrelated workflows.
 
 `checkrun registry --json` emits the raw registry for debugging and tests.
-`checkrun capabilities --json` emits machine-readable filetype metadata for
-editor integrations. `checkrun plan --json` emits the stable execution-plan API
-for integrations that need to inspect Checkrun decisions without running tools.
+`checkrun capabilities --json` emits machine-readable filetype and editor
+language-ID metadata for editor integrations. `checkrun plan --json` emits the
+stable execution-plan API for integrations that need to inspect Checkrun
+decisions without running tools.
 `checkrun explain` reports the normalized path, inferred filetype,
 phase-specific ignore decisions, candidate formatter/linter tools, fallback
 config names, and matching schema associations for selected files.
@@ -77,7 +78,8 @@ own toolchain through the host environment or integration layer.
   CLIs.
 - `share/checkrun/registry.json` is the shared tooling registry. It drives
   filetype inference, formatter/linter selection, `checkrun plan`,
-  `checkrun explain`, and the derived `checkrun capabilities --json` output.
+  `checkrun explain`, editor language-ID aliases, and the derived
+  `checkrun capabilities --json` output.
 - `share/checkrun/schemas/registry.schema.json` validates the registry shape;
   the internal `lib/checkrun/registry.py` interpreter enforces cross-object
   invariants that JSON Schema cannot express cleanly.
@@ -248,18 +250,22 @@ wrapper scripts.
 To add a formatter or linter, update the registry first:
 
 1. Add or reuse filetype inference under `filetypes`.
-2. Add a selector for the normalized filetype, then add a step with the tool
+2. If an editor uses a different language ID for that normalized filetype, add
+   the alias under `editorLanguageIds`. Keep editor-specific naming there so
+   VS Code, Neovim, hooks, and CLI planning share one Checkrun vocabulary
+   instead of carrying separate translation tables.
+3. Add a selector for the normalized filetype, then add a step with the tool
    name, adapter id, and config policy when the tool has Checkrun-owned config
    discovery. Use step-level `pathPatterns` only on selector steps to narrow a
    tool within an already inferred filetype. Use `requiresConfigMatch` for
    tools that should run only when their config policy finds project metadata.
-3. Confirm lint steps satisfy the fast-check policy above. If the tool is
+4. Confirm lint steps satisfy the fast-check policy above. If the tool is
    project-wide, network-sensitive, or expected to be slow, add it under
    `checkrun verify` or a Sley verify registry instead of the automatic lint
    surface.
-4. Add the adapter id under `adapters` and implement the named shell function.
-5. Dispatch that adapter id from `autoformat.sh` or `autolint.sh`.
-6. Add registry-plan coverage plus adapter behavior tests.
+5. Add the adapter id under `adapters` and implement the named shell function.
+6. Dispatch that adapter id from `autoformat.sh` or `autolint.sh`.
+7. Add registry-plan coverage plus adapter behavior tests.
 
 Do not add a second filename or extension decision table in selectors or shell.
 The top-level `filetypes` table answers what the file is; selectors answer which
