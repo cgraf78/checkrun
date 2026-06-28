@@ -33,6 +33,7 @@ _SKIP_WALK_DIRS = {
     "vendor",
 }
 _CPP_FILETYPES = {"c", "cpp"}
+_GOLANGCI_JSON_ARGS: list[str] | None = None
 
 
 def _abs(path: str) -> Path:
@@ -333,6 +334,41 @@ def _golangci_config(module: Path) -> list[str]:
     if isinstance(path, str) and path:
         return ["--config", path]
     return []
+
+
+def _golangci_json_args() -> list[str]:
+    """Return JSON-output flags for the installed golangci-lint CLI."""
+
+    global _GOLANGCI_JSON_ARGS
+    if _GOLANGCI_JSON_ARGS is not None:
+        return list(_GOLANGCI_JSON_ARGS)
+
+    try:
+        result = subprocess.run(
+            ["golangci-lint", "run", "--help"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError:
+        _GOLANGCI_JSON_ARGS = ["--out-format", "json"]
+        return list(_GOLANGCI_JSON_ARGS)
+
+    if "--output.json.path" in result.stdout:
+        # golangci-lint v2 replaced the old output-format flag family. The
+        # stats line is stdout by default, so disable it to keep stdout valid
+        # JSON for Checkrun's diagnostic parser.
+        _GOLANGCI_JSON_ARGS = [
+            "--output.json.path",
+            "stdout",
+            "--output.text.path",
+            "stderr",
+            "--show-stats=false",
+        ]
+    else:
+        _GOLANGCI_JSON_ARGS = ["--out-format", "json"]
+    return list(_GOLANGCI_JSON_ARGS)
 
 
 def _parse_golangci_lint_json(module: Path, stdout: str) -> list[dict[str, Any]]:
@@ -745,7 +781,7 @@ def run_golangci_lint(modules: list[Path], *, json_mode: bool) -> int:
         json_command=lambda module: [
             "golangci-lint",
             "run",
-            "--output-format=json",
+            *_golangci_json_args(),
             *_golangci_config(module),
             "./...",
         ],

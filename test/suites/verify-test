@@ -155,7 +155,7 @@ GOLANGCI_LINT_LOG="$_golangci_log" CHECKRUN_CONFIG_DIR="$_golangci_config_root" 
 rc=$?
 set -e
 _assert_exit "golangci-lint: exits 0 for clean modules" 0 "$rc"
-_golangci_call_count=$(wc -l <"$_golangci_log" | tr -d ' ')
+_golangci_call_count=$(awk '/\|run .* \.\/\.\.\.$/ { count++ } END { print count + 0 }' "$_golangci_log")
 _assert_eq "golangci-lint: deduplicates repeated files in one module" "2" "$_golangci_call_count"
 _assert_contains "golangci-lint: runs module-a from module root" \
   "$_go_root/module-a|run --config $_golangci_config_root/golangci-lint.yml ./..." "$(cat "$_golangci_log")"
@@ -327,7 +327,17 @@ echo "=== checkrun: golangci-lint json diagnostics ==="
 _golangci_issue_mock=$(_mock_bin)
 cat >"$_golangci_issue_mock/golangci-lint" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == *"--output-format=json"* ]]; then
+if [[ "$*" == "run --help" ]]; then
+  cat <<'HELP'
+      --output.json.path stdout           Output path can be either stdout, stderr or a file.
+      --output.text.path stdout           Output path can be either stdout, stderr or a file.
+      --show-stats                        Show statistics per linter.
+HELP
+  exit 0
+fi
+if [[ "$*" == *"--output.json.path stdout"* ]] &&
+  [[ "$*" == *"--output.text.path stderr"* ]] &&
+  [[ "$*" == *"--show-stats=false"* ]]; then
   cat <<'JSON'
 {"Issues":[{"Pos":{"Filename":"pkg/a.go","Line":4,"Column":2},"Severity":"error","FromLinter":"govet","Text":"unreachable code"}]}
 JSON
