@@ -93,7 +93,9 @@ own toolchain through the host environment or integration layer.
   other helpers are internal. Associations may set `"dependency": "owner/repo"`
   and a repo-relative `"schema"` path when a schema is public API owned by a
   shdeps-managed dependency; the interpreter resolves those through
-  `shdeps dep-file`.
+  `shdeps dep-file`. Associations may set `editorSource` when an editor-native
+  schema URI should be exposed to LSP/editor clients without making it a
+  refreshable or offline-enforced schema source.
 - `lib/checkrun/nvim.lua` is the optional Neovim adapter API. It does not
   depend on shdeps, Sley, LazyVim, Mason, or local editor policy; callers pass
   explicit commands, environment, and working directories when they do not want
@@ -220,7 +222,7 @@ that with `schemaDataDir`.
 Normal schema validation never fetches association `source` URLs. `schema-lint`
 uses local schema payloads through `schema_policy.schema_path()` so hooks and CI
 remain deterministic offline. Editors can still prefer public `source` URLs
-through the `--lsp-schemas` projection.
+or editor-native `editorSource` URLs through the `--lsp-schemas` projection.
 
 Refresh pinned public schema payloads explicitly:
 

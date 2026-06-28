@@ -207,10 +207,15 @@ def schema_url(
 ) -> str | None:
     """Return the URL a schema consumer should use for an association.
 
-    Editors prefer `source` so hover/completion can use public schema URLs.
-    Offline tools use `schema_path()` instead so hooks and CI never fetch
-    network resources while validating local files.
+    Editors prefer `editorSource` and then `source` so hover/completion can use
+    public or editor-native schema URLs. Offline tools use `schema_path()`
+    instead so hooks and CI never fetch network resources while validating local
+    files.
     """
+
+    editor_source = association.get("editorSource")
+    if prefer_source and isinstance(editor_source, str) and editor_source:
+        return _home_string(editor_source)
 
     source = association.get("source")
     if prefer_source and isinstance(source, str) and source:

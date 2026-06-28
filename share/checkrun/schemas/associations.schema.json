@@ -19,8 +19,32 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["name", "format", "schema", "matches", "enforce"],
+        "required": ["name", "format", "matches", "enforce"],
         "additionalProperties": false,
+        "allOf": [
+          {
+            "anyOf": [{ "required": ["schema"] }, { "required": ["editorSource"] }]
+          },
+          {
+            "if": {
+              "properties": {
+                "enforce": { "const": true }
+              },
+              "required": ["enforce"]
+            },
+            "then": {
+              "required": ["schema"]
+            }
+          },
+          {
+            "if": {
+              "required": ["source"]
+            },
+            "then": {
+              "required": ["schema"]
+            }
+          }
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -39,6 +63,10 @@
             "minLength": 1
           },
           "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "editorSource": {
             "type": "string",
             "minLength": 1
           },
