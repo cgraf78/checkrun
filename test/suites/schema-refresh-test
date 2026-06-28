@@ -82,6 +82,13 @@ cat >"$_policy" <<JSON
       "enforce": true
     },
     {
+      "name": "Editor-only",
+      "format": "json",
+      "editorSource": "vscode://schemas/settings/user",
+      "matches": [".config/example/editor-only.json"],
+      "enforce": false
+    },
+    {
       "name": "Bad JSON",
       "format": "json",
       "schema": "bad-json.schema.json",
@@ -146,6 +153,7 @@ _assert_exit "check all: missing refreshable payload exits non-zero" 1 "$rc"
 _assert_contains "check all: reports would create" "changed Extra" "$output"
 _assert_not_contains "check all: skips dependency-owned source" "Dependency-owned" "$output"
 _assert_not_contains "check all: skips source-less local schema" "Local only" "$output"
+_assert_not_contains "check all: skips editor-only source" "Editor-only" "$output"
 
 set +e
 output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" "$SCRIPT" --association Extra 2>&1)
