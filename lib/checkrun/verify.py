@@ -68,6 +68,49 @@ def _walk_project_roots(root: Path, required_files: tuple[str, ...]) -> list[Pat
     return roots
 
 
+def _nearest_existing_dir(path: Path) -> Path | None:
+    current = path if path.is_dir() else path.parent
+    previous: Path | None = None
+    while current != previous:
+        if current.is_dir():
+            return current.resolve(strict=False)
+        if current.parent == current:
+            break
+        previous = current
+        current = current.parent
+    return None
+
+
+def _project_candidates(
+    path: Path,
+    *,
+    walk_roots: Callable[[Path], list[Path]],
+    nearest_root: Callable[[Path], Path | None],
+    missing_scope: Callable[[Path], bool],
+) -> list[Path]:
+    if path.is_dir():
+        candidates = walk_roots(path)
+        if candidates:
+            return candidates
+        nearest = nearest_root(path)
+    else:
+        # Commit hooks can pass deleted/renamed files that no longer exist in
+        # the worktree. Those paths are still useful scope hints: a deleted Go
+        # or Rust file should verify the surviving module/crate that owned it.
+        if not path.exists() and not missing_scope(path):
+            return []
+        nearest = nearest_root(path.parent)
+    return [nearest] if nearest else []
+
+
+def _go_scope_path(path: Path) -> bool:
+    return path.suffix == ".go" or path.name in {"go.mod", "go.sum"}
+
+
+def _rust_scope_path(path: Path) -> bool:
+    return path.suffix == ".rs" or path.name in {"Cargo.toml", "Cargo.lock"}
+
+
 def _cpp_extensions(registry: dict[str, Any]) -> set[str]:
     return {
         f".{extension}"
@@ -92,6 +135,18 @@ def _walk_cpp_files(root: Path, registry: dict[str, Any]) -> list[Path]:
             if _cpp_file(candidate, registry):
                 files.append(candidate.resolve(strict=False))
     return files
+
+
+def _cpp_context_for_missing(path: Path, registry: dict[str, Any]) -> list[Path]:
+    if not _cpp_file(path, registry):
+        return []
+    context = _nearest_existing_dir(path.parent)
+    if context is None:
+        return []
+    # A deleted C/C++ file cannot be linted directly. Walking the nearest
+    # surviving directory keeps commit-time verification tied to the changed
+    # area without promoting clang-tidy to an unconditional repo-wide scan.
+    return _walk_cpp_files(context, registry)
 
 
 def _nearest_go_module(start: Path) -> Path | None:
@@ -135,17 +190,12 @@ def discover_go_modules(paths: list[str]) -> list[Path]:
 
     for raw_path in paths or _DEFAULT_PATHS:
         path = _abs(raw_path)
-        candidates: list[Path] = []
-        if path.is_dir():
-            candidates = _walk_go_modules(path)
-            if not candidates:
-                nearest = _nearest_go_module(path)
-                if nearest:
-                    candidates = [nearest]
-        elif path.is_file():
-            nearest = _nearest_go_module(path.parent)
-            if nearest:
-                candidates = [nearest]
+        candidates = _project_candidates(
+            path,
+            walk_roots=_walk_go_modules,
+            nearest_root=_nearest_go_module,
+            missing_scope=_go_scope_path,
+        )
 
         for module in candidates:
             key = str(module)
@@ -162,17 +212,12 @@ def discover_cargo_audit_projects(paths: list[str]) -> list[Path]:
 
     for raw_path in paths or _DEFAULT_PATHS:
         path = _abs(raw_path)
-        candidates: list[Path] = []
-        if path.is_dir():
-            candidates = _walk_cargo_audit_projects(path)
-            if not candidates:
-                nearest = _nearest_cargo_audit_project(path)
-                if nearest:
-                    candidates = [nearest]
-        elif path.is_file():
-            nearest = _nearest_cargo_audit_project(path.parent)
-            if nearest:
-                candidates = [nearest]
+        candidates = _project_candidates(
+            path,
+            walk_roots=_walk_cargo_audit_projects,
+            nearest_root=_nearest_cargo_audit_project,
+            missing_scope=_rust_scope_path,
+        )
 
         for project in candidates:
             key = str(project)
@@ -189,17 +234,12 @@ def discover_cargo_projects(paths: list[str]) -> list[Path]:
 
     for raw_path in paths or _DEFAULT_PATHS:
         path = _abs(raw_path)
-        candidates: list[Path] = []
-        if path.is_dir():
-            candidates = _walk_cargo_projects(path)
-            if not candidates:
-                nearest = _nearest_cargo_project(path)
-                if nearest:
-                    candidates = [nearest]
-        elif path.is_file():
-            nearest = _nearest_cargo_project(path.parent)
-            if nearest:
-                candidates = [nearest]
+        candidates = _project_candidates(
+            path,
+            walk_roots=_walk_cargo_projects,
+            nearest_root=_nearest_cargo_project,
+            missing_scope=_rust_scope_path,
+        )
 
         for project in candidates:
             key = str(project)
@@ -225,6 +265,8 @@ def discover_cpp_files(paths: list[str]) -> list[Path]:
             candidates = _walk_cpp_files(path, registry)
         elif path.is_file() and _cpp_file(path, registry):
             candidates = [path.resolve(strict=False)]
+        elif not path.exists():
+            candidates = _cpp_context_for_missing(path, registry)
         else:
             candidates = []
 

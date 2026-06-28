@@ -35,7 +35,9 @@ fast linter path.
 not run from save-time editor lint. Its project backends are deduplicated by
 owner root: Go analyzers run once per `go.mod`, Rust analyzers run once per
 `Cargo.toml`, and C/C++ `clang-tidy` runs for selected C/C++ files only when
-project metadata makes the invocation meaningful.
+project metadata makes the invocation meaningful. Missing path arguments are
+still treated as scope hints for verify, so deleted or renamed Go/Rust/C++
+files can trigger checks for the nearest surviving owning project context.
 
 The formatter and linter entry points ignore missing, deleted, or explicitly
 ignored files. Missing language tools are treated as graceful no-ops so a host
@@ -342,6 +344,9 @@ explicitly with `checkrun verify [PATH...]` or `--tool` filters:
 - Verify-time `clang-tidy` walks selected C/C++ files and directories while
   preserving the same `.clang-tidy`, `compile_commands.json`, or
   `compile_flags.txt` metadata gate as fast lint.
+- Deleted or renamed file paths are still useful verify scope hints: Go/Rust
+  paths select their nearest surviving module or project, while deleted C/C++
+  files select the nearest surviving directory context.
 
 Missing verification tools are no-ops, matching the rest of Checkrun's optional
 backend policy.

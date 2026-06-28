@@ -650,7 +650,9 @@ rather than a lint command; it must not grow a separate tool-selection path.
 `checkrun verify` is the companion path for generic analyzers that are useful in
 readiness workflows but too broad for the automatic lint contract. Callers pass
 files or directories; Checkrun discovers the owning projects and decides which
-verify-time tools apply.
+verify-time tools apply. Missing paths are kept as verify scope hints so
+commit-time checks still cover the nearest surviving project context for
+deleted or renamed language files.
 
 ## Schema Association API
 
