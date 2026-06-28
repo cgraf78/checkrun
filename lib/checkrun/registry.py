@@ -34,6 +34,7 @@ __all__ = [
     "plan",
     "capabilities",
     "explain_items",
+    "resolve_config",
 ]
 
 _CHECKRUN_ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +47,7 @@ _LINTER_ADAPTER_DIR = _CHECKRUN_ROOT / "lib/checkrun/linters"
 # introduced in only one caller, drift comes back immediately.
 _PHASES = {"format", "lint", "spell", "schema", "tool"}
 _PLAN_PHASES = {"format", "lint"}
+_AUTOMATIC_LINT_SCOPES = {"file"}
 _DOWNSTREAM_KEYS = {"sley", "nvim"}
 _PHASE_IGNORE_FILES = {
     "format": "format-ignore",
@@ -445,6 +447,15 @@ def _validate_step(
         raise RegistryError(
             f"{owner}.{phase}: invalid step phase {step_phase!r}; expected one of {expected}"
         )
+    if phase == "lint":
+        execution_scope = adapters[adapter].get("executionScope")
+        if execution_scope not in _AUTOMATIC_LINT_SCOPES:
+            expected = ", ".join(sorted(_AUTOMATIC_LINT_SCOPES))
+            actual = execution_scope if isinstance(execution_scope, str) else "missing"
+            raise RegistryError(
+                f"{owner}.{phase}: automatic lint adapter {adapter} has "
+                f"executionScope {actual!r}; expected one of {expected}"
+            )
 
 
 def load_registry(path: Path | None = None) -> dict[str, Any]:
@@ -677,6 +688,22 @@ def _resolve_config(
     if policy.get("native") == "none":
         return {"policy": policy_name, "source": "none"}
     return {"policy": policy_name, "source": "native"}
+
+
+def resolve_config(
+    registry: dict[str, Any],
+    policy_name: str,
+    file: Path | str,
+) -> dict[str, Any]:
+    """Resolve one registry config policy for a Checkrun-owned caller.
+
+    `verify.py` runs project-scope tools outside the automatic lint plan, but
+    those tools should still share the same project-vs-fallback config policy
+    vocabulary. Keeping this small facade here avoids a second config walk just
+    because the execution phase is verify instead of lint.
+    """
+
+    return _resolve_config(registry, policy_name, _abs_path(str(file)))
 
 
 # Cache parsed ignore-file pattern lists per (config_dir, filename) so repeated

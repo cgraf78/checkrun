@@ -452,46 +452,40 @@ else
   echo "  SKIP: schema validation (requires python jsonschema and PyYAML)"
 fi
 
-# Go: golangci-lint detects issues
-if command -v golangci-lint &>/dev/null && command -v go &>/dev/null; then
-  _go_dir=$(_tmpdir)
-  cat >"$_go_dir/go.mod" <<'EOF'
+# Go and Rust project analyzers belong to `checkrun verify`, not save-time
+# autolint. Keep hostile mocks here so accidental reintroduction of broad
+# project linting fails loudly.
+_broad_analyzer_mock=$(_mock_bin)
+_broad_analyzer_log=$(_tmpdir)/broad-analyzers.log
+: >"$_broad_analyzer_log"
+cat >"$_broad_analyzer_mock/golangci-lint" <<'EOF'
+#!/usr/bin/env bash
+printf 'golangci-lint %s\n' "$*" >>"$BROAD_ANALYZER_LOG"
+exit 7
+EOF
+cat >"$_broad_analyzer_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+printf 'cargo %s\n' "$*" >>"$BROAD_ANALYZER_LOG"
+exit 7
+EOF
+chmod +x "$_broad_analyzer_mock/golangci-lint" "$_broad_analyzer_mock/cargo"
+
+_go_dir=$(_tmpdir)
+cat >"$_go_dir/go.mod" <<'EOF'
 module example.com/test
 go 1.21
 EOF
-  cat >"$_go_dir/bad.go" <<'EOF'
+cat >"$_go_dir/main.go" <<'EOF'
 package main
-import "fmt"
-func main() {
-	x := 1
-	fmt.Println("hello")
-}
+func main() {}
 EOF
-  set +e
-  output=$("$AUTOLINT" "$_go_dir/bad.go" 2>&1)
-  rc=$?
-  set -e
-  # x is declared but unused — golangci-lint should catch it
-  if [ "$rc" -ne 0 ]; then
-    _pass "go: golangci-lint exits non-zero on lint error"
-  else
-    echo "  SKIP: go lint (golangci-lint did not flag test fixture)"
-  fi
-else
-  echo "  SKIP: go (golangci-lint or go not installed)"
-fi
+set +e
+BROAD_ANALYZER_LOG="$_broad_analyzer_log" PATH="$_broad_analyzer_mock:$PATH" \
+  "$AUTOLINT" "$_go_dir/main.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "go: broad analyzer stays out of autolint" 0 "$rc"
 
-# Rust: cargo clippy is the default linter
-_rust_mock=$(_mock_bin)
-cat >"$_rust_mock/cargo" <<'EOF'
-#!/usr/bin/env bash
-if [ "$1" = "clippy" ] && [ "${2:-}" = "--version" ]; then
-  exit 0
-fi
-printf '%s\n' "$*"
-exit 7
-EOF
-chmod +x "$_rust_mock/cargo"
 _rust_dir=$(_tmpdir)
 cat >"$_rust_dir/Cargo.toml" <<'EOF'
 [package]
@@ -503,98 +497,13 @@ mkdir -p "$_rust_dir/src"
 cat >"$_rust_dir/src/lib.rs" <<'EOF'
 pub fn answer() -> i32 { 42 }
 EOF
-
 set +e
-output=$(PATH="$_rust_mock:$PATH" "$AUTOLINT" "$_rust_dir/src/lib.rs" 2>&1)
+BROAD_ANALYZER_LOG="$_broad_analyzer_log" PATH="$_broad_analyzer_mock:$PATH" \
+  "$AUTOLINT" "$_rust_dir/src/lib.rs" >/dev/null 2>&1
 rc=$?
 set -e
-_assert_exit "rust: clippy exit propagates" 7 "$rc"
-_assert_contains_path_arg_suffix "rust: clippy uses manifest path" \
-  "clippy --manifest-path " "$_rust_dir/Cargo.toml" " --all-targets -- -D warnings" "$output"
-
-set +e
-output=$(PATH="$_rust_mock:$PATH" "$AUTOLINT" --fix "$_rust_dir/src/lib.rs" 2>&1)
-rc=$?
-set -e
-_assert_exit "rust: clippy --fix exit propagates" 7 "$rc"
-_assert_contains_path_arg_suffix "rust: --fix uses clippy fix" \
-  "clippy --fix --allow-dirty --allow-staged --manifest-path " "$_rust_dir/Cargo.toml" " --all-targets -- -D warnings" "$output"
-
-# Rust deduplication: autolint spawns one subshell per file in parallel.
-# cargo clippy is workspace-wide, so N files from the same workspace should
-# produce exactly one clippy invocation. A mock cargo appends its args to a
-# log file; the test counts lines to verify only one invocation ran.
-_rust_dedup_dir=$(_tmpdir)
-cat >"$_rust_dedup_dir/Cargo.toml" <<'EOF'
-[package]
-name = "deduptest"
-version = "0.1.0"
-edition = "2021"
-EOF
-mkdir -p "$_rust_dedup_dir/src"
-echo 'pub fn a() {}' >"$_rust_dedup_dir/src/a.rs"
-echo 'pub fn b() {}' >"$_rust_dedup_dir/src/b.rs"
-echo 'pub fn c() {}' >"$_rust_dedup_dir/src/c.rs"
-
-_rust_dedup_mock=$(_mock_bin)
-_rust_dedup_log=$(_tmpdir)/clippy-calls.log
-: >"$_rust_dedup_log"
-cat >"$_rust_dedup_mock/cargo" <<'EOF'
-#!/usr/bin/env bash
-if [ "$1" = "clippy" ] && [ "${2:-}" = "--version" ]; then exit 0; fi
-printf '%s\n' "$*" >>"$CLIPPY_CALL_LOG"
-exit 0
-EOF
-chmod +x "$_rust_dedup_mock/cargo"
-
-set +e
-CLIPPY_CALL_LOG="$_rust_dedup_log" CHECKRUN_AUTOLINT_JOBS=4 \
-  PATH="$_rust_dedup_mock:$PATH" \
-  "$AUTOLINT" \
-  "$_rust_dedup_dir/src/a.rs" \
-  "$_rust_dedup_dir/src/b.rs" \
-  "$_rust_dedup_dir/src/c.rs" >/dev/null 2>&1
-rc=$?
-set -e
-_assert_exit "rust dedup: exits 0 for three files in same workspace" 0 "$rc"
-_dedup_call_count=$(wc -l <"$_rust_dedup_log" | tr -d ' ')
-_assert_eq "rust dedup: same workspace runs clippy exactly once for three files" \
-  "1" "$_dedup_call_count"
-
-# Rust deduplication: files from different workspaces must each run clippy.
-_rust_ws_a=$(_tmpdir)
-_rust_ws_b=$(_tmpdir)
-cat >"$_rust_ws_a/Cargo.toml" <<'EOF'
-[package]
-name = "workspace-a"
-version = "0.1.0"
-edition = "2021"
-EOF
-cat >"$_rust_ws_b/Cargo.toml" <<'EOF'
-[package]
-name = "workspace-b"
-version = "0.1.0"
-edition = "2021"
-EOF
-mkdir -p "$_rust_ws_a/src" "$_rust_ws_b/src"
-echo 'pub fn a() {}' >"$_rust_ws_a/src/lib.rs"
-echo 'pub fn b() {}' >"$_rust_ws_b/src/lib.rs"
-
-_rust_two_ws_log=$(_tmpdir)/two-ws-calls.log
-: >"$_rust_two_ws_log"
-
-set +e
-CLIPPY_CALL_LOG="$_rust_two_ws_log" CHECKRUN_AUTOLINT_JOBS=4 \
-  PATH="$_rust_dedup_mock:$PATH" \
-  "$AUTOLINT" \
-  "$_rust_ws_a/src/lib.rs" \
-  "$_rust_ws_b/src/lib.rs" >/dev/null 2>&1
-rc=$?
-set -e
-_assert_exit "rust dedup: exits 0 for files in two different workspaces" 0 "$rc"
-_two_ws_call_count=$(wc -l <"$_rust_two_ws_log" | tr -d ' ')
-_assert_eq "rust dedup: different workspaces each run clippy independently" \
-  "2" "$_two_ws_call_count"
+_assert_exit "rust: broad analyzer stays out of autolint" 0 "$rc"
+_assert_eq "go/rust: broad analyzers were not invoked by autolint" "" "$(cat "$_broad_analyzer_log")"
 
 # HTML: superhtml check detects issues
 if command -v superhtml &>/dev/null; then
@@ -2019,17 +1928,19 @@ _assert_exit "dockerfile: per-repo .hadolint.yaml — exits 0" 0 "$rc"
 _assert_not_contains_path_arg "dockerfile: per-repo .hadolint.yaml — no -c fallback" \
   "-c " "$_alt_hadolint" "$output"
 
-# golangci-lint: fallback config routing via mock. Verifies --config
-# routing when no per-repo .golangci.yml is found.
+# golangci-lint config routing is verify-time behavior. Autolint should not
+# consume fallback or project golangci config files because Go project analyzers
+# are intentionally broader than the fast save-time contract.
 _gc_mock=$(_mock_bin)
+_gc_log=$(_tmpdir)/golangci-autolint.log
+: >"$_gc_log"
 cat >"$_gc_mock/golangci-lint" <<'EOF'
 #!/usr/bin/env bash
-echo "MOCK-GC-ARGS: $*"
-exit 0
+printf '%s\n' "$*" >>"$GOLANGCI_AUTOLINT_LOG"
+exit 7
 EOF
 chmod +x "$_gc_mock/golangci-lint"
 
-# No per-repo config + fallback present → --config flag applied.
 _alt_gc=$(_tmpdir)
 cat >"$_alt_gc/golangci-lint.yml" <<'EOF'
 version: "2"
@@ -2038,12 +1949,11 @@ cat >"$_td/fb.go" <<'EOF'
 package main
 EOF
 set +e
-output=$(CHECKRUN_CONFIG_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_td/fb.go" 2>&1)
+GOLANGCI_AUTOLINT_LOG="$_gc_log" CHECKRUN_CONFIG_DIR="$_alt_gc" \
+  PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_td/fb.go" >/dev/null 2>&1
 rc=$?
 set -e
-_assert_exit "go: fallback golangci-lint.yml — exits 0" 0 "$rc"
-_assert_contains_path_arg "go: fallback golangci-lint.yml passed via --config" \
-  "--config " "$_alt_gc/golangci-lint.yml" "$output"
+_assert_exit "go: fallback golangci-lint.yml stays out of autolint" 0 "$rc"
 
 _gc_rel=$(_tmpdir)
 mkdir -p "$_gc_rel/launch/cfg" "$_gc_rel/project"
@@ -2054,15 +1964,13 @@ cat >"$_gc_rel/project/test.go" <<'EOF'
 package main
 EOF
 set +e
-output=$(cd "$_gc_rel/launch" &&
-  CHECKRUN_CONFIG_DIR=cfg PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_rel/project/test.go" 2>&1)
+(cd "$_gc_rel/launch" &&
+  GOLANGCI_AUTOLINT_LOG="$_gc_log" CHECKRUN_CONFIG_DIR=cfg \
+    PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_rel/project/test.go" >/dev/null 2>&1)
 rc=$?
 set -e
-_assert_exit "go: relative fallback config exits 0 from another cwd" 0 "$rc"
-_assert_contains_path_arg "go: relative fallback config path resolved before package cwd" \
-  "--config " "$_gc_rel/launch/cfg/golangci-lint.yml" "$output"
+_assert_exit "go: relative fallback config stays out of autolint" 0 "$rc"
 
-# Per-repo .golangci.yml wins — no --config flag to fallback.
 _gc_repo=$(_tmpdir)
 cat >"$_gc_repo/.golangci.yml" <<'EOF'
 version: "2"
@@ -2071,12 +1979,12 @@ cat >"$_gc_repo/test.go" <<'EOF'
 package main
 EOF
 set +e
-output=$(CHECKRUN_CONFIG_DIR="$_alt_gc" PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_repo/test.go" 2>&1)
+GOLANGCI_AUTOLINT_LOG="$_gc_log" CHECKRUN_CONFIG_DIR="$_alt_gc" \
+  PATH="$_gc_mock:$PATH" "$AUTOLINT" "$_gc_repo/test.go" >/dev/null 2>&1
 rc=$?
 set -e
-_assert_exit "go: per-repo .golangci.yml — exits 0" 0 "$rc"
-_assert_not_contains_path_arg "go: per-repo .golangci.yml — no --config fallback" \
-  "--config " "$_alt_gc" "$output"
+_assert_exit "go: per-repo .golangci.yml stays out of autolint" 0 "$rc"
+_assert_eq "go: golangci-lint is not invoked by autolint config routing" "" "$(cat "$_gc_log")"
 
 # ---------------------------------------------------------------------------
 # Tests: ignore file ($CHECKRUN_CONFIG_DIR/ignore)
@@ -2910,14 +2818,31 @@ EOF
   fi
 fi
 
-# golangci-lint (Go)
-if command -v golangci-lint &>/dev/null && command -v go &>/dev/null; then
-  _json_go_dir=$(_tmpdir)
-  cat >"$_json_go_dir/go.mod" <<'EOF'
+# golangci-lint and clippy JSON diagnostics are produced by `checkrun verify`.
+# Autolint JSON mode should remain quiet for those broad project analyzers.
+_json_broad_mock=$(_mock_bin)
+_json_broad_log=$(_tmpdir)/json-broad-analyzers.log
+: >"$_json_broad_log"
+cat >"$_json_broad_mock/golangci-lint" <<'EOF'
+#!/usr/bin/env bash
+printf 'golangci-lint %s\n' "$*" >>"$JSON_BROAD_ANALYZER_LOG"
+printf '{"Issues":[{"Pos":{"Filename":"bad.go","Line":1,"Column":1},"Severity":"error","FromLinter":"mock","Text":"mock go finding"}]}\n'
+exit 1
+EOF
+cat >"$_json_broad_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+printf 'cargo %s\n' "$*" >>"$JSON_BROAD_ANALYZER_LOG"
+printf '%s\n' '{"reason":"compiler-message","message":{"level":"warning","message":"manual implementation of unwrap_or","code":{"code":"clippy::manual_unwrap_or"},"spans":[{"file_name":"src/lib.rs","is_primary":true,"line_start":1,"column_start":1,"line_end":1,"column_end":3}]}}'
+exit 1
+EOF
+chmod +x "$_json_broad_mock/golangci-lint" "$_json_broad_mock/cargo"
+
+_json_go_dir=$(_tmpdir)
+cat >"$_json_go_dir/go.mod" <<'EOF'
 module example.com/test
 go 1.21
 EOF
-  cat >"$_json_go_dir/bad.go" <<'EOF'
+cat >"$_json_go_dir/bad.go" <<'EOF'
 package main
 import "fmt"
 func main() {
@@ -2925,35 +2850,14 @@ func main() {
 	fmt.Println("hello")
 }
 EOF
-  set +e
-  output=$("$AUTOLINT" --json "$_json_go_dir/bad.go" 2>/dev/null)
-  rc=$?
-  set -e
-  if [ "$rc" -ne 0 ] && [ -n "$output" ]; then
-    _assert_json_lines_valid "json go: valid unified schema" "$output" "golangci-lint"
-  else
-    echo "  SKIP: json go (golangci-lint did not flag test fixture)"
-  fi
-fi
+set +e
+output=$(JSON_BROAD_ANALYZER_LOG="$_json_broad_log" PATH="$_json_broad_mock:$PATH" \
+  "$AUTOLINT" --json "$_json_go_dir/bad.go" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json go: broad analyzer stays out of autolint" 0 "$rc"
+_assert_eq "json go: emits no broad analyzer diagnostics" "" "$output"
 
-# clippy (Rust)
-_json_rust_mock=$(_mock_bin)
-cat >"$_json_rust_mock/cargo" <<'EOF'
-#!/usr/bin/env bash
-if [ "$1" = "clippy" ] && [ "${2:-}" = "--version" ]; then
-  exit 0
-fi
-case "$*" in
-  *"--message-format=json"*)
-    printf '%s\n' '{"reason":"compiler-message","message":{"level":"warning","message":"manual implementation of unwrap_or","code":{"code":"clippy::manual_unwrap_or"},"spans":[{"file_name":"src/lib.rs","is_primary":true,"line_start":1,"column_start":1,"line_end":1,"column_end":3}]}}'
-    exit 1
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-EOF
-chmod +x "$_json_rust_mock/cargo"
 _json_rust_dir=$(_tmpdir)
 cat >"$_json_rust_dir/Cargo.toml" <<'EOF'
 [package]
@@ -2966,12 +2870,13 @@ cat >"$_json_rust_dir/src/lib.rs" <<'EOF'
 pub fn f() {}
 EOF
 set +e
-output=$(PATH="$_json_rust_mock:$PATH" "$AUTOLINT" --json "$_json_rust_dir/src/lib.rs" 2>/dev/null)
+output=$(JSON_BROAD_ANALYZER_LOG="$_json_broad_log" PATH="$_json_broad_mock:$PATH" \
+  "$AUTOLINT" --json "$_json_rust_dir/src/lib.rs" 2>/dev/null)
 rc=$?
 set -e
-_assert_exit "json rust: exits non-zero on clippy finding" 1 "$rc"
-_assert_json_lines_valid "json rust: valid unified schema" "$output" "clippy"
-_assert_contains "json rust: clippy code present" '"code":"clippy::manual_unwrap_or"' "$output"
+_assert_exit "json rust: broad analyzer stays out of autolint" 0 "$rc"
+_assert_eq "json rust: emits no broad analyzer diagnostics" "" "$output"
+_assert_eq "json go/rust: broad analyzers were not invoked by autolint" "" "$(cat "$_json_broad_log")"
 
 # typos
 _json_typos_mock=$(_mock_bin)

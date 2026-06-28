@@ -386,10 +386,13 @@ Checkrun tests should cover:
 
 Minimum golden-file matrix:
 
+Broad project analyzers such as `golangci-lint` and Cargo clippy are covered by
+`checkrun verify`, not the automatic lint matrix below.
+
 | Case | Expected format | Expected lint |
 | --- | --- | --- |
 | `app.py` | `ruff-format` | `typos`, `schema-lint`, `ruff-lint` |
-| `main.go` | `goimports`, `gofumpt` | `typos`, `schema-lint`, `golangci-lint` |
+| `main.go` | `goimports`, `gofumpt` | `typos`, `schema-lint` |
 | `script.sh` | `shfmt` | `typos`, `schema-lint`, `shellcheck` |
 | `.zshrc` | `shfmt` with zsh mode | `typos`, `schema-lint`, `zsh -n` |
 | `Dockerfile` | `dockerfmt` | `typos`, `schema-lint`, `hadolint` |
@@ -407,7 +410,7 @@ Minimum golden-file matrix:
 | `main.c` | `clang-format` | `typos`, `schema-lint`; `clang-tidy` only when project metadata exists |
 | `main.cpp` | `clang-format` | `typos`, `schema-lint`; `clang-tidy` only when project metadata exists |
 | `init.lua` | `stylua` | `typos`, `schema-lint`, `selene` |
-| `main.rs` | `rustfmt` | `typos`, `schema-lint`, `clippy` or existing Rust lint adapter |
+| `main.rs` | `rustfmt` | `typos`, `schema-lint` |
 | `Main.java` | `google-java-format` | `typos`, `schema-lint`, `google-java-format` dry-run |
 | `index.php` | `php-cs-fixer` | `typos`, `schema-lint`, `php -l` |
 | `app.rb` | `rubocop` | `typos`, `schema-lint`, `rubocop` |

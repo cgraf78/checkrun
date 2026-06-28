@@ -191,14 +191,12 @@ _lint_dispatch() {
     crontab) _lint_crontab "$file" ;;
     editorconfig-checker) _lint_editorconfig "$file" ;;
     git-config) _lint_git_config "$file" ;;
-    golangci-lint) _lint_go "$file" "$dir" "$config_source" "$config_path" ;;
     google-java-format-lint) _lint_java "$file" ;;
     hadolint) _lint_dockerfile "$file" "$dir" "$config_source" "$config_path" ;;
     php) _lint_php "$file" ;;
     rubocop-lint) _lint_ruby "$file" "$dir" "$config_source" "$config_path" ;;
     ruff-lint) _lint_ruff "$file" "$dir" "$config_source" "$config_path" ;;
     rumdl-lint) _lint_rumdl "$file" "$dir" "$config_source" "$config_path" ;;
-    rust-clippy) _lint_rust "$file" "$dir" ;;
     schema-lint) _lint_schema "$file" ;;
     selene) _lint_selene "$file" "$dir" "$config_source" "$config_path" ;;
     shellcheck) _lint_sh "$file" "$dir" "$(_shellcheck_lang_hint "$file")" "$config_source" "$config_path" ;;
@@ -326,9 +324,9 @@ _autolint_supports_pool() {
 _autolint_run_files_pool() {
   # Pool-style: maintain up to ${jobs} workers in flight. When any worker
   # finishes (via `wait -n`), spawn the next file immediately rather than
-  # waiting for the whole wave. One slow file (e.g. a Rust file that triggers
-  # clippy) no longer idles the other ${jobs-1} workers for the rest of the
-  # wave. Output is still emitted in file_args order at the end to keep
+  # waiting for the whole wave. One slow file no longer idles the other
+  # ${jobs-1} workers for the rest of the wave. Output is still emitted in
+  # file_args order at the end to keep
   # diagnostics deterministic for users and editor consumers — buffering is
   # already required by the per-file temp file scheme.
   #
