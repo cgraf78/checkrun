@@ -49,6 +49,10 @@ decisions without running tools.
 phase-specific ignore decisions, candidate formatter/linter tools, fallback
 config names, and matching schema associations for selected files.
 
+See [`docs/workflow-contract.md`](docs/workflow-contract.md) for the
+cross-surface ownership contract between Checkrun, Sley, editor adapters,
+dotfiles, humans, and agents.
+
 ## Dependencies
 
 - Bash for the CLI entry points and shell libraries.
@@ -164,7 +168,9 @@ Sley. Sley's default hook policy delegates back to these CLIs, while consumers
 can override that layer for repo-specific policy.
 
 The important contract is one-way: `checkrun` owns formatter/linter dispatch,
-and consumers decide when to invoke it.
+and consumers decide when to invoke it. Sley and editor adapters should consume
+Checkrun's public CLIs and JSON APIs instead of carrying their own language
+maps, selector tables, or direct low-level tool dispatch.
 
 ## Fast Check Policy
 
