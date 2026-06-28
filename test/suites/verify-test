@@ -183,6 +183,17 @@ _assert_contains "golangci-lint: deleted file scopes to owning module" \
 set +e
 GOLANGCI_LINT_LOG="$_golangci_log" CHECKRUN_CONFIG_DIR="$_golangci_config_root" \
   PATH="$_golangci_mock:$PATH" \
+  "$CHECKRUN" verify --tool golangci-lint "$_go_root/module-a/removed/pkg/deleted.go" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "golangci-lint: deleted parent scope exits 0" 0 "$rc"
+_assert_contains "golangci-lint: deleted parent scopes to owning module" \
+  "$_go_root/module-a|run --config $_golangci_config_root/golangci-lint.yml ./..." "$(cat "$_golangci_log")"
+
+: >"$_golangci_log"
+set +e
+GOLANGCI_LINT_LOG="$_golangci_log" CHECKRUN_CONFIG_DIR="$_golangci_config_root" \
+  PATH="$_golangci_mock:$PATH" \
   "$CHECKRUN" verify --tool golangci-lint "$_go_root/module-a/docs/deleted.md" >/dev/null 2>&1
 rc=$?
 set -e
@@ -388,6 +399,18 @@ _assert_contains "clang-tidy: deleted file scopes to surviving directory context
   "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
 _assert_not_contains "clang-tidy: deleted file does not lint missing path" \
   "$_cpp_root/src/deleted.cpp" "$(cat "$_clang_tidy_log")"
+
+: >"$_clang_tidy_log"
+set +e
+CLANG_TIDY_LOG="$_clang_tidy_log" PATH="$_clang_tidy_mock:$PATH" \
+  "$CHECKRUN" verify --tool clang-tidy "$_cpp_root/src/removed/deleted.cpp" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "clang-tidy: deleted parent scope exits 0" 0 "$rc"
+_assert_contains "clang-tidy: deleted parent scopes to surviving directory context" \
+  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+_assert_not_contains "clang-tidy: deleted parent does not lint missing path" \
+  "$_cpp_root/src/removed/deleted.cpp" "$(cat "$_clang_tidy_log")"
 
 echo "=== checkrun: golangci-lint json diagnostics ==="
 
