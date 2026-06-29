@@ -660,11 +660,13 @@ repo-root fallback so `clang-tidy` does not become a broad scan by accident.
 `lib/checkrun/schemas/schema_policy.py` is dependency-addressable through
 shdeps, so its public API must stay explicit:
 
-- `schema_policy.py --lsp-schemas`
+- `schema_policy.py --lsp-schemas [--editor-sources]`
 - the functions listed in `schema_policy.__all__`
 
 The `--lsp-schemas` projection is named for the data shape it emits, not for one
-specific editor consumer. Helpers outside `__all__` should remain
+specific editor consumer. It emits portable public or file schema URLs by
+default; `--editor-sources` opts into editor-native schema URI schemes for
+consumers that can resolve them. Helpers outside `__all__` should remain
 underscore-prefixed implementation details.
 
 ## Dispatch Flow
