@@ -128,6 +128,7 @@ dependency manager's contract:
 ```bash
 . "$(shdeps dep-file cgraf78/checkrun share/checkrun/shell.sh)"
 python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --lsp-schemas
+python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --lsp-schemas --editor-sources
 checkrun capabilities --json
 ```
 
@@ -232,8 +233,10 @@ that with `schemaDataDir`.
 
 Normal schema validation never fetches association `source` URLs. `schema-lint`
 uses local schema payloads through `schema_policy.schema_path()` so hooks and CI
-remain deterministic offline. Editors can still prefer public `source` URLs
-or editor-native `editorSource` URLs through the `--lsp-schemas` projection.
+remain deterministic offline. Portable LSP consumers can prefer public `source`
+URLs through the `--lsp-schemas` projection. VS Code and other editor-native
+consumers that can resolve custom schema schemes can add `--editor-sources` to
+prefer `editorSource` URLs such as `vscode://schemas/settings/user`.
 
 Refresh pinned public schema payloads explicitly:
 

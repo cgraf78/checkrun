@@ -6,7 +6,7 @@ that data so `autolint`, direct schema validation, and editor integrations all
 expand paths, matches, and schema URLs the same way.
 
 Public contract:
-  - `schema_policy.py --lsp-schemas`
+  - `schema_policy.py --lsp-schemas [--editor-sources]`
   - `load_json()`
   - `policy_path()`
   - `policy_schema_path()`
@@ -204,6 +204,7 @@ def schema_url(
     association: dict[str, Any],
     *,
     prefer_source: bool = False,
+    editor_sources: bool = False,
 ) -> str | None:
     """Return the URL a schema consumer should use for an association.
 
@@ -214,7 +215,7 @@ def schema_url(
     """
 
     editor_source = association.get("editorSource")
-    if prefer_source and isinstance(editor_source, str) and editor_source:
+    if editor_sources and prefer_source and isinstance(editor_source, str) and editor_source:
         return _home_string(editor_source)
 
     source = association.get("source")
@@ -329,7 +330,7 @@ def _glob_to_regex(pattern: str) -> str:
     return ".*/" + body + "$"
 
 
-def lsp_schema_config(policy: dict[str, Any]) -> dict[str, Any]:
+def lsp_schema_config(policy: dict[str, Any], *, editor_sources: bool = False) -> dict[str, Any]:
     """Build LSP/editor-facing schema associations from the shared policy."""
 
     json_schemas: list[dict[str, Any]] = []
@@ -338,7 +339,7 @@ def lsp_schema_config(policy: dict[str, Any]) -> dict[str, Any]:
 
     for association in _associations(policy):
         fmt = str(association.get("format", "")).lower()
-        url = schema_url(policy, association, prefer_source=True)
+        url = schema_url(policy, association, prefer_source=True, editor_sources=editor_sources)
         file_matches = _expanded_patterns(association.get("matches", []))
         if not url or not file_matches:
             continue
@@ -364,6 +365,11 @@ def lsp_schema_config(policy: dict[str, Any]) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lsp-schemas", action="store_true", help="emit LSP schema config")
+    parser.add_argument(
+        "--editor-sources",
+        action="store_true",
+        help="prefer editor-native schema URIs such as vscode:// where present",
+    )
     args = parser.parse_args(argv)
 
     if not args.lsp_schemas:
@@ -378,7 +384,11 @@ def main(argv: list[str] | None = None) -> int:
     except (JSONDecodeError, OSError) as exc:
         print(f"schema policy: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(lsp_schema_config(policy), separators=(",", ":")))
+    print(
+        json.dumps(
+            lsp_schema_config(policy, editor_sources=args.editor_sources), separators=(",", ":")
+        )
+    )
     return 0
 
 
