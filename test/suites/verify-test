@@ -81,6 +81,92 @@ set -e
 _assert_exit "clang-tidy: missing tool is graceful no-op" 0 "$rc"
 _assert_eq "clang-tidy: missing tool emits no output" "" "$output"
 
+_default_root=$(_realpath_dir "$(_tmpdir)")
+_default_log=$(_tmpdir)/verify-default-order.log
+mkdir -p "$_default_root/go/pkg" "$_default_root/rust/src" "$_default_root/cpp/src"
+cat >"$_default_root/go/go.mod" <<'EOF'
+module example.com/default
+go 1.21
+EOF
+cat >"$_default_root/go/pkg/main.go" <<'EOF'
+package pkg
+EOF
+cat >"$_default_root/rust/Cargo.toml" <<'EOF'
+[package]
+name = "default-order"
+version = "0.1.0"
+edition = "2021"
+EOF
+cat >"$_default_root/rust/Cargo.lock" <<'EOF'
+# This file is intentionally minimal for checkrun discovery tests.
+EOF
+cat >"$_default_root/rust/src/lib.rs" <<'EOF'
+pub fn value() -> i32 { 1 }
+EOF
+cat >"$_default_root/cpp/.clang-tidy" <<'EOF'
+Checks: '-*,bugprone-*'
+EOF
+cat >"$_default_root/cpp/src/main.cpp" <<'EOF'
+int main() { return 0; }
+EOF
+
+_default_mock=$(_mock_bin)
+: >"$_default_log"
+cat >"$_default_mock/cargo" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  audit)
+    printf 'cargo-audit\n' >>"$CHECKRUN_VERIFY_ORDER_LOG"
+    ;;
+  clippy)
+    if [[ "${2:-}" == "--version" ]]; then
+      printf 'cargo-clippy 0.1.0\n'
+    else
+      printf 'cargo-clippy\n' >>"$CHECKRUN_VERIFY_ORDER_LOG"
+    fi
+    ;;
+esac
+exit 0
+EOF
+cat >"$_default_mock/cargo-audit" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_default_mock/clang-tidy" <<'EOF'
+#!/usr/bin/env bash
+printf 'clang-tidy\n' >>"$CHECKRUN_VERIFY_ORDER_LOG"
+exit 0
+EOF
+cat >"$_default_mock/golangci-lint" <<'EOF'
+#!/usr/bin/env bash
+printf 'golangci-lint\n' >>"$CHECKRUN_VERIFY_ORDER_LOG"
+exit 0
+EOF
+cat >"$_default_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+printf 'govulncheck\n' >>"$CHECKRUN_VERIFY_ORDER_LOG"
+exit 0
+EOF
+chmod +x \
+  "$_default_mock/cargo" \
+  "$_default_mock/cargo-audit" \
+  "$_default_mock/clang-tidy" \
+  "$_default_mock/golangci-lint" \
+  "$_default_mock/govulncheck"
+
+set +e
+CHECKRUN_VERIFY_ORDER_LOG="$_default_log" PATH="$_default_mock:$PATH" \
+  "$CHECKRUN" verify "$_default_root" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "verify default: runs clean registry" 0 "$rc"
+# Project-scoped verifiers may probe or run more than one discovered root. The
+# registry contract is first-dispatch order, so compare first occurrences.
+_default_tool_order=$(awk '!seen[$0]++' "$_default_log")
+_assert_eq "verify default: preserves registry order" \
+  $'cargo-audit\ncargo-clippy\nclang-tidy\ngolangci-lint\ngovulncheck' \
+  "$_default_tool_order"
+
 echo "=== checkrun: govulncheck module discovery ==="
 
 _go_root=$(_realpath_dir "$(_tmpdir)")
