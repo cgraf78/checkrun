@@ -69,13 +69,15 @@ _autolint_usage() {
     "  Go:        .go" \
     "  Java:      .java" \
     "  Lua:       .lua" \
+    "  Nix:       .nix" \
     "  PHP:       .php" \
+    "  Protobuf:  .proto" \
     "  Python:    .py" \
     "  Ruby:      .rb" \
     "  Rust:      .rs" \
     "  Shell:     .sh, .bash, .zsh, extensionless files with a shell shebang, .bashrc, .zshrc, .envrc" \
     "  Systemd:   .automount, .device, .mount, .path, .scope, .service, .slice, .socket, .swap, .target, .timer" \
-    "  Web/data:  .css, .js, .jsx, .ts, .tsx, .json, .jsonc, .html, .htm" \
+    "  Web/data:  .css, .scss, .less, .js, .jsx, .ts, .tsx, .json, .jsonc, .html, .htm" \
     "" \
     "Options:" \
     "  --fix       Apply safe linter fixes where supported." \

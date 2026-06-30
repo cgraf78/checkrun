@@ -29,12 +29,14 @@ _autoformat_usage() {
     "  Go:        .go" \
     "  Java:      .java" \
     "  Lua:       .lua" \
+    "  Nix:       .nix" \
     "  PHP:       .php" \
+    "  Protobuf:  .proto" \
     "  Python:    .py" \
     "  Ruby:      .rb" \
     "  Rust:      .rs" \
     "  Shell:     .sh, .bash, .zsh, extensionless files with a shell shebang, .bashrc, .zshrc, .profile, .envrc" \
-    "  Web/data:  .css, .js, .jsx, .ts, .tsx, .json, .jsonc, .html, .htm" \
+    "  Web/data:  .css, .scss, .less, .js, .jsx, .ts, .tsx, .json, .jsonc, .html, .htm" \
     "" \
     "Options:" \
     "  -h, --help  Show this help and exit."
