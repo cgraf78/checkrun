@@ -44,7 +44,12 @@ Python interpreter used by Python-backed Checkrun helpers.
 Linting completed, or all files were skipped for non-fatal reasons.
 .TP
 .B 1
-One or more selected linters reported diagnostics or failed.
+One or more selected linters reported diagnostics or failed, or required lint
+infrastructure such as
+.B yq
+or
+.B jq
+was unavailable.
 .TP
 .B 2
 Usage error or registry planning failure.
