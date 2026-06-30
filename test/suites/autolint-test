@@ -803,19 +803,34 @@ _assert_exit "cpp: clang-tidy without metadata exits 0" 0 "$rc"
 _assert_not_contains "cpp: clang-tidy without metadata is skipped" \
   "MOCK-CLANG-TIDY-ARGS:" "$output"
 
+_clang_tidy_only=$(_tmpdir)
+mkdir -p "$_clang_tidy_only/src"
+: >"$_clang_tidy_only/.clang-tidy"
+echo 'int main() { return 0; }' >"$_clang_tidy_only/src/main.cpp"
+set +e
+output=$(PATH="$_clang_tidy_mockbin:$PATH" "$AUTOLINT" "$_clang_tidy_only/src/main.cpp" 2>&1)
+rc=$?
+set -e
+_assert_exit "cpp: clang-tidy with .clang-tidy only exits 0" 0 "$rc"
+_assert_not_contains "cpp: clang-tidy with .clang-tidy only is skipped" \
+  "MOCK-CLANG-TIDY-ARGS:" "$output"
+
 _clang_with_config=$(_tmpdir)
 mkdir -p "$_clang_with_config/src"
 : >"$_clang_with_config/.clang-tidy"
+: >"$_clang_with_config/compile_commands.json"
 echo 'int main() { return 0; }' >"$_clang_with_config/src/main.cpp"
 set +e
 output=$(PATH="$_clang_tidy_mockbin:$PATH" "$AUTOLINT" "$_clang_with_config/src/main.cpp" 2>&1)
 rc=$?
 set -e
-_assert_exit "cpp: clang-tidy with .clang-tidy exits 0" 0 "$rc"
-_assert_contains "cpp: clang-tidy with .clang-tidy runs" \
+_assert_exit "cpp: clang-tidy with config and compile context exits 0" 0 "$rc"
+_assert_contains "cpp: clang-tidy with config and compile context runs" \
   "MOCK-CLANG-TIDY-ARGS:" "$output"
 _assert_contains_path_arg "cpp: clang-tidy receives --config-file" \
   "--config-file=" "$_clang_with_config/.clang-tidy" "$output"
+_assert_contains_path_arg "cpp: clang-tidy receives -p compile context root" \
+  "-p=" "$_clang_with_config" "$output"
 
 _clang_with_db=$(_tmpdir)
 mkdir -p "$_clang_with_db/src"
@@ -2747,6 +2762,7 @@ EOF
 chmod +x "$_json_clang_mock/clang-tidy"
 _json_clang_dir=$(_tmpdir)
 : >"$_json_clang_dir/.clang-tidy"
+: >"$_json_clang_dir/compile_commands.json"
 cat >"$_json_clang_dir/main.cpp" <<'EOF'
 int main() {
   return 0;

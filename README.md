@@ -333,9 +333,11 @@ dynamically scoped `fix` and `json` behavior.
 | Systemd units | - | `systemd-analyze verify` |
 
 `clang-tidy` is intentionally gated: it runs only when the target file's parent
-chain contains `.clang-tidy`, `compile_commands.json`, or `compile_flags.txt`.
-That keeps save-time editor lint quiet for standalone C/C++ files while still
-using project-owned rule and compile metadata when it exists.
+chain contains `compile_commands.json` or `compile_flags.txt`. A nearby
+`.clang-tidy` configures rules once that compile context exists, but does not
+enable `clang-tidy` by itself. That keeps save-time editor lint quiet for
+standalone C/C++ files while still using project-owned rule and compile metadata
+when it exists.
 
 Broad project analyzers are intentionally not listed as file linters. Run them
 explicitly with `checkrun verify [PATH...]` or `--tool` filters:
@@ -351,8 +353,8 @@ explicitly with `checkrun verify [PATH...]` or `--tool` filters:
   intentional: dependency-audit results belong to locked project state, not
   standalone Rust source files.
 - Verify-time `clang-tidy` walks selected C/C++ files and directories while
-  preserving the same `.clang-tidy`, `compile_commands.json`, or
-  `compile_flags.txt` metadata gate as fast lint.
+  preserving the same `compile_commands.json` or `compile_flags.txt` metadata
+  gate as fast lint.
 - Deleted or renamed file paths are still useful verify scope hints: Go/Rust
   paths select their nearest surviving module or project, while deleted C/C++
   files select the nearest surviving non-root directory context.

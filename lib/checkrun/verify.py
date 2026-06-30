@@ -543,7 +543,7 @@ def _clang_tidy_args(file: Path) -> list[str] | None:
     clang_config = _nearest_project_root(file, (".clang-tidy",))
     compile_db = _nearest_project_root(file, ("compile_commands.json",))
     compile_flags = _nearest_project_root(file, ("compile_flags.txt",))
-    if not clang_config and not compile_db and not compile_flags:
+    if not compile_db and not compile_flags:
         return None
 
     args = ["--quiet"]
