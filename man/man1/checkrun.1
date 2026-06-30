@@ -49,6 +49,8 @@ Run schema maintenance commands such as refreshing pinned public schemas.
 Run explicit project verification checks selected from the changed-file scope.
 .TP
 .B format
+or
+.B fmt
 Run the autoformat compatibility entry point.
 .TP
 .B lint
@@ -80,6 +82,9 @@ One or more selected checks failed.
 .B 2
 Usage error, invalid local configuration, or missing required structured-output
 flag.
+.TP
+.B 127
+A required runtime dependency, such as a suitable Python interpreter, is missing.
 .SH SEE ALSO
 .BR autoformat (1),
 .BR autolint (1)
