@@ -9,6 +9,9 @@
 `checkrun`, `autoformat`, and `autolint` CLIs. Other tools can depend on those
 CLIs as their formatting and linting policy surface.
 
+`shdeps` installs the `bin/` entry points as PATH-visible symlinks and links
+the bundled `man/man1/` pages into the user-local manpath.
+
 ## CLIs
 
 ```text
@@ -16,8 +19,9 @@ checkrun registry --json
 checkrun capabilities --json
 checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
+checkrun schema refresh [--check] [--association NAME]
 checkrun verify [--json] [--tool cargo-audit|cargo-clippy|clang-tidy|golangci-lint|govulncheck] [PATH...]
-checkrun format FILE [FILE...]
+checkrun format|fmt FILE [FILE...]
 checkrun lint|check [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
 autolint [--fix] [--json] FILE [FILE...]

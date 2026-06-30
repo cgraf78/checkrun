@@ -1,0 +1,49 @@
+.TH AUTOFORMAT 1 "2026-06-30" "checkrun" "User Commands"
+.SH NAME
+autoformat \- format supported files through Checkrun policy
+.SH SYNOPSIS
+.B autoformat
+.RI [ -h | --help ]
+.I file
+.RI [ file ...]
+.SH DESCRIPTION
+.B autoformat
+formats each supplied file with the Checkrun-selected formatter for that
+filetype. Unsupported files, ignored files, missing files, and files whose
+formatter is not installed are skipped rather than treated as hard failures.
+.PP
+Editor integrations normally call this command through
+.BR checkrun " " format
+or through Sley's hook API. Direct use is still useful for scripts that already
+have an explicit path list.
+.SH OPTIONS
+.TP
+.BR -h ", " --help
+Show usage and supported file types.
+.SH ENVIRONMENT
+.TP
+.B CHECKRUN_CONFIG_DIR
+Directory for local Checkrun ignore and schema policy.
+.TP
+.B CHECKRUN_PYTHON
+Python interpreter used by Python-backed Checkrun helpers.
+.SH EXIT STATUS
+.TP
+.B 0
+Formatting completed, selected formatter failures were surfaced on stderr, or
+all files were skipped for non-fatal reasons. Formatter failures are advisory
+so save-time hooks do not block the caller.
+.TP
+.B 1
+Required Checkrun infrastructure such as
+.B yq
+was unavailable.
+.TP
+.B 2
+Usage error or registry planning failure.
+.TP
+.B 127
+A required runtime dependency, such as a suitable Python interpreter, is missing.
+.SH SEE ALSO
+.BR checkrun (1),
+.BR autolint (1)

@@ -1,0 +1,90 @@
+.TH CHECKRUN 1 "2026-06-30" "checkrun" "User Commands"
+.SH NAME
+checkrun \- shared formatter, linter, schema, and verification policy
+.SH SYNOPSIS
+.B checkrun
+.I command
+.RI [ args ...]
+.SH DESCRIPTION
+.B checkrun
+is the policy entry point for fast editor checks and broader project
+verification. It owns filetype inference, formatter and linter selection,
+schema association policy, and generic analyzer dispatch so editors, Sley,
+Git hooks, and agents do not need to duplicate that logic.
+.PP
+The
+.B format
+and
+.B lint
+commands are compatibility entry points for
+.BR autoformat (1)
+and
+.BR autolint (1).
+The
+.B check
+command is an alias for
+.BR lint .
+.PP
+.B verify
+is a broader project verification stage. It accepts changed files and lets
+Checkrun decide which configured project analyzers apply to those files.
+.SH COMMANDS
+.TP
+.B registry --json
+Print raw Checkrun registry metadata.
+.TP
+.B capabilities [--json]
+Print generated capability metadata for editor and integration adapters.
+.TP
+.B plan --json [--phase format|lint] FILE...
+Emit formatter and linter execution plans without running tools.
+.TP
+.B explain [--json] FILE...
+Explain formatter, linter, and schema policy for paths.
+.TP
+.B schema
+Run schema maintenance commands such as refreshing pinned public schemas.
+.TP
+.B verify [--json] [--tool TOOL] [PATH...]
+Run explicit project verification checks selected from the changed-file scope.
+.TP
+.B format
+or
+.B fmt
+Run the autoformat compatibility entry point.
+.TP
+.B lint
+Run the autolint compatibility entry point.
+.TP
+.B check
+Alias for
+.BR lint .
+.SH ENVIRONMENT
+.TP
+.B CHECKRUN_CONFIG_DIR
+Directory for local Checkrun policy files such as ignore lists and schema
+associations. Defaults to the user's XDG config location.
+.TP
+.B CHECKRUN_PYTHON
+Python interpreter used by Python-backed Checkrun helpers.
+.TP
+.B CHECKRUN_AUTOLINT_JOBS
+Parallelism for
+.BR autolint (1).
+.SH EXIT STATUS
+.TP
+.B 0
+The command completed successfully.
+.TP
+.B 1
+One or more selected checks failed.
+.TP
+.B 2
+Usage error, invalid local configuration, or missing required structured-output
+flag.
+.TP
+.B 127
+A required runtime dependency, such as a suitable Python interpreter, is missing.
+.SH SEE ALSO
+.BR autoformat (1),
+.BR autolint (1)
