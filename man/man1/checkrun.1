@@ -30,22 +30,22 @@ is a broader project verification stage. It accepts changed files and lets
 Checkrun decide which configured project analyzers apply to those files.
 .SH COMMANDS
 .TP
-.B registry
+.B registry --json
 Print raw Checkrun registry metadata.
 .TP
-.B capabilities
+.B capabilities [--json]
 Print generated capability metadata for editor and integration adapters.
 .TP
-.B plan
-Emit formatter, linter, and verifier execution plans without running tools.
+.B plan --json [--phase format|lint] FILE...
+Emit formatter and linter execution plans without running tools.
 .TP
-.B explain
+.B explain [--json] FILE...
 Explain formatter, linter, and schema policy for paths.
 .TP
 .B schema
 Run schema maintenance commands such as refreshing pinned public schemas.
 .TP
-.B verify
+.B verify [--json] [--tool TOOL] [PATH...]
 Run explicit project verification checks selected from the changed-file scope.
 .TP
 .B format
@@ -78,7 +78,8 @@ The command completed successfully.
 One or more selected checks failed.
 .TP
 .B 2
-Usage error or invalid local configuration.
+Usage error, invalid local configuration, or missing required structured-output
+flag.
 .SH SEE ALSO
 .BR autoformat (1),
 .BR autolint (1)

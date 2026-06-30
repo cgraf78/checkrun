@@ -9,6 +9,9 @@
 `checkrun`, `autoformat`, and `autolint` CLIs. Other tools can depend on those
 CLIs as their formatting and linting policy surface.
 
+`shdeps` installs the `bin/` entry points as PATH-visible symlinks and links
+the bundled `man/man1/` pages into the user-local manpath.
+
 ## CLIs
 
 ```text

@@ -12,12 +12,16 @@ CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
 
 echo "=== checkrun: manpages ==="
 
-for command in checkrun autoformat autolint; do
+while IFS= read -r command; do
   page="$CHECKRUN_REPO_ROOT/man/man1/$command.1"
   _assert_file_exists "manpage exists: $command" "$page"
   content=$(cat "$page")
   _assert_contains "manpage NAME section: $command" ".SH NAME" "$content"
   _assert_contains "manpage names command: $command" "$command \\" "$content"
-done
+done < <(
+  git -C "$CHECKRUN_REPO_ROOT" ls-files -- 'bin/*' |
+    xargs -n 1 basename |
+    sort
+)
 
 _test_summary
