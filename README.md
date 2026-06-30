@@ -318,7 +318,9 @@ dynamically scoped `fix` and `json` behavior.
 | Ruby | `rubocop` layout autocorrect | `rubocop` |
 | HTML | `superhtml fmt` | `superhtml check` |
 | TOML | `taplo` | `taplo` |
-| JSON/JSONC/CSS/JS/JSX/TS/TSX | `biome` | `biome` |
+| JSON/JSONC/CSS/SCSS/LESS/JS/JSX/TS/TSX | `biome` | `biome` |
+| Nix | `nixfmt` | `statix` |
+| Protobuf | `buf format` | `buf lint` |
 | YAML | `yamlfmt` | - |
 | GitHub Actions | `yamlfmt` | `actionlint` + `zizmor` |
 | Markdown | `rumdl` | `rumdl` |
