@@ -19,6 +19,7 @@ checkrun registry --json
 checkrun capabilities --json
 checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
+checkrun schema refresh [--check] [--association NAME]
 checkrun verify [--json] [--tool cargo-audit|cargo-clippy|clang-tidy|golangci-lint|govulncheck] [PATH...]
 checkrun format|fmt FILE [FILE...]
 checkrun lint|check [--fix] [--json] FILE [FILE...]
