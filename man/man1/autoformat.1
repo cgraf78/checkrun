@@ -37,10 +37,13 @@ so save-time hooks do not block the caller.
 .B 1
 Required Checkrun infrastructure such as
 .B yq
-was unavailable, or registry planning failed.
+was unavailable.
 .TP
 .B 2
-Usage error.
+Usage error or registry planning failure.
+.TP
+.B 127
+A required runtime dependency, such as a suitable Python interpreter, is missing.
 .SH SEE ALSO
 .BR checkrun (1),
 .BR autolint (1)
