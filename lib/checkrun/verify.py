@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,15 @@ _SKIP_WALK_DIRS = {
 }
 _CPP_FILETYPES = {"c", "cpp"}
 _GOLANGCI_JSON_ARGS: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class VerifyTool:
+    """@brief Registry entry for one explicit project verification backend."""
+
+    name: str
+    discover: Callable[[list[str]], list[Path]]
+    run: Callable[[list[Path], bool], int]
 
 
 def _abs(path: str) -> Path:
@@ -986,6 +996,46 @@ def run_cargo_audit(projects: list[Path], *, json_mode: bool) -> int:
     )
 
 
+def _run_cargo_audit(projects: list[Path], json_mode: bool) -> int:
+    return run_cargo_audit(projects, json_mode=json_mode)
+
+
+def _run_cargo_clippy(projects: list[Path], json_mode: bool) -> int:
+    return run_cargo_clippy(projects, json_mode=json_mode)
+
+
+def _run_clang_tidy(files: list[Path], json_mode: bool) -> int:
+    return run_clang_tidy(files, json_mode=json_mode)
+
+
+def _run_golangci_lint(modules: list[Path], json_mode: bool) -> int:
+    return run_golangci_lint(modules, json_mode=json_mode)
+
+
+def _run_govulncheck(modules: list[Path], json_mode: bool) -> int:
+    return run_govulncheck(modules, json_mode=json_mode)
+
+
+# Keep the public tool names, default verify set, discovery, and dispatch in one
+# contract. Broad analyzers are easy to add incrementally, and this prevents a
+# future tool from being advertised but silently omitted from automatic verify.
+VERIFY_TOOLS = (
+    VerifyTool("cargo-audit", discover_cargo_audit_projects, _run_cargo_audit),
+    VerifyTool("cargo-clippy", discover_cargo_projects, _run_cargo_clippy),
+    VerifyTool("clang-tidy", discover_cpp_files, _run_clang_tidy),
+    VerifyTool("golangci-lint", discover_go_modules, _run_golangci_lint),
+    VerifyTool("govulncheck", discover_go_modules, _run_govulncheck),
+)
+VERIFY_TOOL_NAMES = [tool.name for tool in VERIFY_TOOLS]
+
+
+def _selected_tools(names: list[str] | None) -> list[VerifyTool]:
+    if not names:
+        return list(VERIFY_TOOLS)
+    selected = set(names)
+    return [tool for tool in VERIFY_TOOLS if tool.name in selected]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="checkrun verify",
@@ -995,31 +1045,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tool",
         action="append",
-        choices=["cargo-audit", "cargo-clippy", "clang-tidy", "golangci-lint", "govulncheck"],
+        choices=VERIFY_TOOL_NAMES,
         help="limit verification to one tool; may be repeated",
     )
     parser.add_argument("paths", nargs="*", help="files or directories to verify")
     args = parser.parse_args(argv)
 
-    tools = set(
-        args.tool or ["cargo-audit", "cargo-clippy", "clang-tidy", "golangci-lint", "govulncheck"]
-    )
     rc = 0
-    if "cargo-audit" in tools:
-        projects = discover_cargo_audit_projects(args.paths or _DEFAULT_PATHS)
-        rc = _merge_rc(rc, run_cargo_audit(projects, json_mode=args.json))
-    if "cargo-clippy" in tools:
-        projects = discover_cargo_projects(args.paths or _DEFAULT_PATHS)
-        rc = _merge_rc(rc, run_cargo_clippy(projects, json_mode=args.json))
-    if "clang-tidy" in tools:
-        files = discover_cpp_files(args.paths or _DEFAULT_PATHS)
-        rc = _merge_rc(rc, run_clang_tidy(files, json_mode=args.json))
-    if "golangci-lint" in tools:
-        modules = discover_go_modules(args.paths or _DEFAULT_PATHS)
-        rc = _merge_rc(rc, run_golangci_lint(modules, json_mode=args.json))
-    if "govulncheck" in tools:
-        modules = discover_go_modules(args.paths or _DEFAULT_PATHS)
-        rc = _merge_rc(rc, run_govulncheck(modules, json_mode=args.json))
+    paths = args.paths or _DEFAULT_PATHS
+    for tool in _selected_tools(args.tool):
+        rc = _merge_rc(rc, tool.run(tool.discover(paths), args.json))
     return rc
 
 
