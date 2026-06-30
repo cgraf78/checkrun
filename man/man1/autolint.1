@@ -1,0 +1,53 @@
+.TH AUTOLINT 1 "2026-06-30" "checkrun" "User Commands"
+.SH NAME
+autolint \- lint supported files through Checkrun policy
+.SH SYNOPSIS
+.B autolint
+.RB [ --fix ]
+.RB [ --json ]
+.RI [ -h | --help ]
+.I file
+.RI [ file ...]
+.SH DESCRIPTION
+.B autolint
+lints each supplied file with the Checkrun-selected fast linter for that
+filetype. Unsupported files, ignored files, missing files, and files whose
+linter is not installed are skipped rather than treated as hard failures.
+.PP
+When
+.B --json
+is used, diagnostics are emitted as structured records for editor adapters.
+Human-readable output is reserved for terminal use.
+.SH OPTIONS
+.TP
+.B --fix
+Allow supported linters to apply safe fixes.
+.TP
+.B --json
+Print JSON diagnostic records instead of human-readable output.
+.TP
+.BR -h ", " --help
+Show usage and supported file types.
+.SH ENVIRONMENT
+.TP
+.B CHECKRUN_AUTOLINT_JOBS
+Maximum number of lint jobs to run concurrently.
+.TP
+.B CHECKRUN_CONFIG_DIR
+Directory for local Checkrun ignore and schema policy.
+.TP
+.B CHECKRUN_PYTHON
+Python interpreter used by Python-backed Checkrun helpers.
+.SH EXIT STATUS
+.TP
+.B 0
+Linting completed, or all files were skipped for non-fatal reasons.
+.TP
+.B 1
+One or more selected linters reported diagnostics or failed.
+.TP
+.B 2
+Usage error.
+.SH SEE ALSO
+.BR checkrun (1),
+.BR autoformat (1)

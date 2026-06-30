@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Verify that the PATH-visible command surface has manual pages.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+echo "=== checkrun: manpages ==="
+
+for command in checkrun autoformat autolint; do
+  page="$CHECKRUN_REPO_ROOT/man/man1/$command.1"
+  _assert_file_exists "manpage exists: $command" "$page"
+  content=$(cat "$page")
+  _assert_contains "manpage NAME section: $command" ".SH NAME" "$content"
+  _assert_contains "manpage names command: $command" "$command \\" "$content"
+done
+
+_test_summary
