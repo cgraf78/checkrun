@@ -141,7 +141,9 @@ _lint_clang_tidy() {
   # The registry-level config probe is the single source of truth for whether
   # clang-tidy may run at all. Once it is allowed, discover rule config and
   # compile metadata independently because projects commonly have both and
-  # clang-tidy needs them on different CLI flags.
+  # clang-tidy needs them on different CLI flags. A .clang-tidy file configures
+  # checks, but a compile database or compile flags file is what makes the
+  # per-file invocation meaningful.
   clang_config=$(_find_config "$dir" .clang-tidy 2>/dev/null || true)
   compile_db=$(_find_config "$dir" compile_commands.json 2>/dev/null || true)
   compile_flags=$(_find_config "$dir" compile_flags.txt 2>/dev/null || true)
@@ -153,7 +155,7 @@ _lint_clang_tidy() {
     compile_root=""
   fi
 
-  [ -n "$clang_config$compile_root" ] || return 0
+  [ -n "$compile_root" ] || return 0
   [ -n "$clang_config" ] && args+=("--config-file=$clang_config")
   [ -n "$compile_root" ] && args+=("-p=$compile_root")
 

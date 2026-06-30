@@ -203,12 +203,11 @@ for relative, (expected_format, expected_lint) in matrix.items():
     assert [step["adapter"] for step in format_steps] == expected_format, relative
     assert [step["adapter"] for step in lint_steps] == expected_lint, relative
 
-clang_config_payloads = {
-    ".clang-tidy": "Checks: '*'\n",
+clang_context_payloads = {
     "compile_commands.json": "[]\n",
     "compile_flags.txt": "-std=c++20\n",
 }
-for config_name, config_payload in clang_config_payloads.items():
+for config_name, config_payload in clang_context_payloads.items():
     c_with_config = (
         tmp / f"with-clang-config-{config_name.replace('.', '_')}" / "src" / "main.cpp"
     )
@@ -229,6 +228,49 @@ for config_name, config_payload in clang_config_payloads.items():
     assert clang_step["requiresConfigMatch"] is True
     assert clang_step["config"]["source"] == "project"
     assert clang_step["config"]["path"].endswith(config_name)
+
+c_with_tidy_only = tmp / "with-clang-tidy-only" / "src" / "main.cpp"
+c_with_tidy_only.parent.mkdir(parents=True, exist_ok=True)
+(c_with_tidy_only.parent.parent / ".clang-tidy").write_text(
+    "Checks: '*'\n", encoding="utf-8"
+)
+c_with_tidy_only.write_text("", encoding="utf-8")
+c_with_tidy_only_plan = registry_mod.plan(registry, [str(c_with_tidy_only)], "lint")[
+    "files"
+][0]["lint"]
+assert [step["adapter"] for step in c_with_tidy_only_plan["steps"]] == [
+    "typos",
+    "schema-lint",
+]
+clang_tidy_only_skips = [
+    step for step in c_with_tidy_only_plan["skipped"] if step["adapter"] == "clang-tidy"
+]
+assert len(clang_tidy_only_skips) == 1
+assert clang_tidy_only_skips[0]["requiresConfigMatch"] is True
+assert clang_tidy_only_skips[0]["reason"] == "missing-config"
+assert clang_tidy_only_skips[0]["config"]["source"] == "none"
+
+c_with_config_and_context = tmp / "with-clang-config-and-context" / "src" / "main.cpp"
+c_with_config_and_context.parent.mkdir(parents=True, exist_ok=True)
+(c_with_config_and_context.parent.parent / ".clang-tidy").write_text(
+    "Checks: '*'\n", encoding="utf-8"
+)
+(c_with_config_and_context.parent.parent / "compile_commands.json").write_text(
+    "[]\n", encoding="utf-8"
+)
+c_with_config_and_context.write_text("", encoding="utf-8")
+c_with_config_and_context_plan = registry_mod.plan(
+    registry, [str(c_with_config_and_context)], "lint"
+)["files"][0]["lint"]
+assert [step["adapter"] for step in c_with_config_and_context_plan["steps"]] == [
+    "typos",
+    "schema-lint",
+    "clang-tidy",
+]
+clang_step = c_with_config_and_context_plan["steps"][-1]
+assert clang_step["requiresConfigMatch"] is True
+assert clang_step["config"]["source"] == "project"
+assert clang_step["config"]["path"].endswith("compile_commands.json")
 
 c_without_config = tmp / "without-clang-config" / "main.cpp"
 c_without_config.parent.mkdir(parents=True, exist_ok=True)

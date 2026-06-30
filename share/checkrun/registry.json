@@ -149,11 +149,7 @@
       "fallback": { "file": "clang-format" }
     },
     "clang-tidy": {
-      "project": [
-        { "file": ".clang-tidy" },
-        { "file": "compile_commands.json" },
-        { "file": "compile_flags.txt" }
-      ],
+      "project": [{ "file": "compile_commands.json" }, { "file": "compile_flags.txt" }],
       "native": "none"
     },
     "cmake-format": {

@@ -106,6 +106,7 @@ EOF
 cat >"$_default_root/cpp/.clang-tidy" <<'EOF'
 Checks: '-*,bugprone-*'
 EOF
+: >"$_default_root/cpp/compile_commands.json"
 cat >"$_default_root/cpp/src/main.cpp" <<'EOF'
 int main() { return 0; }
 EOF
@@ -432,15 +433,21 @@ _assert_eq "cargo-clippy: deleted non-rust path is not a project scope hint" "" 
 echo "=== checkrun: clang-tidy file discovery ==="
 
 _cpp_root=$(_realpath_dir "$(_tmpdir)")
+_cpp_tidy_only_root=$(_realpath_dir "$(_tmpdir)")
 _cpp_unconfigured_root=$(_realpath_dir "$(_tmpdir)")
-mkdir -p "$_cpp_root/src" "$_cpp_root/include" "$_cpp_unconfigured_root"
+mkdir -p "$_cpp_root/src" "$_cpp_root/include" "$_cpp_tidy_only_root" "$_cpp_unconfigured_root"
 : >"$_cpp_root/.clang-tidy"
+: >"$_cpp_root/compile_commands.json"
 cat >"$_cpp_root/src/main.cpp" <<'EOF'
 int main() { return 0; }
 EOF
 cat >"$_cpp_root/include/demo.hpp" <<'EOF'
 int demo();
 EOF
+cat >"$_cpp_tidy_only_root/tidy-only.cpp" <<'EOF'
+int tidy_only();
+EOF
+: >"$_cpp_tidy_only_root/.clang-tidy"
 cat >"$_cpp_unconfigured_root/no-config.cpp" <<'EOF'
 int no_config();
 EOF
@@ -461,6 +468,7 @@ CLANG_TIDY_LOG="$_clang_tidy_log" PATH="$_clang_tidy_mock:$PATH" \
   "$_cpp_root/src/main.cpp" \
   "$_cpp_root/src/main.cpp" \
   "$_cpp_root/include" \
+  "$_cpp_tidy_only_root/tidy-only.cpp" \
   "$_cpp_unconfigured_root/no-config.cpp" >/dev/null 2>&1
 rc=$?
 set -e
@@ -468,9 +476,11 @@ _assert_exit "clang-tidy: exits 0 for clean files" 0 "$rc"
 _clang_tidy_call_count=$(wc -l <"$_clang_tidy_log" | tr -d ' ')
 _assert_eq "clang-tidy: deduplicates repeated files" "2" "$_clang_tidy_call_count"
 _assert_contains "clang-tidy: runs selected source file with project config" \
-  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+  "--quiet --config-file=$_cpp_root/.clang-tidy -p=$_cpp_root $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
 _assert_contains "clang-tidy: walks selected directories for C++ headers" \
-  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/include/demo.hpp" "$(cat "$_clang_tidy_log")"
+  "--quiet --config-file=$_cpp_root/.clang-tidy -p=$_cpp_root $_cpp_root/include/demo.hpp" "$(cat "$_clang_tidy_log")"
+_assert_not_contains "clang-tidy: .clang-tidy without compile context is skipped" \
+  "$_cpp_tidy_only_root/tidy-only.cpp" "$(cat "$_clang_tidy_log")"
 _assert_not_contains "clang-tidy: skips C++ files without metadata gate" \
   "$_cpp_unconfigured_root/no-config.cpp" "$(cat "$_clang_tidy_log")"
 
@@ -482,7 +492,7 @@ rc=$?
 set -e
 _assert_exit "clang-tidy: deleted file scope exits 0" 0 "$rc"
 _assert_contains "clang-tidy: deleted file scopes to surviving directory context" \
-  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+  "--quiet --config-file=$_cpp_root/.clang-tidy -p=$_cpp_root $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
 _assert_not_contains "clang-tidy: deleted file does not lint missing path" \
   "$_cpp_root/src/deleted.cpp" "$(cat "$_clang_tidy_log")"
 
@@ -494,7 +504,7 @@ rc=$?
 set -e
 _assert_exit "clang-tidy: deleted parent scope exits 0" 0 "$rc"
 _assert_contains "clang-tidy: deleted parent scopes to surviving directory context" \
-  "--quiet --config-file=$_cpp_root/.clang-tidy $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
+  "--quiet --config-file=$_cpp_root/.clang-tidy -p=$_cpp_root $_cpp_root/src/main.cpp" "$(cat "$_clang_tidy_log")"
 _assert_not_contains "clang-tidy: deleted parent does not lint missing path" \
   "$_cpp_root/src/removed/deleted.cpp" "$(cat "$_clang_tidy_log")"
 
