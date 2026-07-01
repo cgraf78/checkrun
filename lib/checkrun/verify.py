@@ -815,17 +815,29 @@ def _run_project_tool(
                 check=False,
             )
             diagnostics = parse_json(project, proc.stdout)
-            if proc.returncode != 0 and not diagnostics and proc.stderr.strip():
-                # govulncheck's JSON stream is structured when scanning reaches
-                # findings; cargo-audit behaves similarly for normal advisory
-                # reports. Transport/setup failures can still arrive only on
-                # stderr, so expose one synthetic diagnostic rather than an
-                # empty non-zero JSON run.
+            if proc.returncode != 0 and not diagnostics:
+                # A non-zero verifier with no parsable diagnostics must never
+                # fail silently. govulncheck/cargo-audit stream structured JSON
+                # once scanning reaches findings, but transport/setup failures
+                # (and outright crashes) can leave nothing parsable. Surface one
+                # synthetic diagnostic: prefer the last stderr line, then the
+                # last stdout line, then a generic exit-status message, so a
+                # failing run always carries a reason.
+                stderr = proc.stderr.strip()
+                stdout = proc.stdout.strip()
+                if stderr:
+                    message = stderr.splitlines()[-1]
+                elif stdout:
+                    message = stdout.splitlines()[-1]
+                else:
+                    message = (
+                        f"{source} exited with status {proc.returncode} and produced no diagnostics"
+                    )
                 diagnostics = [
                     _json_error(
                         error_path(project),
                         source,
-                        proc.stderr.strip().splitlines()[-1],
+                        message,
                     )
                 ]
             for diagnostic in diagnostics:
