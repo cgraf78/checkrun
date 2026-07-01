@@ -727,6 +727,45 @@ _assert_contains "govulncheck json error: emits synthetic diagnostic" \
 _assert_contains "govulncheck json error: points at go.mod" \
   '/module-a/go.mod' "$output"
 
+# Non-zero exit with UNPARSABLE stdout and EMPTY stderr must still surface a
+# diagnostic (falls back to the last stdout line) instead of failing silently.
+_stdout_only_mock=$(_mock_bin)
+cat >"$_stdout_only_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-json" ]; then
+  printf 'panic: unexpected internal error\n'
+fi
+exit 2
+EOF
+chmod +x "$_stdout_only_mock/govulncheck"
+
+set +e
+output=$(PATH="$_stdout_only_mock:$PATH" "$CHECKRUN" verify --json --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "govulncheck json error (stdout only): preserves exit" 2 "$rc"
+_assert_contains "govulncheck json error (stdout only): diagnostic from stdout" \
+  '"message":"panic: unexpected internal error"' "$output"
+
+# The core silent-failure case: non-zero exit with NO stdout and NO stderr must
+# emit a generic exit-status diagnostic rather than an empty failing run.
+_silent_mock=$(_mock_bin)
+cat >"$_silent_mock/govulncheck" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+chmod +x "$_silent_mock/govulncheck"
+
+set +e
+output=$(PATH="$_silent_mock:$PATH" "$CHECKRUN" verify --json --tool govulncheck \
+  "$_go_root/module-a/pkg/a.go" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "govulncheck json error (silent): preserves exit" 2 "$rc"
+_assert_contains "govulncheck json error (silent): emits fallback diagnostic" \
+  'exited with status 2 and produced no diagnostics' "$output"
+
 _warning_mock=$(_mock_bin)
 cat >"$_warning_mock/govulncheck" <<'EOF'
 #!/usr/bin/env bash
