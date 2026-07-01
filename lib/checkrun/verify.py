@@ -780,10 +780,20 @@ def _parse_cargo_audit_json(project: Path, stdout: str) -> list[dict[str, Any]]:
 
 
 def _merge_rc(current: int, incoming: int) -> int:
+    # Mirror autolint's _autolint_merge_rc severity policy: ordinary findings
+    # exit 1, but structural failures use stronger codes (2, or the private
+    # unknown-adapter sentinel 125) that must survive later plain findings so a
+    # failing multi-tool run points at the broken Checkrun contract rather than
+    # an ordinary diagnostic. Without this the first non-zero code wins and a
+    # later 125/2 would be masked by an earlier 1.
     if incoming == 0:
         return current
     if current == 0:
         return incoming
+    if 125 in (current, incoming):
+        return 125
+    if 2 in (current, incoming):
+        return 2
     return current
 
 

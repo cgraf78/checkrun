@@ -1028,4 +1028,30 @@ set -e
 _assert_exit "autolint: rust lint still exits independently" 0 "$rc"
 _assert_eq "autolint: does not invoke cargo-audit" "" "$(cat "$_rust_autolint_log")"
 
+echo "=== checkrun: verify _merge_rc severity precedence ==="
+
+# _merge_rc must mirror autolint's severity policy so a later structural code
+# (125 unknown-adapter sentinel, or 2 plumbing) isn't masked by an earlier 1.
+_merge_rc_out=$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import verify
+
+cases = [
+    ((1, 2), 2),      # later plumbing failure wins over earlier finding
+    ((2, 1), 2),      # earlier plumbing failure survives later finding
+    ((1, 125), 125),  # later unknown-adapter sentinel wins
+    ((125, 1), 125),  # earlier sentinel survives
+    ((2, 125), 125),  # 125 outranks 2
+    ((1, 1), 1),      # two ordinary findings
+    ((1, 0), 1),      # clean incoming keeps current
+    ((0, 1), 1),      # clean current takes incoming
+]
+for (a, b), expected in cases:
+    got = verify._merge_rc(a, b)
+    assert got == expected, f"_merge_rc({a}, {b}) = {got}, expected {expected}"
+print("ok")
+' "$CHECKRUN_REPO_ROOT/lib/checkrun" 2>&1)
+_assert_eq "verify _merge_rc: severity-aware precedence" "ok" "$_merge_rc_out"
+
 _test_summary
