@@ -533,6 +533,89 @@ else:
 PY
 _assert_exit "registry: unknown shell dispatch adapter is rejected" 0 "$?"
 
+echo "=== checkrun: dispatch parser tolerates benign reformatting ==="
+
+# The dispatch table is re-derived from shell source on every registry load, so
+# a purely cosmetic reformat of the dispatchers must not change what the parser
+# reads (or it would brick all format/lint/plan). Assert the parser is tolerant
+# of the realistic reformats, and that an unreadable table still fails LOUDLY
+# instead of silently returning an empty mapping.
+python3 - "$CHECKRUN_REPO_ROOT" "$_td/reformatted-dispatch.sh" "$_td/empty-dispatch.sh" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+reformatted = Path(sys.argv[2])
+empty = Path(sys.argv[3])
+
+spec = importlib.util.spec_from_file_location("checkrun_registry", root / "lib/checkrun/registry.py")
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+
+# Semantically identical to the inline style, but reformatted the way a shell
+# formatter or a human edit might: handler on the line after the pattern, extra
+# blank lines, and an indented `esac`.
+reformatted.write_text(
+    '''
+_format_dispatch() {
+  local adapter="$1"
+  case "$adapter" in
+    ruff-format)
+      _format_ruff "$file" "$dir" ;;
+
+    rustfmt)
+      _format_rustfmt "$file" ;;
+    *)
+      echo "unknown" >&2
+      return 125
+      ;;
+    esac
+}
+
+_lint_dispatch() {
+  case "$adapter" in
+    shellcheck) _lint_sh "$file" ;;
+    ruff-lint)
+      _lint_ruff "$file" ;;
+  esac
+}
+''',
+    encoding="utf-8",
+)
+mod._SHELL_DISPATCH = {
+    "format": (reformatted, "_format_dispatch()"),
+    "lint": (reformatted, "_lint_dispatch()"),
+}
+fmt = mod._shell_dispatch_functions("format")
+assert fmt == {"ruff-format": "_format_ruff", "rustfmt": "_format_rustfmt"}, fmt
+lint = mod._shell_dispatch_functions("lint")
+assert lint == {"shellcheck": "_lint_sh", "ruff-lint": "_lint_ruff"}, lint
+
+# A dispatcher with no readable arms must fail loudly, never silently return an
+# empty table that would make every selector look undispatched.
+empty.write_text(
+    '''
+_format_dispatch() {
+  local adapter="$1"
+  case "$adapter" in
+    *) return 125 ;;
+  esac
+}
+''',
+    encoding="utf-8",
+)
+mod._SHELL_DISPATCH = {"format": (empty, "_format_dispatch()")}
+try:
+    mod._shell_dispatch_functions("format")
+except mod.RegistryError as error:
+    assert "could not be read" in str(error), str(error)
+else:
+    raise AssertionError("empty dispatch table was accepted")
+PY
+_assert_exit "registry: dispatch parser tolerates reformatting and fails loudly when empty" 0 "$?"
+
 cp "$REGISTRY" "$_td/registry.json"
 python3 - "$_td/registry.json" <<'PY'
 import json
