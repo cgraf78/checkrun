@@ -105,8 +105,25 @@ def _shell_dispatch_functions(phase: str) -> dict[str, str]:
     # cross the Python-to-shell boundary. Function existence alone is not enough:
     # a custom registry can point at a real helper such as `_lint_ruff`, but the
     # shell entrypoint still needs an adapter arm that calls that same helper with
-    # the right arguments. This narrow parser intentionally supports Checkrun's
-    # one-line dispatch arms instead of trying to understand arbitrary shell.
+    # the right arguments.
+    #
+    # WHY THIS PARSES SHELL: deriving control flow (the case -> function mapping)
+    # by scraping shell source is inherently coupled to how that source is
+    # formatted, and this runs on EVERY registry load — so a purely cosmetic edit
+    # to the dispatchers could otherwise brick all format/lint/plan. The durable
+    # fix is to make the dispatch mapping data the registry owns (declared in
+    # registry.json, validated by presence) rather than re-derived from shell;
+    # until then this scanner is deliberately tolerant of the benign reformats a
+    # shell formatter or a human introduces without changing behavior:
+    #   - the handler on the same line as the pattern:   `ruff-format) _f ... ;;`
+    #   - the handler on the following line(s):          `ruff-format)\n  _f ...`
+    #   - an indented `esac`/closing brace.
+    # It intentionally does NOT understand alternation (`a|b)`) or stacked bare
+    # labels sharing one handler; Checkrun's dispatchers use one adapter id per
+    # arm, and such a rewrite fails LOUDLY (empty/short table below) rather than
+    # mapping an arm to the wrong function. Anything it genuinely cannot read
+    # likewise fails loud rather than dropping arms silently, and is covered by
+    # regression tests.
     try:
         source, function = _SHELL_DISPATCH[phase]
     except KeyError as exc:
@@ -118,7 +135,10 @@ def _shell_dispatch_functions(phase: str) -> dict[str, str]:
 
     in_function = False
     dispatch: dict[str, str] = {}
-    arm = re.compile(r"^\s+([A-Za-z0-9_.+-]+)\)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+    pending: list[str] = []  # case patterns whose handler is on a later line
+    inline = re.compile(r"^\s*([A-Za-z0-9_.+-]+)\)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+    label = re.compile(r"^\s*([A-Za-z0-9_.+-]+)\)\s*$")
+    command = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\b")
     for line in lines:
         if not in_function:
             stripped = line.strip()
@@ -127,11 +147,29 @@ def _shell_dispatch_functions(phase: str) -> dict[str, str]:
             ):
                 in_function = True
             continue
-        if line == "}":
+        stripped = line.strip()
+        if stripped == "":
+            continue  # blank line: any pending pattern keeps waiting for its handler
+        # Arms live only inside the case block, so stop at its end (or the
+        # function's) regardless of indentation.
+        if stripped in ("}", "esac"):
             break
-        match = arm.match(line)
-        if match and match.group(1) != "*":
-            dispatch[match.group(1)] = match.group(2)
+        match = inline.match(line)
+        if match:
+            pending = []  # a new arm supersedes any orphaned label above it
+            if match.group(1) != "*":
+                dispatch[match.group(1)] = match.group(2)
+            continue
+        match = label.match(line)
+        if match:
+            pending = [match.group(1)] if match.group(1) != "*" else []
+            continue
+        if pending:
+            match = command.match(line)
+            if match:
+                for adapter_id in pending:
+                    dispatch[adapter_id] = match.group(1)
+                pending = []
     if not dispatch:
         raise RegistryError(f"{phase}: dispatch adapter table could not be read")
     return dispatch
