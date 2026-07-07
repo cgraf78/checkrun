@@ -40,13 +40,26 @@ assert "systemd" in filetypes["lint"]
 assert "text" in filetypes["lint"]
 assert "c" in filetypes["format"]
 assert "c" in filetypes["lint"]
+assert filetypes["custom"]["filename"][".clang-format"] == "yaml"
+assert filetypes["custom"]["filename"][".env"] == "dotenv"
 assert filetypes["custom"]["filename"]["Dockerfile"] == "dockerfile"
 assert filetypes["custom"]["filename"]["CMakeLists.txt"] == "cmake"
+assert filetypes["custom"]["filename"]["settings.json"] == "jsonc"
+assert filetypes["custom"]["filename"][".gitignore"] == "ignore"
+assert filetypes["custom"]["extension"]["code-workspace"] == "jsonc"
+assert filetypes["custom"]["extension"]["containerfile"] == "dockerfile"
+assert filetypes["custom"]["extension"]["dockerfile"] == "dockerfile"
+assert filetypes["custom"]["extension"]["eyaml"] == "yaml"
 assert filetypes["custom"]["extension"]["gitconfig"] == "gitconfig"
+assert filetypes["custom"]["extension"]["gitignore"] == "ignore"
 assert filetypes["custom"]["extension"]["hgrc"] == "ini"
 assert filetypes["custom"]["extension"]["ini"] == "ini"
+assert filetypes["custom"]["extension"]["jsonl"] == "jsonl"
 assert filetypes["custom"]["extension"]["mak"] == "make"
+assert filetypes["custom"]["extension"]["markdown"] == "markdown"
+assert filetypes["custom"]["extension"]["npmrc"] == "properties"
 assert filetypes["custom"]["extension"]["pathlist"] == "text"
+assert filetypes["custom"]["extension"]["properties"] == "properties"
 assert filetypes["custom"]["extension"]["service"] == "systemd"
 assert filetypes["custom"]["extension"]["ssh-config"] == "sshconfig"
 assert filetypes["custom"]["extension"]["ssh_config"] == "sshconfig"
@@ -59,6 +72,7 @@ assert data["editorLanguageIds"]["vscode"]["text"] == ["plaintext"]
 
 patterns = filetypes["custom"]["patterns"]
 assert any(item["pattern"] == "agent-hook-*" and item["filetype"] == "sh" for item in patterns)
+assert any(item["pattern"] == ".env.*" and item["filetype"] == "dotenv" for item in patterns)
 assert any(
     item["pattern"] == "*/.config/dot/merge-hooks.d/agent-rules/targets.d/*.conf"
     and item["filetype"] == "text"

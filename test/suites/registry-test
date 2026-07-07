@@ -182,8 +182,26 @@ matrix = {
     "BUILD": (["buildifier-format"], ["typos", "schema-lint", "buildifier-lint"]),
     "rules.bzl": (["buildifier-format"], ["typos", "schema-lint", "buildifier-lint"]),
     "Containerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
+    "image.dockerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
+    "image.containerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
     ".editorconfig": ([], ["typos", "schema-lint", "editorconfig-checker"]),
+    ".env": ([], ["typos", "schema-lint"]),
+    ".env.local": ([], ["typos", "schema-lint"]),
+    ".flake8": ([], ["typos", "schema-lint"]),
     ".gitconfig": ([], ["typos", "schema-lint", "git-config"]),
+    ".gitignore": ([], ["typos", "schema-lint"]),
+    ".npmrc": ([], ["typos", "schema-lint"]),
+    ".vscodeignore": ([], ["typos", "schema-lint"]),
+    ".clang-format": (["yamlfmt"], ["typos", "schema-lint"]),
+    "settings.json": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "workspace.code-workspace": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "dark.color-theme.json": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "icons.icon-theme.json": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "language-configuration.json": (["biome-format"], ["typos", "schema-lint", "biome-lint"]),
+    "Pipfile": (["taplo-format"], ["typos", "schema-lint", "taplo-lint"]),
+    "notes.markdown": (["rumdl-format"], ["typos", "schema-lint", "rumdl-lint"]),
+    "events.jsonl": ([], ["typos", "schema-lint"]),
+    "app.properties": ([], ["typos", "schema-lint"]),
     "50-personal.ssh_config": ([], ["typos", "schema-lint"]),
     "50-personal.ssh-config": ([], ["typos", "schema-lint"]),
     "10-sley.ini": ([], ["typos", "schema-lint"]),
@@ -209,6 +227,15 @@ for relative, (expected_format, expected_lint) in matrix.items():
     assert [step["adapter"] for step in format_steps] == expected_format, relative
     assert [step["adapter"] for step in lint_steps] == expected_lint, relative
 
+for relative in (
+    "dark.color-theme.json",
+    "icons.icon-theme.json",
+    "language-configuration.json",
+):
+    target = tmp / "matrix" / relative
+    plan = registry_mod.plan(registry, [str(target)], "lint")["files"][0]
+    assert plan["filetype"] == "jsonc", relative
+
 agent_target = (
     tmp
     / "matrix"
@@ -216,9 +243,9 @@ agent_target = (
 )
 agent_target.parent.mkdir(parents=True, exist_ok=True)
 agent_target.write_text("", encoding="utf-8")
-agent_target_lint = registry_mod.plan(registry, [str(agent_target)], "lint")["files"][0][
-    "lint"
-]["steps"]
+agent_target_plan = registry_mod.plan(registry, [str(agent_target)], "lint")["files"][0]
+assert agent_target_plan["filetype"] == "text"
+agent_target_lint = agent_target_plan["lint"]["steps"]
 assert [step["adapter"] for step in agent_target_lint] == ["typos", "schema-lint"]
 
 clang_context_payloads = {
