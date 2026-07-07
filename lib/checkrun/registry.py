@@ -546,17 +546,16 @@ def _is_text(path: Path) -> bool:
 
 
 def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
-    # Match order mirrors the spec and editor expectations. Filename wins before
-    # extension so files such as CMakeLists.txt and Dockerfile are stable even
-    # when they contain dots or suffixes that would otherwise look generic.
+    # Exact filenames win first, then narrow glob patterns, then generic
+    # extensions. That lets editor-style associations such as
+    # `*color-theme.json` override the broad `.json` language without weakening
+    # stable exact names such as CMakeLists.txt and Dockerfile.
     filetypes = registry["filetypes"]
     name = path.name
     ext = _extension(path)
 
     if name in filetypes["filename"]:
         return str(filetypes["filename"][name])
-    if ext and ext in filetypes["extension"]:
-        return str(filetypes["extension"][ext])
 
     for item in filetypes["patterns"]:
         if item.get("extensionlessOnly") is True and ext:
@@ -567,6 +566,9 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
         # matching keeps inference, explain, plan, and dispatch aligned.
         if _path_pattern_matches(path, [item["pattern"]]):
             return str(item["filetype"])
+
+    if ext and ext in filetypes["extension"]:
+        return str(filetypes["extension"][ext])
 
     # Shebang probing is intentionally last and text-only. Extensionless binary
     # files should remain unknown without leaking null bytes or warnings through

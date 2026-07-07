@@ -31,7 +31,7 @@ cat <<'JSON'
     "lint": ["sh"],
     "custom": {
       "filename": {"Dockerfile": "dockerfile"},
-      "extension": {"service": "systemd"},
+      "extension": {"service": "systemd", "ssh_config": "sshconfig"},
       "patterns": [
         {"pattern": "agent-hook-*", "filetype": "sh", "extensionlessOnly": true},
         {"pattern": ".github/workflows/*.yml", "filetype": "yaml"}
@@ -81,6 +81,7 @@ local filetypes = checkrun_nvim.filetypes({
 })
 assert_eq("filename filetype", "dockerfile", filetypes.filename.Dockerfile)
 assert_eq("extension filetype", "systemd", filetypes.extension.service)
+assert_eq("ssh config extension filetype", "sshconfig", filetypes.extension.ssh_config)
 assert_eq("normal pattern filetype", "yaml", filetypes.pattern["%.github/workflows/.*%.yml"])
 
 local extensionless = assert(filetypes.pattern["agent%-hook%-.*"], "extensionless callback missing")
