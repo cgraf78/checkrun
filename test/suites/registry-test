@@ -189,6 +189,7 @@ matrix = {
     "10-sley.ini": ([], ["typos", "schema-lint"]),
     "10-sley.hgrc": ([], ["typos", "schema-lint"]),
     "10-defaults.pathlist": ([], ["typos", "schema-lint"]),
+    "10-defaults.tsv": ([], ["typos", "schema-lint"]),
     "crontab": ([], ["typos", "schema-lint", "crontab"]),
     "tmux.conf": ([], ["typos", "schema-lint", "tmux"]),
     "default.nix": (["nixfmt"], ["typos", "schema-lint", "statix"]),

@@ -55,6 +55,7 @@
       "timer": "systemd",
       "toml": "toml",
       "ts": "typescript",
+      "tsv": "text",
       "tsx": "typescriptreact",
       "txt": "text",
       "yaml": "yaml",

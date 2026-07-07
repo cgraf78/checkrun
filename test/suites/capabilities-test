@@ -50,6 +50,7 @@ assert filetypes["custom"]["extension"]["pathlist"] == "text"
 assert filetypes["custom"]["extension"]["service"] == "systemd"
 assert filetypes["custom"]["extension"]["ssh-config"] == "sshconfig"
 assert filetypes["custom"]["extension"]["ssh_config"] == "sshconfig"
+assert filetypes["custom"]["extension"]["tsv"] == "text"
 assert data["editorLanguageIds"]["vscode"]["bash"] == ["shellscript"]
 assert data["editorLanguageIds"]["vscode"]["bzl"] == ["starlark", "bzl"]
 assert data["editorLanguageIds"]["vscode"]["ini"] == ["ini"]
