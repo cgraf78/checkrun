@@ -184,6 +184,11 @@ matrix = {
     "Containerfile": (["dockerfmt"], ["typos", "schema-lint", "hadolint"]),
     ".editorconfig": ([], ["typos", "schema-lint", "editorconfig-checker"]),
     ".gitconfig": ([], ["typos", "schema-lint", "git-config"]),
+    "50-personal.ssh_config": ([], ["typos", "schema-lint"]),
+    "50-personal.ssh-config": ([], ["typos", "schema-lint"]),
+    "10-sley.ini": ([], ["typos", "schema-lint"]),
+    "10-sley.hgrc": ([], ["typos", "schema-lint"]),
+    "10-defaults.pathlist": ([], ["typos", "schema-lint"]),
     "crontab": ([], ["typos", "schema-lint", "crontab"]),
     "tmux.conf": ([], ["typos", "schema-lint", "tmux"]),
     "default.nix": (["nixfmt"], ["typos", "schema-lint", "statix"]),
@@ -202,6 +207,18 @@ for relative, (expected_format, expected_lint) in matrix.items():
     lint_steps = registry_mod.plan(registry, [str(target)], "lint")["files"][0]["lint"]["steps"]
     assert [step["adapter"] for step in format_steps] == expected_format, relative
     assert [step["adapter"] for step in lint_steps] == expected_lint, relative
+
+agent_target = (
+    tmp
+    / "matrix"
+    / ".config/dot/merge-hooks.d/agent-rules/targets.d/80-targets.replace/50-native.conf"
+)
+agent_target.parent.mkdir(parents=True, exist_ok=True)
+agent_target.write_text("", encoding="utf-8")
+agent_target_lint = registry_mod.plan(registry, [str(agent_target)], "lint")["files"][0][
+    "lint"
+]["steps"]
+assert [step["adapter"] for step in agent_target_lint] == ["typos", "schema-lint"]
 
 clang_context_payloads = {
     "compile_commands.json": "[]\n",
