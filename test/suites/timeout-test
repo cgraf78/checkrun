@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Verify the macOS-compatible timeout fallback without GNU coreutils on PATH.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+echo "=== portable timeout fallback ==="
+
+python=$(command -v python3)
+host_ps=$(command -v ps || true)
+fallback_bin="$(_tmpdir)/bin"
+mkdir -p "$fallback_bin"
+ln -s "$python" "$fallback_bin/python3"
+for fixture_tool in cat sleep; do
+  ln -s "$(command -v "$fixture_tool")" "$fallback_bin/$fixture_tool"
+done
+
+PATH="$fallback_bin" _with_timeout 0.05 /bin/sleep 1
+timeout_rc=$?
+_assert_exit "python fallback: returns the conventional timeout status" 124 "$timeout_rc"
+
+PATH="$fallback_bin" _with_timeout 1 /bin/sh -c 'exit 7'
+command_rc=$?
+_assert_exit "python fallback: preserves the child exit status" 7 "$command_rc"
+
+# shellcheck disable=SC2016 # The wrapped shell expands value.
+printf 'payload\n' | PATH="$fallback_bin" _with_timeout 1 /bin/sh -c \
+  'IFS= read -r value; [ "$value" = payload ]'
+_assert_exit "python fallback: preserves the wrapped command stdin" 0 "$?"
+
+descendant_pid_file="$(_tmpdir)/descendant.pid"
+# shellcheck disable=SC2016 # The wrapped shells own PID and path expansion.
+PATH="$fallback_bin" _with_timeout 0.05 /bin/sh -c \
+  '/bin/sh -c '\''trap "" TERM; exec /bin/sleep 30'\'' & printf "%s\n" "$!" >"$1"; wait' \
+  sh "$descendant_pid_file"
+descendant_rc=$?
+_assert_exit "python fallback: times out a command with descendants" 124 "$descendant_rc"
+descendant_pid=$(cat "$descendant_pid_file")
+descendant_state=''
+if [[ -n "$host_ps" ]]; then
+  descendant_state=$("$host_ps" -p "$descendant_pid" -o stat= 2>/dev/null || true)
+fi
+if [[ -z "$host_ps" ]]; then
+  echo "  - skipping descendant process-state assertion (ps unavailable)"
+elif [[ -z "$descendant_state" || "$descendant_state" == Z* ]]; then
+  _pass "python fallback: terminates the descendant process group"
+else
+  _fail "python fallback: descendant remained alive (pid=$descendant_pid state=$descendant_state)"
+  kill "$descendant_pid" 2>/dev/null || true
+fi
+
+PATH="$fallback_bin" _with_timeout 1 /definitely/missing/checkrun-command >/dev/null 2>&1
+_assert_exit "python fallback: missing command returns 127" 127 "$?"
+
+non_executable="$(_tmpdir)/not-executable"
+printf '#!/bin/sh\n' >"$non_executable"
+chmod 644 "$non_executable"
+PATH="$fallback_bin" _with_timeout 1 "$non_executable" >/dev/null 2>&1
+_assert_exit "python fallback: non-executable command returns 126" 126 "$?"
+
+invalid_executable="$(_tmpdir)/invalid-executable"
+printf 'not an executable format\n' >"$invalid_executable"
+chmod 755 "$invalid_executable"
+PATH="$fallback_bin" _with_timeout 1 "$invalid_executable" >/dev/null 2>&1
+_assert_exit "python fallback: invalid executable format returns 126" 126 "$?"
+
+PATH="$fallback_bin" _with_timeout 1 /bin/sh -c 'kill -TERM $$' >/dev/null 2>&1
+_assert_exit "python fallback: signal exit uses shell status" 143 "$?"
+
+interrupt_pid_file="$(_tmpdir)/interrupt-child.pid"
+wrapper_pid_file="$(_tmpdir)/interrupt-wrapper.pid"
+# shellcheck disable=SC2016 # The wrapped shell owns PID and path expansion.
+_TEST_TIMEOUT_WRAPPER_PID_FILE="$wrapper_pid_file" PATH="$fallback_bin" \
+  _with_timeout 10 /bin/sh -c \
+  'printf "%s\n" "$$" >"$1"; exec /bin/sleep 30' sh "$interrupt_pid_file" &
+interrupt_job=$!
+for _ in {1..250}; do
+  [[ -s "$interrupt_pid_file" && -s "$wrapper_pid_file" ]] && break
+  sleep 0.02
+done
+python_pid=''
+if [[ -s "$interrupt_pid_file" && -s "$wrapper_pid_file" ]]; then
+  python_pid=$(cat "$wrapper_pid_file")
+fi
+if [[ -n "$python_pid" ]]; then
+  for interrupt_signal in TERM HUP INT QUIT TERM; do
+    kill -"$interrupt_signal" "$python_pid" 2>/dev/null || true
+  done
+  wait "$interrupt_job"
+  storm_rc=$?
+  case "$storm_rc" in
+    129 | 130 | 131 | 143) _pass "python fallback: signal storm returns shell status" ;;
+    *) _fail "python fallback: signal storm returned unexpected status $storm_rc" ;;
+  esac
+  interrupt_child_pid=$(cat "$interrupt_pid_file")
+  interrupt_child_state=''
+  if [[ -n "$host_ps" ]]; then
+    interrupt_child_state=$("$host_ps" -p "$interrupt_child_pid" -o stat= 2>/dev/null || true)
+  fi
+  if [[ -z "$host_ps" ]]; then
+    echo "  - skipping signal-storm process-state assertion (ps unavailable)"
+  elif [[ -z "$interrupt_child_state" || "$interrupt_child_state" == Z* ]]; then
+    _pass "python fallback: signal storm cleans the isolated child group"
+  else
+    _fail "python fallback: signal storm left child alive (pid=$interrupt_child_pid)"
+    kill "$interrupt_child_pid" 2>/dev/null || true
+  fi
+else
+  _fail "python fallback: could not identify wrapper process"
+  late_python_pid=$(cat "$wrapper_pid_file" 2>/dev/null || true)
+  if [[ -n "$late_python_pid" ]]; then
+    kill -TERM "$late_python_pid" 2>/dev/null || true
+  fi
+  wait "$interrupt_job" 2>/dev/null || true
+fi
+
+publication_path="$(_tmpdir)/existing-wrapper.pid"
+publication_leak_marker="$(_tmpdir)/publication-child-leaked"
+: >"$publication_path"
+# shellcheck disable=SC2016 # The wrapped shell owns marker expansion.
+_TEST_TIMEOUT_WRAPPER_PID_FILE="$publication_path" PATH="$fallback_bin" \
+  _with_timeout 30 /bin/sh -c \
+  '/bin/sleep 0.5; : >"$1"; exec /bin/sleep 30' sh "$publication_leak_marker" \
+  >/dev/null 2>&1
+_assert_exit "python fallback: PID publication failure returns 125" 125 "$?"
+/bin/sleep 0.7
+if [[ ! -e "$publication_leak_marker" ]]; then
+  _pass "python fallback: PID publication failure cleans the child group"
+else
+  _fail "python fallback: PID publication failure leaked the child group"
+fi
+
+empty_bin="$(_tmpdir)/empty-bin"
+mkdir -p "$empty_bin"
+PATH="$empty_bin" _with_timeout 1 /bin/true >/dev/null 2>&1
+backend_rc=$?
+_assert_exit "missing backend: fails instead of running unbounded" 125 "$backend_rc"
+
+_test_summary
