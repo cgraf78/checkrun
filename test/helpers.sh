@@ -444,18 +444,36 @@ import sys
 import time
 
 
-def kill_group(signum):
+def kill_group(signum, allow_darwin_zombie=False):
     try:
         os.killpg(process.pid, signum)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        if allow_darwin_zombie and sys.platform == "darwin":
+            try:
+                process.wait(timeout=0)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                return
+        raise
 
 
 def cleanup(signum):
-    kill_group(signum)
-    time.sleep(0.2)
-    kill_group(signal.SIGKILL)
-    process.wait()
+    try:
+        kill_group(signum)
+        time.sleep(0.2)
+        kill_group(signal.SIGKILL, allow_darwin_zombie=True)
+        process.wait(timeout=1)
+    except (PermissionError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+            process.wait(timeout=0.2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        print("test: cannot terminate timed command process group", file=sys.stderr)
+        raise SystemExit(125)
 
 
 def quiesce_signals():

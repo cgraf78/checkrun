@@ -15,6 +15,9 @@ python=$(command -v python3)
 fallback_bin="$(_tmpdir)/bin"
 mkdir -p "$fallback_bin"
 ln -s "$python" "$fallback_bin/python3"
+for fixture_tool in awk cat ps sleep; do
+  ln -s "$(command -v "$fixture_tool")" "$fallback_bin/$fixture_tool"
+done
 
 PATH="$fallback_bin" _with_timeout 0.05 /bin/sleep 1
 timeout_rc=$?
