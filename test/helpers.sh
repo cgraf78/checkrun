@@ -423,8 +423,8 @@ _mock_checkrun_infra_bin() {
 # ---------------------------------------------------------------------------
 # Portable timeout wrapper — `timeout` is GNU coreutils and is absent on
 # macOS by default. Falls back to `gtimeout` (installed by `brew install
-# coreutils`), and to running the command directly if neither is present
-# (CI's outer job timeout will still catch a hang).
+# coreutils`), then Python's portable subprocess timeout. Never run an
+# explicitly bounded test without a working timeout backend.
 # ---------------------------------------------------------------------------
 
 _with_timeout() {
@@ -434,8 +434,93 @@ _with_timeout() {
     timeout "$secs" "$@"
   elif command -v gtimeout &>/dev/null; then
     gtimeout "$secs" "$@"
+  elif command -v python3 &>/dev/null; then
+    python3 -c '
+import errno
+import os
+import signal
+import subprocess
+import sys
+import time
+
+
+def kill_group(signum):
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def cleanup(signum):
+    kill_group(signum)
+    time.sleep(0.2)
+    kill_group(signal.SIGKILL)
+    process.wait()
+
+
+def quiesce_signals():
+    signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals)
+    for handled in handled_signals:
+        signal.signal(handled, signal.SIG_IGN)
+
+
+def forward(signum, _frame):
+    global interrupted_signum
+    if interrupted_signum is None:
+        interrupted_signum = signum
+
+seconds = float(sys.argv[1])
+handled_signals = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
+interrupted_signum = None
+old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals)
+
+
+def restore_child_mask():
+    signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+
+try:
+    process = subprocess.Popen(
+        sys.argv[2:], start_new_session=True, preexec_fn=restore_child_mask
+    )
+except OSError as error:
+    signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    raise SystemExit(127 if error.errno == errno.ENOENT else 126)
+
+for handled in handled_signals:
+    signal.signal(handled, forward)
+
+deadline = time.monotonic() + seconds
+try:
+    signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    while process.poll() is None and interrupted_signum is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            process.wait(timeout=min(0.05, remaining))
+        except subprocess.TimeoutExpired:
+            pass
+except BaseException:
+    quiesce_signals()
+    cleanup(signal.SIGTERM)
+    raise
+
+quiesce_signals()
+
+if interrupted_signum is not None:
+    cleanup(interrupted_signum)
+    raise SystemExit(128 + interrupted_signum)
+if process.poll() is None:
+    cleanup(signal.SIGTERM)
+    raise SystemExit(124)
+
+return_code = process.returncode
+raise SystemExit(128 - return_code if return_code < 0 else return_code)
+' "$secs" "$@"
   else
-    "$@"
+    printf '%s\n' "test: timeout, gtimeout, or python3 is required" >&2
+    return 125
   fi
 }
 
