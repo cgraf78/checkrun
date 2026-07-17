@@ -490,6 +490,7 @@ def forward(signum, _frame):
 seconds = float(sys.argv[1])
 handled_signals = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
 interrupted_signum = None
+wrapper_pid_file = os.environ.pop("_TEST_TIMEOUT_WRAPPER_PID_FILE", None)
 old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals)
 
 
@@ -507,6 +508,16 @@ except OSError as error:
 
 for handled in handled_signals:
     signal.signal(handled, forward)
+
+if wrapper_pid_file:
+    try:
+        with open(wrapper_pid_file, "x", encoding="ascii") as wrapper_file:
+            wrapper_file.write(str(os.getpid()))
+    except OSError:
+        quiesce_signals()
+        cleanup(signal.SIGTERM)
+        print("test: cannot publish timeout wrapper pid", file=sys.stderr)
+        raise SystemExit(125)
 
 deadline = time.monotonic() + seconds
 try:
