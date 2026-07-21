@@ -21,7 +21,7 @@ jobs:
     # To update the pin, run locally:
     #   gh api repos/cgraf78/actions/branches/main --jq '.commit.sha'
     # and replace the ref below (form: `...@<40-char-sha>`).
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@7e2a5a13fdb24fcb80a789fd8a83af786e8db207
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@485940fa141828a3f13430b5219a3d5c33c4f367
     with:
       setup: checkrun
       test-command: test/checkrun-test
