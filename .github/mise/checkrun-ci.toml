@@ -4,6 +4,10 @@
 # checkrun owns. Keep this list to portable release binaries; OS package
 # managers in CI still provide shell, Python, yq, rustfmt, and clang-format.
 
+[settings]
+lockfile = true
+lockfile_platforms = ["linux-x64", "macos-arm64"]
+
 [tools]
 "aqua:astral-sh/ruff" = "latest"
 "aqua:bazelbuild/buildtools/buildifier" = "latest"
@@ -16,4 +20,4 @@
 "aqua:rhysd/actionlint" = "latest"
 "aqua:tamasfe/taplo" = "latest"
 "aqua:zizmorcore/zizmor" = "latest"
-"ubi:rvben/rumdl" = "latest"
+"aqua:rvben/rumdl" = "latest"

@@ -81,9 +81,13 @@ optional. Missing backends are graceful no-ops for their file types or project
 roots so hosts can install only the language tools they use.
 
 CI installs a representative backend set from
-`.github/mise/checkrun-ci.toml` before running the full test suite. That file
-is test infrastructure for this repo; installed consumers should provide their
-own toolchain through the host environment or integration layer.
+`.github/mise/checkrun-ci.toml` before running the full test suite. The adjacent
+`mise.lock` pins exact tool versions and download URLs for the Linux and macOS
+architectures used by CI, plus checksums when the tool backend publishes them.
+A weekly workflow refreshes that lock on a bot-owned branch and dispatches the
+full test matrix on its pull request. The manifest and lock are test
+infrastructure for this repo; installed consumers should provide their own
+toolchain through the host environment or integration layer.
 
 ## Public API
 

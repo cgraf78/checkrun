@@ -1,0 +1,162 @@
+name: Refresh Mise lock
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: refresh-mise-lock
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Resolve current tools
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.refresh.outputs.base_sha }}
+      changed: ${{ steps.refresh.outputs.changed }}
+      lock: ${{ steps.refresh.outputs.lock }}
+    env:
+      MISE_GLOBAL_CONFIG_FILE: ${{ github.workspace }}/.github/mise/checkrun-ci.toml
+      MISE_GLOBAL_CONFIG_ROOT: ${{ github.workspace }}/.github/mise
+      MISE_GITHUB_TOKEN: ${{ github.token }}
+      MISE_SAFE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Install Mise
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          version: 2026.7.11
+          install: false
+          cache: false
+
+      - name: Refresh lockfile
+        id: refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Regenerate from the manifest so fuzzy selectors resolve anew and
+          # removed tools cannot survive as stale lock entries.
+          : >.github/mise/mise.lock
+          mise lock --global
+          python3 .github/scripts/verify_mise_lock.py \
+            .github/mise/checkrun-ci.toml .github/mise/mise.lock
+
+          if git diff --quiet -- .github/mise/mise.lock; then
+            echo "changed=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >>"$GITHUB_OUTPUT"
+          fi
+          echo "base_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          echo "lock=$(base64 <.github/mise/mise.lock | tr -d '\n')" >>"$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish toolchain update
+    needs: refresh
+    if: needs.refresh.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions: # zizmor: ignore[excessive-permissions]
+      actions: write # Dispatch the full test matrix for the bot branch.
+      contents: write # Replace the dedicated update branch.
+      pull-requests: write # Create or refresh the toolchain PR.
+    env:
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      BASE_SHA: ${{ needs.refresh.outputs.base_sha }}
+      GH_TOKEN: ${{ github.token }}
+      LOCK_CONTENT: ${{ needs.refresh.outputs.lock }}
+      UPDATE_BRANCH: automation/mise-lock-refresh
+    steps:
+      - name: Publish update branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_base="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BASE_BRANCH" \
+            --jq .commit.sha)"
+          if [[ "$latest_base" != "$BASE_SHA" ]]; then
+            echo "default branch changed during lock resolution; rerun the workflow" >&2
+            exit 1
+          fi
+
+          gh repo clone "$GITHUB_REPOSITORY" repo -- --branch "$BASE_BRANCH"
+          cd repo
+          git checkout "$BASE_SHA"
+          printf '%s' "$LOCK_CONTENT" | base64 --decode >.github/mise/mise.lock
+
+          remote_ref="refs/heads/$UPDATE_BRANCH"
+          remote_sha="$(git ls-remote --heads origin "$remote_ref" | awk '{print $1}')"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$UPDATE_BRANCH"
+          git add .github/mise/mise.lock
+          git commit -F - <<'EOF'
+          Refresh Checkrun's `mise` toolchain
+
+          Summary
+
+          Regenerate the committed CI tool lock so Checkrun can evaluate current
+          formatter and linter releases without making ordinary CI mutable.
+
+          Testing
+
+          - `.github/scripts/verify_mise_lock.py`
+          - full cross-platform matrix dispatched after publishing the branch
+          EOF
+
+          gh auth setup-git
+          if [[ -n "$remote_sha" ]]; then
+            git push origin "HEAD:$remote_ref" \
+              "--force-with-lease=$remote_ref:$remote_sha"
+          else
+            git push origin "HEAD:$remote_ref"
+          fi
+
+      - name: Open pull request and dispatch tests
+        shell: bash
+        run: |-
+          set -euo pipefail
+          cd repo
+
+          body="$RUNNER_TEMP/mise-lock-pr.md"
+          cat >"$body" <<'EOF'
+          Refresh the committed Checkrun CI toolchain lock so routine test runs
+          continue using reviewed versions and URLs, with checksums when the
+          tool backend publishes them.
+
+          Summary
+
+          - re-resolve all fuzzy tool selectors from `checkrun-ci.toml`
+          - regenerate Linux and macOS lock entries from one manifest
+          - run the full shared CI matrix before review
+
+          Testing
+
+          - `.github/scripts/verify_mise_lock.py`
+          - full cross-platform matrix dispatched by this workflow
+          EOF
+
+          number="$(gh pr list --head "$UPDATE_BRANCH" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [[ -z "$number" ]]; then
+            gh pr create --base "$BASE_BRANCH" --head "$UPDATE_BRANCH" \
+              --title "Refresh Checkrun's \`mise\` toolchain" --body-file "$body"
+          else
+            gh pr edit "$number" --title "Refresh Checkrun's \`mise\` toolchain" \
+              --body-file "$body"
+          fi
+
+          # The pull_request run created by GITHUB_TOKEN waits for approval.
+          # Dispatch the full scheduled/manual matrix so the bot PR still gets
+          # unattended cross-platform coverage.
+          gh workflow run test.yml --ref "$UPDATE_BRANCH"
