@@ -380,6 +380,7 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 
 assert module.__all__ == [
+    "PathPolicyError",
     "load_json",
     "policy_path",
     "policy_schema_path",

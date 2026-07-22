@@ -175,6 +175,87 @@ _assert_contains "schema policy CLI: unresolved fallback is actionable" \
 _assert_not_contains "schema policy CLI: expected path failure omits traceback" \
   "Traceback" "$output"
 
+loaded_policy="$_xdg_config/checkrun/associations.json"
+mkdir -p "$(dirname "$loaded_policy")"
+cat >"$loaded_policy" <<JSON
+{
+  "associations": [
+    {
+      "name": "HOME-relative match",
+      "format": "json",
+      "matches": ["*.json"],
+      "schema": "$_td/schema.json"
+    }
+  ]
+}
+JSON
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR -u CHECKRUN_SCHEMA_ASSOCIATIONS \
+  XDG_CONFIG_HOME="$_xdg_config" XDG_DATA_HOME="$_xdg_data" \
+  python3 "$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema_policy.py" \
+  --lsp-schemas 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "schema policy CLI: loaded HOME-relative fields exit nonzero" 1 "$rc"
+_assert_contains "schema policy CLI: loaded path failure is actionable" \
+  "HOME is required" "$output"
+_assert_not_contains "schema policy CLI: loaded path failure omits traceback" \
+  "Traceback" "$output"
+
+cat >"$loaded_policy" <<'JSON'
+{
+  "schemaDataDir": "relative/schemas",
+  "associations": [
+    {
+      "name": "Relative refresh destination",
+      "schema": "settings.schema.json",
+      "source": "file:///missing/settings.schema.json"
+    }
+  ]
+}
+JSON
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR -u CHECKRUN_SCHEMA_ASSOCIATIONS \
+  XDG_CONFIG_HOME="$_xdg_config" XDG_DATA_HOME="$_xdg_data" \
+  "$CHECKRUN_REPO_ROOT/bin/checkrun" schema refresh --check 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "schema refresh: loaded HOME-relative fields exit nonzero" 2 "$rc"
+_assert_contains "schema refresh: loaded path failure is actionable" \
+  "HOME is required" "$output"
+_assert_not_contains "schema refresh: loaded path failure omits traceback" \
+  "Traceback" "$output"
+
+cat >"$loaded_policy" <<JSON
+{
+  "associations": [
+    {
+      "name": "HOME-relative lint match",
+      "format": "json",
+      "matches": ["*.json"],
+      "schema": "$_td/schema.json",
+      "enforce": true
+    }
+  ]
+}
+JSON
+printf '{}\n' >"$_td/target.json"
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR -u CHECKRUN_SCHEMA_ASSOCIATIONS \
+  XDG_CONFIG_HOME="$_xdg_config" XDG_DATA_HOME="$_xdg_data" \
+  python3 "$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema-lint.py" \
+  "$_td/target.json" 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "schema lint: loaded HOME-relative fields exit nonzero" 1 "$rc"
+_assert_contains "schema lint: loaded path failure is actionable" \
+  "HOME is required" "$output"
+_assert_not_contains "schema lint: loaded path failure omits traceback" \
+  "Traceback" "$output"
+
 for args in "--help" "registry --json" "capabilities --json" "schema --help" "verify --help"; do
   read -r -a test_argv <<<"$args"
   if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \

@@ -25,7 +25,6 @@ from typing import Any
 
 import schema_policy
 
-
 USER_AGENT = "checkrun-schema-refresh/1"
 DEFAULT_TIMEOUT_SECONDS = 20.0
 
@@ -216,7 +215,9 @@ def _refresh_candidate(candidate: Candidate, *, check: bool, timeout: float) -> 
             return Result("current", candidate.name, candidate.destination, candidate.source)
         if check:
             message = "would update" if existing is not None else "would create"
-            return Result("changed", candidate.name, candidate.destination, candidate.source, message)
+            return Result(
+                "changed", candidate.name, candidate.destination, candidate.source, message
+            )
         _write_atomic(candidate.destination, content)
         status = "updated" if existing is not None else "created"
         return Result(status, candidate.name, candidate.destination, candidate.source)
@@ -281,13 +282,13 @@ def run(
 
     try:
         _policy_path, policy = _load_policy()
-    except RefreshError as exc:
+    except (RefreshError, schema_policy.PathPolicyError) as exc:
         print(f"schema refresh: {exc}")
         return 2
 
     try:
         candidates = _refresh_candidates(policy, association_filter=association_filter)
-    except RefreshError as exc:
+    except (RefreshError, schema_policy.PathPolicyError) as exc:
         print(f"schema refresh: {exc}")
         return 2
     if association_filter and not candidates:

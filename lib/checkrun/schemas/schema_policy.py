@@ -42,10 +42,13 @@ if str(_MODULE_DIR) not in sys.path:
 
 import checkrun_paths  # noqa: E402  # Direct script loads parent-owned policy.
 
+PathPolicyError = checkrun_paths.PathPolicyError
+
 _CHECKRUN_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_POLICY_SCHEMA = _CHECKRUN_ROOT / "share/checkrun/schemas/associations.schema.json"
 
 __all__ = [
+    "PathPolicyError",
     "load_json",
     "policy_path",
     "policy_schema_path",
@@ -389,22 +392,18 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         path = policy_path()
-    except checkrun_paths.PathPolicyError as exc:
+        if not path.is_file():
+            print(json.dumps({"json": [], "yaml": {}, "toml": {}}, separators=(",", ":")))
+            return 0
+        policy = load_json(path)
+        config = lsp_schema_config(policy, editor_sources=args.editor_sources)
+    except PathPolicyError as exc:
         print(f"schema policy: {exc}", file=sys.stderr)
         return 1
-    if not path.is_file():
-        print(json.dumps({"json": [], "yaml": {}, "toml": {}}, separators=(",", ":")))
-        return 0
-    try:
-        policy = load_json(path)
     except (JSONDecodeError, OSError) as exc:
         print(f"schema policy: {exc}", file=sys.stderr)
         return 1
-    print(
-        json.dumps(
-            lsp_schema_config(policy, editor_sources=args.editor_sources), separators=(",", ":")
-        )
-    )
+    print(json.dumps(config, separators=(",", ":")))
     return 0
 
 
