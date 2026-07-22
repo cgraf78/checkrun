@@ -1271,6 +1271,6 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except RegistryError as exc:
+    except (RegistryError, checkrun_paths.PathPolicyError) as exc:
         print(f"checkrun registry: {exc}", file=sys.stderr)
         raise SystemExit(2) from None

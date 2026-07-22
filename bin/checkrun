@@ -30,11 +30,6 @@ CHECKRUN_LIB_DIR="$_bin_dir/../lib/checkrun"
 # shellcheck source=../lib/checkrun/common.sh
 . "$CHECKRUN_LIB_DIR/common.sh"
 
-# Resolve once before dispatch so shell adapters and Python policy consumers
-# share one cwd-independent configuration root.
-_checkrun_resolve_config_dir CHECKRUN_CONFIG_DIR || exit
-export CHECKRUN_CONFIG_DIR
-
 _run_registry() {
   local python
   python=$(_checkrun_python) || {
@@ -50,6 +45,8 @@ _run_schema_refresh() {
     echo "checkrun: python3 is required for schema refresh" >&2
     exit 127
   }
+  _checkrun_resolve_config_dir CHECKRUN_CONFIG_DIR || exit
+  export CHECKRUN_CONFIG_DIR
   exec "$python" "$CHECKRUN_LIB_DIR/schemas/schema_refresh.py" "$@"
 }
 

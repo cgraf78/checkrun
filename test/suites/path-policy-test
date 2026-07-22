@@ -175,6 +175,30 @@ _assert_contains "schema policy CLI: unresolved fallback is actionable" \
 _assert_not_contains "schema policy CLI: expected path failure omits traceback" \
   "Traceback" "$output"
 
+for args in "--help" "registry --json" "capabilities --json" "schema --help" "verify --help"; do
+  read -r -a test_argv <<<"$args"
+  if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
+    "$CHECKRUN_REPO_ROOT/bin/checkrun" "${test_argv[@]}" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  _assert_exit "lazy config: checkrun $args works without a config root" 0 "$rc"
+done
+
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
+  "$CHECKRUN_REPO_ROOT/bin/checkrun" explain --json "$CHECKRUN_REPO_ROOT/README.md" \
+  2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "lazy config: config-consuming explain exits nonzero" 2 "$rc"
+_assert_contains "lazy config: config-consuming explain reports HOME requirement" \
+  "HOME is required" "$output"
+_assert_not_contains "lazy config: config-consuming explain omits traceback" \
+  "Traceback" "$output"
+
 python3 - "$CHECKRUN_REPO_ROOT" "$_td" "$_home" "$_xdg_config" "$_xdg_data" \
   "$_td/launch" <<'PY'
 import os
