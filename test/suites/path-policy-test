@@ -67,6 +67,22 @@ output=$(cd "$_td/launch" && CHECKRUN_CONFIG_DIR='missing relative' \
 _assert_eq "shell config: nonexistent relative override becomes cwd-independent" \
   "$(_canonical_test_path "$_td/launch/missing relative")" "$output"
 
+output=$(CHECKRUN_CONFIG_DIR="$_td/launch/../home/real" \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: absolute override normalizes parent components" \
+  "$(_canonical_test_path "$_home/real")" "$output"
+
+ln -s "$_home/real" "$_td/config-link"
+output=$(CHECKRUN_CONFIG_DIR="$_td/config-link" \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: absolute override resolves symlink identity" \
+  "$(_canonical_test_path "$_home/real")" "$output"
+
+output=$(CHECKRUN_CONFIG_DIR="$_td/missing-parent/../future-config" \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: absolute override normalizes a nonexistent parent" \
+  "$(_canonical_test_path "$_td/future-config")" "$output"
+
 output=$(cd "$_td/launch" && CHECKRUN_CONFIG_DIR='$(touch injected)' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: command substitution text remains literal" \
@@ -148,6 +164,9 @@ for override, expected in (
     ("~/real", home / "real"),
     ("$CONFIG_ROOT/nested", temp / "env root/nested"),
     ("missing relative", launch / "missing relative"),
+    (str(launch / "../home/real"), home / "real"),
+    (str(temp / "config-link"), home / "real"),
+    (str(temp / "missing-parent/../future-config"), temp / "future-config"),
 ):
     os.environ["CHECKRUN_CONFIG_DIR"] = override
     assert paths.config_dir() == expected.resolve()
