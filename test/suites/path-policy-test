@@ -36,38 +36,41 @@ _assert_eq "shell config: relative XDG_CONFIG_HOME is ignored" \
   "$_home/.config/checkrun" "$output"
 
 mkdir -p "$_td/launch/explicit config"
+# Python resolves explicit overrides to filesystem identity. On macOS, temp
+# paths may therefore change from the visible `/var` spelling to `/private/var`.
 output=$(cd "$_td/launch" && HOME="$_home" XDG_CONFIG_HOME="$_xdg_config" \
   CHECKRUN_CONFIG_DIR='explicit config' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: explicit relative override wins and becomes cwd-independent" \
-  "$_td/launch/explicit config" "$output"
+  "$(_canonical_test_path "$_td/launch/explicit config")" "$output"
 
 mkdir -p "$_home/real" "$_td/env root/nested" "$_td/launch/\$HOME/real"
 output=$(cd "$_td/launch" && HOME="$_home" CHECKRUN_CONFIG_DIR='$HOME/real' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: explicit HOME expression follows Python expansion" \
-  "$_home/real" "$output"
+  "$(_canonical_test_path "$_home/real")" "$output"
 
 # shellcheck disable=SC2088 # The literal tilde is the expansion input under test.
 output=$(cd "$_td/launch" && HOME="$_home" CHECKRUN_CONFIG_DIR='~/real' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
-_assert_eq "shell config: explicit tilde follows Python expansion" "$_home/real" "$output"
+_assert_eq "shell config: explicit tilde follows Python expansion" \
+  "$(_canonical_test_path "$_home/real")" "$output"
 
 output=$(cd "$_td/launch" && CONFIG_ROOT="$_td/env root" \
   CHECKRUN_CONFIG_DIR='$CONFIG_ROOT/nested' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: explicit environment expression follows Python expansion" \
-  "$_td/env root/nested" "$output"
+  "$(_canonical_test_path "$_td/env root/nested")" "$output"
 
 output=$(cd "$_td/launch" && CHECKRUN_CONFIG_DIR='missing relative' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: nonexistent relative override becomes cwd-independent" \
-  "$_td/launch/missing relative" "$output"
+  "$(_canonical_test_path "$_td/launch/missing relative")" "$output"
 
 output=$(cd "$_td/launch" && CHECKRUN_CONFIG_DIR='$(touch injected)' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: command substitution text remains literal" \
-  "$_td/launch/\$(touch injected)" "$output"
+  "$(_canonical_test_path "$_td/launch/\$(touch injected)")" "$output"
 if [[ -e "$_td/launch/injected" ]]; then
   _fail "shell config: explicit override does not execute commands"
 else
