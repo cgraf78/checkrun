@@ -6,6 +6,7 @@ export NO_COLOR=1
 
 CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+export CHECKRUN_LIB_DIR="$CHECKRUN_REPO_ROOT/lib/checkrun"
 
 # shellcheck source=../helpers.sh
 . "$CHECKRUN_TEST_DIR/helpers.sh"
@@ -41,12 +42,65 @@ output=$(cd "$_td/launch" && HOME="$_home" XDG_CONFIG_HOME="$_xdg_config" \
 _assert_eq "shell config: explicit relative override wins and becomes cwd-independent" \
   "$_td/launch/explicit config" "$output"
 
-python3 - "$CHECKRUN_REPO_ROOT" "$_home" "$_xdg_config" "$_xdg_data" "$_td/launch" <<'PY'
+mkdir -p "$_home/real" "$_td/env root/nested" "$_td/launch/\$HOME/real"
+output=$(cd "$_td/launch" && HOME="$_home" CHECKRUN_CONFIG_DIR='$HOME/real' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: explicit HOME expression follows Python expansion" \
+  "$_home/real" "$output"
+
+# shellcheck disable=SC2088 # The literal tilde is the expansion input under test.
+output=$(cd "$_td/launch" && HOME="$_home" CHECKRUN_CONFIG_DIR='~/real' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: explicit tilde follows Python expansion" "$_home/real" "$output"
+
+output=$(cd "$_td/launch" && CONFIG_ROOT="$_td/env root" \
+  CHECKRUN_CONFIG_DIR='$CONFIG_ROOT/nested' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: explicit environment expression follows Python expansion" \
+  "$_td/env root/nested" "$output"
+
+output=$(cd "$_td/launch" && CHECKRUN_CONFIG_DIR='missing relative' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: nonexistent relative override becomes cwd-independent" \
+  "$_td/launch/missing relative" "$output"
+
+output=$(cd "$_td/launch" && CHECKRUN_CONFIG_DIR='$(touch injected)' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: command substitution text remains literal" \
+  "$_td/launch/\$(touch injected)" "$output"
+if [[ -e "$_td/launch/injected" ]]; then
+  _fail "shell config: explicit override does not execute commands"
+else
+  _pass "shell config: explicit override does not execute commands"
+fi
+
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
+  "$CHECKRUN_REPO_ROOT/bin/autoformat" "$_td/missing.py" 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "direct autoformat: unresolved config root exits nonzero" 1 "$rc"
+_assert_contains "direct autoformat: unresolved config root reports HOME requirement" \
+  "HOME is required" "$output"
+
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
+  "$CHECKRUN_REPO_ROOT/bin/autolint" "$_td/missing.py" 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "direct autolint: unresolved config root exits nonzero" 1 "$rc"
+_assert_contains "direct autolint: unresolved config root reports HOME requirement" \
+  "HOME is required" "$output"
+
+python3 - "$CHECKRUN_REPO_ROOT" "$_td" "$_home" "$_xdg_config" "$_xdg_data" \
+  "$_td/launch" <<'PY'
 import os
 import sys
 from pathlib import Path
 
-root, home, xdg_config, xdg_data, launch = map(Path, sys.argv[1:])
+root, temp, home, xdg_config, xdg_data, launch = map(Path, sys.argv[1:])
 os.environ["HOME"] = str(home)
 sys.path.insert(0, str(root / "lib/checkrun"))
 sys.path.insert(0, str(root / "lib/checkrun/schemas"))
@@ -84,8 +138,16 @@ assert paths.config_dir() == home / ".config/checkrun"
 assert paths.data_dir() == home / ".local/share"
 
 os.chdir(launch)
-os.environ["CHECKRUN_CONFIG_DIR"] = "explicit config"
-assert paths.config_dir() == (launch / "explicit config").resolve()
+os.environ["CONFIG_ROOT"] = str(temp / "env root")
+for override, expected in (
+    ("explicit config", launch / "explicit config"),
+    ("$HOME/real", home / "real"),
+    ("~/real", home / "real"),
+    ("$CONFIG_ROOT/nested", temp / "env root/nested"),
+    ("missing relative", launch / "missing relative"),
+):
+    os.environ["CHECKRUN_CONFIG_DIR"] = override
+    assert paths.config_dir() == expected.resolve()
 os.environ["CHECKRUN_SCHEMA_ASSOCIATIONS"] = "policy/associations.json"
 assert schema_policy.policy_path() == home / "policy/associations.json"
 assert schema_policy.schema_path(

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 
@@ -39,3 +40,19 @@ def data_dir() -> Path:
     """Return the XDG data root used for Checkrun-owned payloads."""
 
     return _xdg_root("XDG_DATA_HOME", ".local/share")
+
+
+def main() -> int:
+    """Print a path resolved through Checkrun's shared path policy."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", choices=("config",))
+    args = parser.parse_args()
+
+    if args.path == "config":
+        print(config_dir())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

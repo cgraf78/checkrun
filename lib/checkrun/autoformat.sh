@@ -428,7 +428,7 @@ _autoformat_main() {
     esac
   done
 
-  CHECKRUN_CONFIG_DIR=$(_checkrun_config_dir)
+  CHECKRUN_CONFIG_DIR=$(_checkrun_config_dir) || return
 
   # Export so the Python planner subprocess sees the bash-resolved absolute
   # path.

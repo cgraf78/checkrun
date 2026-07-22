@@ -48,9 +48,24 @@ _abs_path() {
 }
 
 _checkrun_config_dir() {
-  local dir
+  local dir needs_python=0 python
   if [ -n "${CHECKRUN_CONFIG_DIR:-}" ]; then
     dir="$CHECKRUN_CONFIG_DIR"
+    case "$dir" in
+      /*) ;;
+      *) needs_python=1 ;;
+    esac
+    case "$dir" in
+      *'$'*) needs_python=1 ;;
+    esac
+    if [ "$needs_python" -eq 1 ]; then
+      python=$(_checkrun_python 'import sys') || {
+        printf 'checkrun: python3 is required to expand CHECKRUN_CONFIG_DIR\n' >&2
+        return 127
+      }
+      "$python" "$CHECKRUN_LIB_DIR/checkrun_paths.py" config
+      return $?
+    fi
   else
     case "${XDG_CONFIG_HOME:-}" in
       /*) dir="${XDG_CONFIG_HOME%/}/checkrun" ;;
