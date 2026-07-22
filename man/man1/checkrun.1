@@ -63,7 +63,17 @@ Alias for
 .TP
 .B CHECKRUN_CONFIG_DIR
 Directory for local Checkrun policy files such as ignore lists and schema
-associations. Defaults to the user's XDG config location.
+associations. Overrides the complete XDG-derived directory.
+.TP
+.B XDG_CONFIG_HOME
+Absolute base directory for user configuration. Relative values are ignored;
+the fallback is
+.IR ~/.config .
+.TP
+.B XDG_DATA_HOME
+Absolute base directory for Checkrun schema payloads. Relative values are
+ignored; the fallback is
+.IR ~/.local/share .
 .TP
 .B CHECKRUN_PYTHON
 Python interpreter used by Python-backed Checkrun helpers.

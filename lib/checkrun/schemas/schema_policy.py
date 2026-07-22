@@ -35,14 +35,18 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
+_MODULE_DIR = Path(__file__).resolve().parent.parent
+if str(_MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(_MODULE_DIR))
+
+import checkrun_paths  # noqa: E402  # Direct script loads parent-owned policy.
+
 # Resolve HOME once per process so CLIs, tests, and editors all interpret the
 # same policy file against the same root. Hosts provide their policy under
 # Checkrun's config namespace; the policy data may still match files owned by
 # integration repos, app repos, or any other host harness.
 _HOME = Path.home()
 _CHECKRUN_ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_POLICY = _HOME / ".config/checkrun/associations.json"
-_DEFAULT_SCHEMA_DATA_DIR = ".local/share/checkrun/schemas"
 _DEFAULT_POLICY_SCHEMA = _CHECKRUN_ROOT / "share/checkrun/schemas/associations.schema.json"
 
 __all__ = [
@@ -94,7 +98,7 @@ def policy_path() -> Path:
     # CHECKRUN_SCHEMA_ASSOCIATIONS lets tests and temporary worktrees exercise
     # the same interpreter without editing the real host policy.
     value = os.environ.get("CHECKRUN_SCHEMA_ASSOCIATIONS")
-    return _home_path(value) if value else _DEFAULT_POLICY
+    return _home_path(value) if value else checkrun_paths.config_dir() / "associations.json"
 
 
 def policy_schema_path() -> Path:
@@ -195,7 +199,12 @@ def schema_path(policy: dict[str, Any], association: dict[str, Any]) -> Path:
         # anchored under HOME while bare public-schema payload names stay under
         # schemaDataDir.
         return _HOME / schema
-    data_dir = _home_path(str(policy.get("schemaDataDir", _DEFAULT_SCHEMA_DATA_DIR)))
+    configured_data_dir = policy.get("schemaDataDir")
+    data_dir = (
+        _home_path(str(configured_data_dir))
+        if "schemaDataDir" in policy
+        else checkrun_paths.data_dir() / "checkrun/schemas"
+    )
     return data_dir / schema
 
 

@@ -34,7 +34,11 @@ Show usage and supported file types.
 Maximum number of lint jobs to run concurrently.
 .TP
 .B CHECKRUN_CONFIG_DIR
-Directory for local Checkrun ignore and schema policy.
+Directory for local Checkrun ignore and schema policy. Defaults to
+.I $XDG_CONFIG_HOME/checkrun
+when the XDG root is absolute, or
+.I ~/.config/checkrun
+otherwise.
 .TP
 .B CHECKRUN_PYTHON
 Python interpreter used by Python-backed Checkrun helpers.

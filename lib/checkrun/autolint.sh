@@ -86,7 +86,7 @@ _autolint_usage() {
     "" \
     "Environment:" \
     "  CHECKRUN_AUTOLINT_JOBS  Override parallel worker count (default: min(cores, 8))." \
-    "  CHECKRUN_CONFIG_DIR       Fallback config directory (default: ~/.config/checkrun)."
+    "  CHECKRUN_CONFIG_DIR       Fallback config directory (default: XDG config root)."
 }
 
 _lint_one_with_plan() {

@@ -48,7 +48,15 @@ _abs_path() {
 }
 
 _checkrun_config_dir() {
-  local dir="${CHECKRUN_CONFIG_DIR:-$HOME/.config/checkrun}"
+  local dir
+  if [ -n "${CHECKRUN_CONFIG_DIR:-}" ]; then
+    dir="$CHECKRUN_CONFIG_DIR"
+  else
+    case "${XDG_CONFIG_HOME:-}" in
+      /*) dir="${XDG_CONFIG_HOME%/}/checkrun" ;;
+      *) dir="$HOME/.config/checkrun" ;;
+    esac
+  fi
 
   # Resolve existing relative roots once at process startup. Backends may run
   # from package directories or tool-specific cwd choices, so config paths must

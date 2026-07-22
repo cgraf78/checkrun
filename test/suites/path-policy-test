@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# path-policy-test — user config/data directory precedence across shell and Python.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+echo "=== checkrun: XDG path policy ==="
+
+_td=$(_tmpdir)
+_home="$_td/home"
+_xdg_config="$_td/config root"
+_xdg_data="$_td/data root"
+mkdir -p "$_home" "$_xdg_config" "$_xdg_data"
+
+output=$(HOME="$_home" XDG_CONFIG_HOME="$_xdg_config" CHECKRUN_CONFIG_DIR='' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: absolute XDG_CONFIG_HOME is honored" \
+  "$_xdg_config/checkrun" "$output"
+
+output=$(HOME="$_home" XDG_CONFIG_HOME=relative/config CHECKRUN_CONFIG_DIR='' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: relative XDG_CONFIG_HOME is ignored" \
+  "$_home/.config/checkrun" "$output"
+
+mkdir -p "$_td/launch/explicit config"
+output=$(cd "$_td/launch" && HOME="$_home" XDG_CONFIG_HOME="$_xdg_config" \
+  CHECKRUN_CONFIG_DIR='explicit config' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: explicit relative override wins and becomes cwd-independent" \
+  "$_td/launch/explicit config" "$output"
+
+python3 - "$CHECKRUN_REPO_ROOT" "$_home" "$_xdg_config" "$_xdg_data" "$_td/launch" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+root, home, xdg_config, xdg_data, launch = map(Path, sys.argv[1:])
+os.environ["HOME"] = str(home)
+sys.path.insert(0, str(root / "lib/checkrun"))
+sys.path.insert(0, str(root / "lib/checkrun/schemas"))
+
+import checkrun_paths as paths
+import schema_policy
+
+os.environ.pop("CHECKRUN_CONFIG_DIR", None)
+os.environ.pop("CHECKRUN_SCHEMA_ASSOCIATIONS", None)
+os.environ["XDG_CONFIG_HOME"] = str(xdg_config)
+os.environ["XDG_DATA_HOME"] = str(xdg_data)
+assert paths.config_dir() == xdg_config / "checkrun"
+assert paths.data_dir() == xdg_data
+assert schema_policy.policy_path() == xdg_config / "checkrun/associations.json"
+assert schema_policy.schema_path({}, {"schema": "settings.schema.json"}) == (
+    xdg_data / "checkrun/schemas/settings.schema.json"
+)
+
+os.environ["XDG_CONFIG_HOME"] = "relative/config"
+os.environ["XDG_DATA_HOME"] = "relative/data"
+assert paths.config_dir() == home / ".config/checkrun"
+assert paths.data_dir() == home / ".local/share"
+
+os.chdir(launch)
+os.environ["CHECKRUN_CONFIG_DIR"] = "explicit config"
+assert paths.config_dir() == launch / "explicit config"
+os.environ["CHECKRUN_SCHEMA_ASSOCIATIONS"] = "policy/associations.json"
+assert schema_policy.policy_path() == home / "policy/associations.json"
+assert schema_policy.schema_path(
+    {"schemaDataDir": "custom/schemas"}, {"schema": "settings.schema.json"}
+) == home / "custom/schemas/settings.schema.json"
+PY
+_assert_exit "Python policy: config, data, and explicit precedence agree" 0 "$?"
+
+mkdir -p "$_xdg_config/checkrun" "$_td/project"
+printf '*target.py\n' >"$_xdg_config/checkrun/ignore"
+printf 'value = 1\n' >"$_td/project/target.py"
+output=$(HOME="$_home" XDG_CONFIG_HOME="$_xdg_config" CHECKRUN_CONFIG_DIR='' \
+  "$CHECKRUN_REPO_ROOT/bin/checkrun" explain --json "$_td/project/target.py" 2>&1)
+_assert_contains "CLI policy: direct Python dispatch receives shell-resolved XDG config" \
+  '"ignored":true' "$output"
+
+_test_summary

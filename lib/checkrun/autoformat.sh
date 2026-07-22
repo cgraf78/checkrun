@@ -2,7 +2,7 @@
 # autoformat implementation — auto-format files by extension.
 # Requires yq, which should be installed by the host bootstrap path.
 # No-ops gracefully if a formatter is not installed.
-# Respects per-repo config files; uses ~/.config/checkrun/ when absent.
+# Respects per-repo config files; uses Checkrun's XDG config root when absent.
 #
 # Usage: autoformat [-h|--help] <file> [file...]
 
