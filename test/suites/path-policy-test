@@ -33,7 +33,7 @@ _assert_eq "shell config: absolute XDG_CONFIG_HOME does not require HOME" \
 output=$(HOME="$_home" XDG_CONFIG_HOME=relative/config CHECKRUN_CONFIG_DIR='' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: relative XDG_CONFIG_HOME is ignored" \
-  "$_home/.config/checkrun" "$output"
+  "$(_canonical_test_path "$_home")/.config/checkrun" "$output"
 
 mkdir -p "$_td/launch/explicit config"
 # Python resolves explicit overrides to filesystem identity. On macOS, temp
@@ -103,7 +103,13 @@ HOME="$_home" CHECKRUN_CONFIG_DIR="$newline_override" \
 HOME="$_home" CHECKRUN_CONFIG_DIR="$newline_override" \
   bash -c '. "$1"; _checkrun_resolve_config_dir resolved; printf "%s" "$resolved"' \
   bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh" >"$_td/config-path.actual"
-cmp -s "$_td/config-path.expected" "$_td/config-path.actual"
+python3 - "$_td/config-path.expected" "$_td/config-path.actual" <<'PY'
+import sys
+from pathlib import Path
+
+expected, actual = map(Path, sys.argv[1:])
+raise SystemExit(expected.read_bytes() != actual.read_bytes())
+PY
 _assert_exit "shell config: explicit trailing newline bytes survive resolution" 0 "$?"
 
 newline_xdg="$_td/xdg with newline"$'\n'
@@ -114,7 +120,13 @@ env -u CHECKRUN_CONFIG_DIR HOME="$_home" XDG_CONFIG_HOME="$newline_xdg" \
 env -u CHECKRUN_CONFIG_DIR HOME="$_home" XDG_CONFIG_HOME="$newline_xdg" \
   bash -c '. "$1"; _checkrun_resolve_config_dir resolved; printf "%s" "$resolved"' \
   bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh" >"$_td/xdg-path.actual"
-cmp -s "$_td/xdg-path.expected" "$_td/xdg-path.actual"
+python3 - "$_td/xdg-path.expected" "$_td/xdg-path.actual" <<'PY'
+import sys
+from pathlib import Path
+
+expected, actual = map(Path, sys.argv[1:])
+raise SystemExit(expected.read_bytes() != actual.read_bytes())
+PY
 _assert_exit "shell config: XDG trailing newline bytes survive resolution" 0 "$?"
 
 if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
@@ -211,9 +223,10 @@ for resolver in (paths.config_dir, paths.data_dir, schema_policy.policy_path):
         raise AssertionError(f"{resolver.__name__} accepted a fallback without HOME")
 
 os.environ["HOME"] = str(home)
+resolved_home = home.resolve()
 
-assert paths.config_dir() == home / ".config/checkrun"
-assert paths.data_dir() == home / ".local/share"
+assert paths.config_dir() == resolved_home / ".config/checkrun"
+assert paths.data_dir() == resolved_home / ".local/share"
 
 os.chdir(launch)
 os.environ["CONFIG_ROOT"] = str(temp / "env root")
@@ -230,10 +243,10 @@ for override, expected in (
     os.environ["CHECKRUN_CONFIG_DIR"] = override
     assert paths.config_dir() == expected.resolve()
 os.environ["CHECKRUN_SCHEMA_ASSOCIATIONS"] = "policy/associations.json"
-assert schema_policy.policy_path() == home / "policy/associations.json"
+assert schema_policy.policy_path() == resolved_home / "policy/associations.json"
 assert schema_policy.schema_path(
     {"schemaDataDir": "custom/schemas"}, {"schema": "settings.schema.json"}
-) == home / "custom/schemas/settings.schema.json"
+) == resolved_home / "custom/schemas/settings.schema.json"
 PY
 _assert_exit "Python policy: config, data, and explicit precedence agree" 0 "$?"
 
