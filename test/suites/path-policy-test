@@ -256,7 +256,8 @@ _assert_contains "schema lint: loaded path failure is actionable" \
 _assert_not_contains "schema lint: loaded path failure omits traceback" \
   "Traceback" "$output"
 
-for args in "--help" "registry --json" "capabilities --json" "schema --help" "verify --help"; do
+for args in "--help" "registry --json" "capabilities --json" "schema --help" \
+  "schema refresh --help" "verify --help"; do
   read -r -a test_argv <<<"$args"
   if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
     "$CHECKRUN_REPO_ROOT/bin/checkrun" "${test_argv[@]}" 2>&1); then
