@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Iterable
+from functools import lru_cache
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
@@ -41,11 +42,6 @@ if str(_MODULE_DIR) not in sys.path:
 
 import checkrun_paths  # noqa: E402  # Direct script loads parent-owned policy.
 
-# Resolve HOME once per process so CLIs, tests, and editors all interpret the
-# same policy file against the same root. Hosts provide their policy under
-# Checkrun's config namespace; the policy data may still match files owned by
-# integration repos, app repos, or any other host harness.
-_HOME = Path.home()
 _CHECKRUN_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_POLICY_SCHEMA = _CHECKRUN_ROOT / "share/checkrun/schemas/associations.schema.json"
 
@@ -60,6 +56,13 @@ __all__ = [
 ]
 
 
+@lru_cache(maxsize=1)
+def _home() -> Path:
+    """Resolve HOME once, and only for policy forms whose contract requires it."""
+
+    return Path.home()
+
+
 def load_json(path: Path) -> Any:
     """Load a JSON policy or schema document from `path`."""
 
@@ -69,26 +72,26 @@ def load_json(path: Path) -> Any:
 
 def _home_path(value: str) -> Path:
     if value.startswith("$HOME/"):
-        return _HOME / value[len("$HOME/") :]
+        return _home() / value[len("$HOME/") :]
     if value.startswith("~/"):
-        return _HOME / value[2:]
+        return _home() / value[2:]
     path = Path(value)
     if path.is_absolute():
         return path
-    return _HOME / value
+    return _home() / value
 
 
 def _home_string(value: str) -> str:
     # Editor-facing schema URLs can be either real URLs or file URLs. Expand
     # HOME inside file URLs without disturbing normal https:// sources.
     if value.startswith("file://$HOME"):
-        return value.replace("file://$HOME", "file://" + str(_HOME), 1)
+        return value.replace("file://$HOME", "file://" + str(_home()), 1)
     if value.startswith("file://~"):
-        return value.replace("file://~", "file://" + str(_HOME), 1)
+        return value.replace("file://~", "file://" + str(_home()), 1)
     if value.startswith("$HOME/") or value.startswith("~/"):
         return str(_home_path(value))
     if value.startswith("$HOME"):
-        return value.replace("$HOME", str(_HOME), 1)
+        return value.replace("$HOME", str(_home()), 1)
     return value
 
 
@@ -198,7 +201,7 @@ def schema_path(policy: dict[str, Any], association: dict[str, Any]) -> Path:
         # Paths with directories are host-local config/data paths. Keep them
         # anchored under HOME while bare public-schema payload names stay under
         # schemaDataDir.
-        return _HOME / schema
+        return _home() / schema
     configured_data_dir = policy.get("schemaDataDir")
     data_dir = (
         _home_path(str(configured_data_dir))
@@ -258,7 +261,7 @@ def _expanded_patterns(patterns: Iterable[Any]) -> list[str]:
             continue
         candidates = [_home_string(pattern)]
         if not pattern.startswith(("/", "$HOME/", "~/")):
-            candidates.extend([str(_HOME / pattern), f"**/{pattern}"])
+            candidates.extend([str(_home() / pattern), f"**/{pattern}"])
         for candidate in candidates:
             if candidate not in seen:
                 seen.add(candidate)
@@ -270,7 +273,7 @@ def _candidates(path: Path) -> set[str]:
     absolute = str(path)
     names = {absolute}
     try:
-        names.add(str(path.relative_to(_HOME)))
+        names.add(str(path.relative_to(_home())))
     except ValueError:
         pass
     return names

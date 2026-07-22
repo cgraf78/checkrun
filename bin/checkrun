@@ -32,7 +32,7 @@ CHECKRUN_LIB_DIR="$_bin_dir/../lib/checkrun"
 
 # Resolve once before dispatch so shell adapters and Python policy consumers
 # share one cwd-independent configuration root.
-CHECKRUN_CONFIG_DIR=$(_checkrun_config_dir)
+CHECKRUN_CONFIG_DIR=$(_checkrun_config_dir) || exit
 export CHECKRUN_CONFIG_DIR
 
 _run_registry() {

@@ -54,7 +54,13 @@ _checkrun_config_dir() {
   else
     case "${XDG_CONFIG_HOME:-}" in
       /*) dir="${XDG_CONFIG_HOME%/}/checkrun" ;;
-      *) dir="$HOME/.config/checkrun" ;;
+      *)
+        if [ -z "${HOME:-}" ]; then
+          printf 'checkrun: HOME is required when XDG_CONFIG_HOME is unset or relative\n' >&2
+          return 1
+        fi
+        dir="$HOME/.config/checkrun"
+        ;;
     esac
   fi
 

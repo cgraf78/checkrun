@@ -9,7 +9,7 @@ from pathlib import Path
 __all__ = ["config_dir", "data_dir"]
 
 
-def _xdg_root(variable: str, fallback: Path) -> Path:
+def _xdg_root(variable: str, fallback: str) -> Path:
     """Return an absolute XDG root or its HOME-derived fallback."""
 
     value = os.environ.get(variable)
@@ -17,7 +17,9 @@ def _xdg_root(variable: str, fallback: Path) -> Path:
         path = Path(value)
         if path.is_absolute():
             return path
-    return fallback
+    # Keep HOME discovery lazy. An absolute XDG root is a complete path and
+    # must remain usable in service or test environments without HOME.
+    return Path.home() / fallback
 
 
 def config_dir() -> Path:
@@ -30,10 +32,10 @@ def config_dir() -> Path:
         if not path.is_absolute():
             path = Path.cwd() / path
         return path.resolve(strict=False)
-    return _xdg_root("XDG_CONFIG_HOME", Path.home() / ".config") / "checkrun"
+    return _xdg_root("XDG_CONFIG_HOME", ".config") / "checkrun"
 
 
 def data_dir() -> Path:
     """Return the XDG data root used for Checkrun-owned payloads."""
 
-    return _xdg_root("XDG_DATA_HOME", Path.home() / ".local/share")
+    return _xdg_root("XDG_DATA_HOME", ".local/share")

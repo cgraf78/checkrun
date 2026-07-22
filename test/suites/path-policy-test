@@ -23,6 +23,12 @@ output=$(HOME="$_home" XDG_CONFIG_HOME="$_xdg_config" CHECKRUN_CONFIG_DIR='' \
 _assert_eq "shell config: absolute XDG_CONFIG_HOME is honored" \
   "$_xdg_config/checkrun" "$output"
 
+# shellcheck disable=SC2016 # $1 expands inside the isolated shell.
+output=$(env -u HOME XDG_CONFIG_HOME="$_xdg_config" CHECKRUN_CONFIG_DIR='' \
+  bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
+_assert_eq "shell config: absolute XDG_CONFIG_HOME does not require HOME" \
+  "$_xdg_config/checkrun" "$output"
+
 output=$(HOME="$_home" XDG_CONFIG_HOME=relative/config CHECKRUN_CONFIG_DIR='' \
   bash -c '. "$1"; _checkrun_config_dir' bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh")
 _assert_eq "shell config: relative XDG_CONFIG_HOME is ignored" \
@@ -52,12 +58,25 @@ os.environ.pop("CHECKRUN_CONFIG_DIR", None)
 os.environ.pop("CHECKRUN_SCHEMA_ASSOCIATIONS", None)
 os.environ["XDG_CONFIG_HOME"] = str(xdg_config)
 os.environ["XDG_DATA_HOME"] = str(xdg_data)
-assert paths.config_dir() == xdg_config / "checkrun"
-assert paths.data_dir() == xdg_data
-assert schema_policy.policy_path() == xdg_config / "checkrun/associations.json"
-assert schema_policy.schema_path({}, {"schema": "settings.schema.json"}) == (
-    xdg_data / "checkrun/schemas/settings.schema.json"
-)
+os.environ.pop("HOME", None)
+original_home = Path.home
+
+
+def unexpected_home(_cls):
+    raise AssertionError("unexpected HOME lookup")
+
+
+Path.home = classmethod(unexpected_home)
+try:
+    assert paths.config_dir() == xdg_config / "checkrun"
+    assert paths.data_dir() == xdg_data
+    assert schema_policy.policy_path() == xdg_config / "checkrun/associations.json"
+    assert schema_policy.schema_path({}, {"schema": "settings.schema.json"}) == (
+        xdg_data / "checkrun/schemas/settings.schema.json"
+    )
+finally:
+    Path.home = original_home
+    os.environ["HOME"] = str(home)
 
 os.environ["XDG_CONFIG_HOME"] = "relative/config"
 os.environ["XDG_DATA_HOME"] = "relative/data"
@@ -66,7 +85,7 @@ assert paths.data_dir() == home / ".local/share"
 
 os.chdir(launch)
 os.environ["CHECKRUN_CONFIG_DIR"] = "explicit config"
-assert paths.config_dir() == launch / "explicit config"
+assert paths.config_dir() == (launch / "explicit config").resolve()
 os.environ["CHECKRUN_SCHEMA_ASSOCIATIONS"] = "policy/associations.json"
 assert schema_policy.policy_path() == home / "policy/associations.json"
 assert schema_policy.schema_path(
