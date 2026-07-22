@@ -93,6 +93,30 @@ else
   _pass "shell config: explicit override does not execute commands"
 fi
 
+# Compare raw bytes through files. Capturing either side with `$(...)` would
+# itself erase the trailing newline this regression protects.
+newline_override="$_td/config with newline"$'\n'
+HOME="$_home" CHECKRUN_CONFIG_DIR="$newline_override" \
+  python3 "$CHECKRUN_REPO_ROOT/lib/checkrun/checkrun_paths.py" config \
+  >"$_td/config-path.expected"
+# shellcheck disable=SC2016 # expansions belong to the isolated shell.
+HOME="$_home" CHECKRUN_CONFIG_DIR="$newline_override" \
+  bash -c '. "$1"; _checkrun_resolve_config_dir resolved; printf "%s" "$resolved"' \
+  bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh" >"$_td/config-path.actual"
+cmp -s "$_td/config-path.expected" "$_td/config-path.actual"
+_assert_exit "shell config: explicit trailing newline bytes survive resolution" 0 "$?"
+
+newline_xdg="$_td/xdg with newline"$'\n'
+env -u CHECKRUN_CONFIG_DIR HOME="$_home" XDG_CONFIG_HOME="$newline_xdg" \
+  python3 "$CHECKRUN_REPO_ROOT/lib/checkrun/checkrun_paths.py" config \
+  >"$_td/xdg-path.expected"
+# shellcheck disable=SC2016 # expansions belong to the isolated shell.
+env -u CHECKRUN_CONFIG_DIR HOME="$_home" XDG_CONFIG_HOME="$newline_xdg" \
+  bash -c '. "$1"; _checkrun_resolve_config_dir resolved; printf "%s" "$resolved"' \
+  bash "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh" >"$_td/xdg-path.actual"
+cmp -s "$_td/xdg-path.expected" "$_td/xdg-path.actual"
+_assert_exit "shell config: XDG trailing newline bytes survive resolution" 0 "$?"
+
 if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
   "$CHECKRUN_REPO_ROOT/bin/autoformat" "$_td/missing.py" 2>&1); then
   rc=0
@@ -112,6 +136,32 @@ fi
 _assert_exit "direct autolint: unresolved config root exits nonzero" 1 "$rc"
 _assert_contains "direct autolint: unresolved config root reports HOME requirement" \
   "HOME is required" "$output"
+
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR XDG_CONFIG_HOME=relative/config \
+  python3 "$CHECKRUN_REPO_ROOT/lib/checkrun/checkrun_paths.py" config 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "Python config CLI: unresolved fallback exits nonzero" 1 "$rc"
+_assert_contains "Python config CLI: unresolved fallback is actionable" \
+  "HOME is required" "$output"
+_assert_not_contains "Python config CLI: expected path failure omits traceback" \
+  "Traceback" "$output"
+
+if output=$(env -u HOME -u CHECKRUN_CONFIG_DIR -u CHECKRUN_SCHEMA_ASSOCIATIONS \
+  XDG_CONFIG_HOME=relative/config \
+  python3 "$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema_policy.py" \
+  --lsp-schemas 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "schema policy CLI: unresolved fallback exits nonzero" 1 "$rc"
+_assert_contains "schema policy CLI: unresolved fallback is actionable" \
+  "HOME is required" "$output"
+_assert_not_contains "schema policy CLI: expected path failure omits traceback" \
+  "Traceback" "$output"
 
 python3 - "$CHECKRUN_REPO_ROOT" "$_td" "$_home" "$_xdg_config" "$_xdg_data" \
   "$_td/launch" <<'PY'
@@ -149,10 +199,19 @@ try:
     )
 finally:
     Path.home = original_home
-    os.environ["HOME"] = str(home)
 
 os.environ["XDG_CONFIG_HOME"] = "relative/config"
 os.environ["XDG_DATA_HOME"] = "relative/data"
+for resolver in (paths.config_dir, paths.data_dir, schema_policy.policy_path):
+    try:
+        resolver()
+    except paths.PathPolicyError as exc:
+        assert "HOME is required" in str(exc)
+    else:
+        raise AssertionError(f"{resolver.__name__} accepted a fallback without HOME")
+
+os.environ["HOME"] = str(home)
+
 assert paths.config_dir() == home / ".config/checkrun"
 assert paths.data_dir() == home / ".local/share"
 

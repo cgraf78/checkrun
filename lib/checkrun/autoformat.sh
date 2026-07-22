@@ -428,16 +428,16 @@ _autoformat_main() {
     esac
   done
 
-  CHECKRUN_CONFIG_DIR=$(_checkrun_config_dir) || return
-
-  # Export so the Python planner subprocess sees the bash-resolved absolute
-  # path.
-  export CHECKRUN_CONFIG_DIR
-
   # Zero file args is a successful no-op — exit before checking yq so a host
-  # missing yq doesn't error on commands that wouldn't have run anything
+  # missing Python or yq doesn't error on commands that wouldn't have run anything
   # anyway (e.g. `autoformat $(get-changed-files)` with an empty result).
   [ "$#" -eq 0 ] && return 0
+
+  _checkrun_resolve_config_dir CHECKRUN_CONFIG_DIR || return
+
+  # Export so the Python planner subprocess sees the shell-resolved absolute
+  # path without resolving it a second time after a backend changes cwd.
+  export CHECKRUN_CONFIG_DIR
 
   if ! command -v yq >/dev/null 2>&1; then
     echo "autoformat: yq is required" >&2

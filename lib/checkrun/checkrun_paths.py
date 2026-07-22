@@ -5,9 +5,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
-__all__ = ["config_dir", "data_dir"]
+__all__ = ["PathPolicyError", "config_dir", "data_dir", "home_dir"]
+
+
+class PathPolicyError(ValueError):
+    """Raised when a standard user path cannot be resolved safely."""
+
+
+def home_dir() -> Path:
+    """Return the HOME root required by non-XDG fallback paths."""
+
+    value = os.environ.get("HOME")
+    if not value:
+        raise PathPolicyError("HOME is required when no absolute XDG root is available")
+    return Path(value).resolve(strict=False)
 
 
 def _xdg_root(variable: str, fallback: str) -> Path:
@@ -20,7 +34,7 @@ def _xdg_root(variable: str, fallback: str) -> Path:
             return path
     # Keep HOME discovery lazy. An absolute XDG root is a complete path and
     # must remain usable in service or test environments without HOME.
-    return Path.home() / fallback
+    return home_dir() / fallback
 
 
 def config_dir() -> Path:
@@ -49,8 +63,11 @@ def main() -> int:
     parser.add_argument("path", choices=("config",))
     args = parser.parse_args()
 
-    if args.path == "config":
-        print(config_dir())
+    try:
+        if args.path == "config":
+            sys.stdout.write(str(config_dir()))
+    except PathPolicyError as exc:
+        parser.exit(1, f"checkrun: {exc}\n")
     return 0
 
 

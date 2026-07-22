@@ -60,7 +60,7 @@ __all__ = [
 def _home() -> Path:
     """Resolve HOME once, and only for policy forms whose contract requires it."""
 
-    return Path.home()
+    return checkrun_paths.home_dir()
 
 
 def load_json(path: Path) -> Any:
@@ -387,7 +387,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.lsp_schemas:
         parser.error("one output mode is required")
 
-    path = policy_path()
+    try:
+        path = policy_path()
+    except checkrun_paths.PathPolicyError as exc:
+        print(f"schema policy: {exc}", file=sys.stderr)
+        return 1
     if not path.is_file():
         print(json.dumps({"json": [], "yaml": {}, "toml": {}}, separators=(",", ":")))
         return 0

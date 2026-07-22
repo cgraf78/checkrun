@@ -47,36 +47,27 @@ _abs_path() {
   fi
 }
 
-_checkrun_config_dir() {
-  local dir python
-  if [ -n "${CHECKRUN_CONFIG_DIR:-}" ]; then
-    python=$(_checkrun_python 'import sys') || {
-      printf 'checkrun: python3 is required to expand CHECKRUN_CONFIG_DIR\n' >&2
-      return 127
-    }
-    "$python" "$CHECKRUN_LIB_DIR/checkrun_paths.py" config
-    return $?
-  else
-    case "${XDG_CONFIG_HOME:-}" in
-      /*) dir="${XDG_CONFIG_HOME%/}/checkrun" ;;
-      *)
-        if [ -z "${HOME:-}" ]; then
-          printf 'checkrun: HOME is required when XDG_CONFIG_HOME is unset or relative\n' >&2
-          return 1
-        fi
-        dir="$HOME/.config/checkrun"
-        ;;
-    esac
-  fi
+_checkrun_resolve_config_dir() {
+  local destination="$1" python value
+  python=$(_checkrun_python 'import sys') || {
+    printf 'checkrun: python3 is required to resolve the config directory\n' >&2
+    return 127
+  }
+  # Append a non-newline sentinel inside the substitution, then remove only
+  # that byte. Ordinary command substitution would discard trailing newline
+  # bytes from an otherwise-valid explicit override or XDG base path.
+  value=$(
+    "$python" "$CHECKRUN_LIB_DIR/checkrun_paths.py" config || exit
+    printf x
+  ) || return
+  value="${value%x}"
+  printf -v "$destination" '%s' "$value"
+}
 
-  # Resolve existing relative roots once at process startup. Backends may run
-  # from package directories or tool-specific cwd choices, so config paths must
-  # already be cwd-independent before planning hands them to adapters.
-  if [ -d "$dir" ]; then
-    _abs_dir "$dir"
-  else
-    printf '%s\n' "$dir"
-  fi
+_checkrun_config_dir() {
+  local resolved
+  _checkrun_resolve_config_dir resolved || return
+  printf '%s\n' "$resolved"
 }
 
 _checkrun_python_usable() {
