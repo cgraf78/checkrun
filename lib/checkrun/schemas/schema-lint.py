@@ -239,12 +239,7 @@ def _validate_policy_file(
     return _validate_with_schema(path, policy, schema_path, "Checkrun schema association policy")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json", action="store_true", help="emit unified JSON diagnostics")
-    parser.add_argument("files", nargs="*")
-    args = parser.parse_args(argv)
-
+def _run(files: list[str], *, json_output: bool) -> int:
     policy_path = schema_policy.policy_path()
     if not policy_path.is_file():
         return 0
@@ -252,14 +247,14 @@ def main(argv: list[str] | None = None) -> int:
         policy = schema_policy.load_json(policy_path)
     except (JSONDecodeError, OSError) as exc:
         diagnostic = Diagnostic(path=str(policy_path), message=f"schema policy: {exc}")
-        print(diagnostic.as_json() if args.json else diagnostic.as_text())
+        print(diagnostic.as_json() if json_output else diagnostic.as_text())
         return 1
 
-    if args.files:
+    if files:
         _ensure_optional_deps()
 
     diagnostics: list[Diagnostic] = []
-    for file_arg in args.files:
+    for file_arg in files:
         path = Path(file_arg)
         if not path.is_absolute():
             path = Path.cwd() / path
@@ -270,8 +265,22 @@ def main(argv: list[str] | None = None) -> int:
             diagnostics.extend(_validate(policy, path))
 
     for diagnostic in diagnostics:
-        print(diagnostic.as_json() if args.json else diagnostic.as_text())
+        print(diagnostic.as_json() if json_output else diagnostic.as_text())
     return 1 if diagnostics else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true", help="emit unified JSON diagnostics")
+    parser.add_argument("files", nargs="*")
+    args = parser.parse_args(argv)
+
+    try:
+        return _run(args.files, json_output=args.json)
+    except schema_policy.PathPolicyError as exc:
+        diagnostic = Diagnostic(path="", message=f"schema policy: {exc}")
+        print(diagnostic.as_json() if args.json else diagnostic.as_text())
+        return 1
 
 
 if __name__ == "__main__":

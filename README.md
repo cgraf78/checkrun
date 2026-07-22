@@ -220,9 +220,10 @@ hooks from needing their own Go/Rust/C++ tool-selection tables.
 
 ## Configs
 
-Global fallback configs live under `~/.config/checkrun` by default. Set
-`CHECKRUN_CONFIG_DIR` to override the config root for a run. The single config
-root is intentional: several backends,
+Global fallback configs live under `$XDG_CONFIG_HOME/checkrun` when
+`XDG_CONFIG_HOME` is an absolute path, falling back to `~/.config/checkrun`.
+Set `CHECKRUN_CONFIG_DIR` to override the complete config root for a run. The
+single config root is intentional: several backends,
 including Ruff, Biome, Rubocop, Rumdl, and Taplo, use one policy file for both
 formatting and linting.
 
@@ -233,11 +234,13 @@ skip only schema validation, and `tool-ignore` to skip only the language- or
 filetype-specific backend linter. This lets vendored config data avoid
 formatting or spelling churn while still receiving structural validation.
 
-Schema association policy defaults to `~/.config/checkrun/associations.json`.
-Set `CHECKRUN_SCHEMA_ASSOCIATIONS` to point at a different policy file for a
-single run, test fixture, or integration harness. Local schema payload names
-resolve under `.local/share/checkrun/schemas` by default; a policy can override
-that with `schemaDataDir`.
+Schema association policy defaults to `associations.json` in the Checkrun
+config root. Set `CHECKRUN_SCHEMA_ASSOCIATIONS` to point at a different policy
+file for a single run, test fixture, or integration harness. Local schema
+payload names resolve under `$XDG_DATA_HOME/checkrun/schemas` when
+`XDG_DATA_HOME` is absolute, falling back to
+`~/.local/share/checkrun/schemas`; a policy can override that with
+`schemaDataDir`.
 
 Normal schema validation never fetches association `source` URLs. `schema-lint`
 uses local schema payloads through `schema_policy.schema_path()` so hooks and CI

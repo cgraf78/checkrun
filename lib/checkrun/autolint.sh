@@ -86,7 +86,7 @@ _autolint_usage() {
     "" \
     "Environment:" \
     "  CHECKRUN_AUTOLINT_JOBS  Override parallel worker count (default: min(cores, 8))." \
-    "  CHECKRUN_CONFIG_DIR       Fallback config directory (default: ~/.config/checkrun)."
+    "  CHECKRUN_CONFIG_DIR       Fallback config directory (default: XDG config root)."
 }
 
 _lint_one_with_plan() {
@@ -403,7 +403,7 @@ _autolint_main() {
 
   [ "${#file_args[@]}" -eq 0 ] && return 0
 
-  CHECKRUN_CONFIG_DIR=$(_checkrun_config_dir)
+  _checkrun_resolve_config_dir CHECKRUN_CONFIG_DIR || return
 
   # Export so the Python planner subprocess sees the bash-resolved absolute
   # path.

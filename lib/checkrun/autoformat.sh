@@ -2,7 +2,7 @@
 # autoformat implementation — auto-format files by extension.
 # Requires yq, which should be installed by the host bootstrap path.
 # No-ops gracefully if a formatter is not installed.
-# Respects per-repo config files; uses ~/.config/checkrun/ when absent.
+# Respects per-repo config files; uses Checkrun's XDG config root when absent.
 #
 # Usage: autoformat [-h|--help] <file> [file...]
 
@@ -428,16 +428,16 @@ _autoformat_main() {
     esac
   done
 
-  CHECKRUN_CONFIG_DIR=$(_checkrun_config_dir)
-
-  # Export so the Python planner subprocess sees the bash-resolved absolute
-  # path.
-  export CHECKRUN_CONFIG_DIR
-
   # Zero file args is a successful no-op — exit before checking yq so a host
-  # missing yq doesn't error on commands that wouldn't have run anything
+  # missing Python or yq doesn't error on commands that wouldn't have run anything
   # anyway (e.g. `autoformat $(get-changed-files)` with an empty result).
   [ "$#" -eq 0 ] && return 0
+
+  _checkrun_resolve_config_dir CHECKRUN_CONFIG_DIR || return
+
+  # Export so the Python planner subprocess sees the shell-resolved absolute
+  # path without resolving it a second time after a backend changes cwd.
+  export CHECKRUN_CONFIG_DIR
 
   if ! command -v yq >/dev/null 2>&1; then
     echo "autoformat: yq is required" >&2

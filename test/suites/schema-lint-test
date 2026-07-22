@@ -204,11 +204,13 @@ cat >"$_home/.config/sley/verify.d/local.json" <<'JSON'
 JSON
 
 _default_home="$_td/default-home"
+_default_xdg_config="$_td/default-config"
+_default_xdg_data="$_td/default-data"
 mkdir -p \
-  "$_default_home/.config/checkrun" \
+  "$_default_xdg_config/checkrun" \
   "$_default_home/.config/example" \
-  "$_default_home/.local/share/checkrun/schemas"
-cat >"$_default_home/.local/share/checkrun/schemas/default-settings.schema.json" <<'JSON'
+  "$_default_xdg_data/checkrun/schemas"
+cat >"$_default_xdg_data/checkrun/schemas/default-settings.schema.json" <<'JSON'
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
@@ -218,7 +220,7 @@ cat >"$_default_home/.local/share/checkrun/schemas/default-settings.schema.json"
   }
 }
 JSON
-cat >"$_default_home/.config/checkrun/associations.json" <<'JSON'
+cat >"$_default_xdg_config/checkrun/associations.json" <<'JSON'
 {
   "version": 1,
   "associations": [
@@ -237,14 +239,18 @@ cat >"$_default_home/.config/example/settings.json" <<'JSON'
 JSON
 
 set +e
-output=$(HOME="$_default_home" "$SCRIPT" "$_default_home/.config/example/settings.json" 2>&1)
+output=$(HOME="$_default_home" XDG_CONFIG_HOME="$_default_xdg_config" \
+  XDG_DATA_HOME="$_default_xdg_data" "$SCRIPT" \
+  "$_default_home/.config/example/settings.json" 2>&1)
 rc=$?
 set -e
 _assert_exit "default policy: checkrun config path is used" 1 "$rc"
 _assert_contains "default policy: checkrun schema data dir is used" "Default settings" "$output"
 
 set +e
-output=$(HOME="$_default_home" "$SCRIPT" "$_default_home/.config/checkrun/associations.json" 2>&1)
+output=$(HOME="$_default_home" XDG_CONFIG_HOME="$_default_xdg_config" \
+  XDG_DATA_HOME="$_default_xdg_data" "$SCRIPT" \
+  "$_default_xdg_config/checkrun/associations.json" 2>&1)
 rc=$?
 set -e
 _assert_exit "default policy: schemaDataDir is optional" 0 "$rc"
@@ -374,6 +380,7 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 
 assert module.__all__ == [
+    "PathPolicyError",
     "load_json",
     "policy_path",
     "policy_schema_path",

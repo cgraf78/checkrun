@@ -76,10 +76,11 @@ Checkrun owns:
 Dotfiles or project repos own:
 
 - actual config file contents
-- global fallback config files under `~/.config/checkrun`
+- global fallback config files under an absolute `$XDG_CONFIG_HOME/checkrun`,
+  or `$HOME/.config/checkrun` when the XDG root is unset or relative
 - project-local tool configs
 - ignore files under the configured Checkrun config root
-- schema association policy instances under `~/.config/checkrun`
+- schema association policy instances under the same configured Checkrun root
 
 Checkrun owns the schema association interpreter and schema for association
 policy documents. Dotfiles owns the default association policy instance. The
@@ -432,9 +433,13 @@ Adapters still own CLI details such as `--config`, `--config-path`,
 
 Config root semantics:
 
-- `CHECKRUN_CONFIG_DIR` defaults to `~/.config/checkrun`.
-- `~` and environment variables in configured roots should be expanded before
-  paths are normalized.
+- when `CHECKRUN_CONFIG_DIR` is unset, the config root is
+  `$XDG_CONFIG_HOME/checkrun` if `XDG_CONFIG_HOME` is absolute, otherwise
+  `$HOME/.config/checkrun`; resolution fails if that fallback requires an
+  unavailable `HOME`.
+- `CHECKRUN_CONFIG_DIR` overrides the complete config root. `~` and environment
+  variables in the override are expanded before paths are normalized without
+  evaluating shell command substitutions.
 - relative config roots must be resolved to absolute paths before adapters run,
   because several tools change cwd or discover configs from cwd instead of the
   target file path.

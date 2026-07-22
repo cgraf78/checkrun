@@ -28,6 +28,12 @@ from typing import Any
 
 import tomllib
 
+_MODULE_DIR = Path(__file__).resolve().parent
+if str(_MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(_MODULE_DIR))
+
+import checkrun_paths  # noqa: E402  # Direct-file facade loads sibling policy.
+
 __all__ = [
     "RegistryError",
     "load_registry",
@@ -633,14 +639,7 @@ def _config_root() -> Path:
     # discover config from process cwd. Shell entrypoints export their resolved
     # value so planning and execution agree; direct `checkrun plan/explain`
     # callers use the same default here.
-    value = os.environ.get("CHECKRUN_CONFIG_DIR")
-    if not value:
-        value = str(Path.home() / ".config/checkrun")
-    value = os.path.expandvars(os.path.expanduser(value))
-    path = Path(value)
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return path.resolve(strict=False)
+    return checkrun_paths.config_dir()
 
 
 def _walk_config(dir_path: Path, filename: str) -> Path | None:
@@ -1272,6 +1271,6 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except RegistryError as exc:
+    except (RegistryError, checkrun_paths.PathPolicyError) as exc:
         print(f"checkrun registry: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
