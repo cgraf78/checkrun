@@ -21,6 +21,104 @@ POLICY_SCHEMA="$CHECKRUN_REPO_ROOT/share/checkrun/schemas/associations.schema.js
 echo "=== schema-lint: public schema API ==="
 
 _assert_file_exists "policy schema: repo schema file is tracked" "$POLICY_SCHEMA"
+python3 - "$POLICY_SCHEMA" "$CHECKRUN_REPO_ROOT/lib/checkrun/schemas" <<'PY'
+import json
+import sys
+
+schema_path, module_dir = sys.argv[1:]
+sys.path.insert(0, module_dir)
+import schema_policy  # noqa: E402
+
+with open(schema_path, encoding="utf-8") as handle:
+    schema = json.load(handle)
+
+association = schema["properties"]["associations"]["items"]
+assert schema_policy._POLICY_FIELDS == frozenset(schema["properties"])
+assert schema_policy._POLICY_REQUIRED == frozenset(schema["required"])
+assert schema_policy._ASSOCIATION_FIELDS == frozenset(association["properties"])
+assert schema_policy._ASSOCIATION_REQUIRED == frozenset(association["required"])
+assert schema_policy._FORMATS == frozenset(association["properties"]["format"]["enum"])
+PY
+_assert_exit "policy schema: runtime shape constants match canonical schema" 0 "$?"
+
+_schema_python=(python3)
+if ! python3 -c 'import jsonschema' 2>/dev/null; then
+  if command -v uv >/dev/null 2>&1; then
+    _schema_python=(uv run --quiet --with jsonschema python)
+  else
+    _schema_python=()
+  fi
+fi
+if [[ "${#_schema_python[@]}" -gt 0 ]]; then
+  "${_schema_python[@]}" - "$POLICY_SCHEMA" "$CHECKRUN_REPO_ROOT/lib/checkrun/schemas" <<'PY'
+import copy
+import json
+import sys
+
+import jsonschema
+
+schema_path, module_dir = sys.argv[1:]
+sys.path.insert(0, module_dir)
+import schema_policy  # noqa: E402
+
+with open(schema_path, encoding="utf-8") as handle:
+    schema = json.load(handle)
+
+validator_cls = jsonschema.validators.validator_for(schema)
+validator_cls.check_schema(schema)
+validator = validator_cls(schema)
+base = {
+    "version": 1,
+    "schemaDataDir": "schemas",
+    "associations": [
+        {
+            "name": "Example",
+            "format": "json",
+            "schema": "example.schema.json",
+            "dependency": "owner/repo",
+            "source": "https://example.invalid/schema.json",
+            "editorSource": "https://example.invalid/editor-schema.json",
+            "matches": ["**/example.json"],
+            "enforce": True,
+            "note": "Example association",
+        }
+    ],
+}
+
+assert not list(validator.iter_errors(base))
+schema_policy.validate_policy(copy.deepcopy(base))
+
+mutations = {
+    "schemaDataDir": ("schemaDataDir",),
+    "name": ("associations", 0, "name"),
+    "schema": ("associations", 0, "schema"),
+    "dependency": ("associations", 0, "dependency"),
+    "source": ("associations", 0, "source"),
+    "editorSource": ("associations", 0, "editorSource"),
+    "matches": ("associations", 0, "matches", 0),
+    "note": ("associations", 0, "note"),
+}
+
+for field, location in mutations.items():
+    policy = copy.deepcopy(base)
+    parent = policy
+    for component in location[:-1]:
+        parent = parent[component]
+    parent[location[-1]] += "\n"
+    schema_rejected = bool(list(validator.iter_errors(policy)))
+    try:
+        schema_policy.validate_policy(policy)
+    except schema_policy.SchemaPolicyError:
+        runtime_rejected = True
+    else:
+        runtime_rejected = False
+    assert schema_rejected, f"JSON Schema accepted trailing newline in {field}"
+    assert runtime_rejected, f"runtime accepted trailing newline in {field}"
+PY
+  _assert_exit "policy schema: control-character mutations match runtime behavior" 0 "$?"
+else
+  echo "  SKIP: policy schema behavioral parity (jsonschema and uv unavailable)"
+fi
 
 echo "=== schema-lint: policy matching and diagnostics ==="
 
@@ -368,6 +466,249 @@ _assert_exit "policy bootstrap: non-object policy fails without traceback" 1 "$r
 _assert_contains "policy bootstrap: non-object reports policy schema name" "Checkrun schema association policy" "$output"
 _assert_contains "policy bootstrap: non-object reports object type" "object" "$output"
 
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy_dir/associations.json" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: malformed active policy exits nonzero" 1 "$rc"
+_assert_contains "editor policy: malformed active policy is actionable" \
+  "associations is required" "$output"
+_assert_not_contains "editor policy: malformed active policy omits traceback" \
+  "Traceback" "$output"
+
+_fifo_policy="$_bad_policy_dir/fifo-associations.json"
+mkfifo "$_fifo_policy"
+set +e
+output=$(_with_timeout 2 env HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_fifo_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: FIFO active policy exits promptly" 1 "$rc"
+_assert_contains "editor policy: FIFO active policy is rejected as non-regular" \
+  "schema policy is not a regular file: $_fifo_policy" "$output"
+_assert_not_contains "editor policy: FIFO active policy omits traceback" \
+  "Traceback" "$output"
+
+_fifo_policy_link="$_bad_policy_dir/fifo-associations-link.json"
+ln -s "$_fifo_policy" "$_fifo_policy_link"
+set +e
+output=$(_with_timeout 2 env HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_fifo_policy_link" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: symlink to FIFO active policy exits promptly" 1 "$rc"
+_assert_contains "editor policy: symlink to FIFO is rejected as non-regular" \
+  "schema policy is not a regular file: $_fifo_policy_link" "$output"
+_assert_not_contains "editor policy: symlink to FIFO omits traceback" \
+  "Traceback" "$output"
+
+_regular_policy_link="$_bad_policy_dir/regular-associations-link.json"
+ln -s "$_policy" "$_regular_policy_link"
+output=$(env HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_regular_policy_link" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+_assert_exit "editor policy: symlink to regular active policy exits zero" 0 "$rc"
+_assert_contains "editor policy: symlink to regular emits its schema config" \
+  '"json":[' "$output"
+
+_race_policy_link="$_bad_policy_dir/raced-associations-link.json"
+ln -s "$_policy" "$_race_policy_link"
+set +e
+output=$(
+  _with_timeout 2 python3 - "$SCRIPT" "$_race_policy_link" "$_fifo_policy" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+script, policy_arg, fifo_arg = sys.argv[1:]
+script_path = Path(script)
+policy_path = Path(policy_arg)
+fifo_path = Path(fifo_arg)
+sys.path.insert(0, str(script_path.parent))
+spec = importlib.util.spec_from_file_location("schema_lint", script_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+original_is_file = Path.is_file
+swapped = False
+
+
+def raced_is_file(path):
+    global swapped
+    result = original_is_file(path)
+    if not swapped and path == policy_path and result:
+        policy_path.unlink()
+        policy_path.symlink_to(fifo_path)
+        swapped = True
+    return result
+
+
+Path.is_file = raced_is_file
+module.schema_policy.policy_path = lambda: policy_path
+raise SystemExit(module._run([str(policy_path)], json_output=False))
+PY
+)
+rc=$?
+set -e
+_assert_exit "schema lint: raced symlink to FIFO exits promptly" 1 "$rc"
+_assert_contains "schema lint: raced symlink to FIFO is rejected as non-regular" \
+  "schema policy is not a regular file: $_race_policy_link" "$output"
+_assert_not_contains "schema lint: raced symlink to FIFO omits traceback" \
+  "Traceback" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy_dir/associations.json" \
+  "$SCRIPT" "$_home/.config/example/schema.d/test-settings-ok.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "schema lint: malformed active policy exits nonzero" 1 "$rc"
+_assert_contains "schema lint: malformed active policy is actionable" \
+  "associations is required" "$output"
+_assert_not_contains "schema lint: malformed active policy omits traceback" \
+  "Traceback" "$output"
+
+_missing_policy="$_bad_policy_dir/missing-associations.json"
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_missing_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+_assert_exit "editor policy: missing optional policy exits zero" 0 "$rc"
+_assert_eq "editor policy: missing optional policy emits empty config" \
+  '{"json":[],"yaml":{},"toml":{}}' "$output"
+
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_missing_policy" \
+  "$SCRIPT" "$_home/.config/example/schema.d/test-settings-ok.json" 2>&1)
+rc=$?
+_assert_exit "schema lint: missing optional policy exits zero" 0 "$rc"
+_assert_eq "schema lint: missing optional policy stays quiet" "" "$output"
+
+_open_failure_policy="$_bad_policy_dir/open-failure-associations.json"
+# A symlink loop makes open(2) fail for both ordinary users and container root.
+ln -s "$(basename "$_open_failure_policy")" "$_open_failure_policy"
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_open_failure_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: active policy open failure exits nonzero" 1 "$rc"
+_assert_contains "editor policy: active policy open failure names the file" \
+  "cannot read schema policy $_open_failure_policy" "$output"
+_assert_not_contains "editor policy: active policy open failure omits traceback" \
+  "Traceback" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_open_failure_policy" \
+  "$SCRIPT" "$_home/.config/example/schema.d/test-settings-ok.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "schema lint: active policy open failure exits nonzero" 1 "$rc"
+_assert_contains "schema lint: active policy open failure names the file" \
+  "cannot read schema policy $_open_failure_policy" "$output"
+_assert_not_contains "schema lint: active policy open failure omits traceback" \
+  "Traceback" "$output"
+
+python3 - "$POLICY_SCRIPT" "$_open_failure_policy" <<'PY'
+import errno
+import importlib.util
+import sys
+from pathlib import Path
+from unittest import mock
+
+script, policy_arg = sys.argv[1:]
+script_path = Path(script)
+policy_path = Path(policy_arg)
+sys.path.insert(0, str(script_path.parent))
+spec = importlib.util.spec_from_file_location("schema_policy", script_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+denied = PermissionError(errno.EACCES, "Permission denied", str(policy_path))
+with mock.patch.object(module.os, "open", side_effect=denied):
+    try:
+        module._load_policy_document(policy_path)
+    except module.SchemaPolicyError as exc:
+        message = str(exc)
+        assert f"cannot read schema policy {policy_path}" in message
+        assert "Permission denied" in message
+    else:
+        raise AssertionError("PermissionError did not fail closed")
+PY
+_assert_exit "policy loader: PermissionError is actionable" 0 "$?"
+
+_invalid_json_policy="$_bad_policy_dir/invalid-json-associations.json"
+printf '{not-json\n' >"$_invalid_json_policy"
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_invalid_json_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: invalid JSON policy exits nonzero" 1 "$rc"
+_assert_contains "editor policy: invalid JSON policy is actionable" \
+  "invalid JSON in schema policy $_invalid_json_policy" "$output"
+_assert_not_contains "editor policy: invalid JSON policy omits traceback" \
+  "Traceback" "$output"
+
+_huge_number_policy="$_bad_policy_dir/huge-number-associations.json"
+printf '{"version":1%04999d,"associations":[]}\n' 0 >"$_huge_number_policy"
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_huge_number_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: oversized JSON number exits nonzero" 1 "$rc"
+_assert_contains "editor policy: oversized JSON number is actionable" \
+  "invalid JSON in schema policy $_huge_number_policy" "$output"
+_assert_not_contains "editor policy: oversized JSON number omits traceback" \
+  "Traceback" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_huge_number_policy" \
+  "$SCRIPT" "$_home/.config/example/schema.d/test-settings-ok.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "schema lint: oversized JSON number exits nonzero" 1 "$rc"
+_assert_contains "schema lint: oversized JSON number is actionable" \
+  "invalid JSON in schema policy $_huge_number_policy" "$output"
+_assert_not_contains "schema lint: oversized JSON number omits traceback" \
+  "Traceback" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_huge_number_policy" \
+  "$SCRIPT" "$_huge_number_policy" 2>&1)
+rc=$?
+set -e
+_assert_exit "policy self-lint: oversized JSON number exits nonzero" 1 "$rc"
+_assert_contains "policy self-lint: oversized JSON number is actionable" \
+  "invalid JSON in schema policy $_huge_number_policy" "$output"
+_assert_not_contains "policy self-lint: oversized JSON number omits traceback" \
+  "Traceback" "$output"
+
+_invalid_utf_policy="$_bad_policy_dir/invalid-utf-associations.json"
+printf '\377\n' >"$_invalid_utf_policy"
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_invalid_utf_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: invalid UTF-8 policy exits nonzero" 1 "$rc"
+_assert_contains "editor policy: invalid UTF-8 policy is actionable" \
+  "invalid UTF-8 in schema policy $_invalid_utf_policy" "$output"
+_assert_not_contains "editor policy: invalid UTF-8 policy omits traceback" \
+  "Traceback" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_invalid_utf_policy" \
+  "$SCRIPT" "$_invalid_utf_policy" 2>&1)
+rc=$?
+set -e
+_assert_exit "policy self-lint: invalid UTF-8 exits nonzero" 1 "$rc"
+_assert_contains "policy self-lint: invalid UTF-8 is classified correctly" \
+  "invalid UTF-8 in schema policy $_invalid_utf_policy" "$output"
+_assert_not_contains "policy self-lint: invalid UTF-8 omits traceback" \
+  "Traceback" "$output"
+
 python3 - "$POLICY_SCRIPT" <<'PY'
 import importlib.util
 import sys
@@ -381,7 +722,10 @@ spec.loader.exec_module(module)
 
 assert module.__all__ == [
     "PathPolicyError",
+    "SchemaPolicyError",
     "load_json",
+    "load_policy",
+    "validate_policy",
     "policy_path",
     "policy_schema_path",
     "schema_path",

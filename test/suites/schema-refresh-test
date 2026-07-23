@@ -237,7 +237,18 @@ output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy" "$SCRIPT" --c
 rc=$?
 set -e
 _assert_exit "policy: malformed associations exits usage-style non-zero" 2 "$rc"
-_assert_contains "policy: malformed associations is reported" "associations must be a list" "$output"
+_assert_contains "policy: malformed associations is reported" "associations must be an array" "$output"
+
+_huge_policy="$_home/.config/checkrun/huge-number-associations.json"
+printf '{"version":1%04999d,"associations":[]}\n' 0 >"$_huge_policy"
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_huge_policy" "$SCRIPT" --check 2>&1)
+rc=$?
+set -e
+_assert_exit "policy: oversized JSON number exits usage-style non-zero" 2 "$rc"
+_assert_contains "policy: oversized JSON number is actionable" \
+  "invalid JSON in schema policy $_huge_policy" "$output"
+_assert_not_contains "policy: oversized JSON number omits traceback" "Traceback" "$output"
 
 _bad_home=$(_tmpdir)
 set +e

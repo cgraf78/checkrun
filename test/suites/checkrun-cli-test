@@ -256,6 +256,154 @@ assert item["lint"]["schemas"][0]["enforce"] is True
 '
 _assert_exit "explain: reports matching schema association" 0 "$?"
 
+_bad_policy="$_td/bad-associations.json"
+cat >"$_bad_policy" <<'JSON'
+{
+  "version": 1,
+  "associations": {}
+}
+JSON
+
+set +e
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy" \
+  "$CHECKRUN" explain "$_td/.config/example/settings.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "explain: malformed active policy exits usage-style nonzero" 2 "$rc"
+_assert_contains "explain: malformed active policy is actionable" \
+  "associations must be an array" "$output"
+_assert_not_contains "explain: malformed active policy omits traceback" \
+  "Traceback" "$output"
+
+set +e
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy" \
+  "$CHECKRUN" explain --json "$_td/.config/example/settings.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "explain json: malformed active policy exits usage-style nonzero" 2 "$rc"
+_assert_contains "explain json: malformed active policy is actionable" \
+  "associations must be an array" "$output"
+_assert_not_contains "explain json: malformed active policy emits no partial JSON" \
+  '"filetype"' "$output"
+
+set +e
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy" \
+  "$CHECKRUN" plan --json --phase lint "$_td/.config/example/settings.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "plan: malformed active policy exits usage-style nonzero" 2 "$rc"
+_assert_contains "plan: malformed active policy is actionable" \
+  "associations must be an array" "$output"
+_assert_not_contains "plan: malformed active policy emits no partial JSON" \
+  '"files"' "$output"
+
+_fifo_policy="$_td/fifo-associations.json"
+mkfifo "$_fifo_policy"
+set +e
+output=$(_with_timeout 2 env CHECKRUN_SCHEMA_ASSOCIATIONS="$_fifo_policy" \
+  "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "plan: FIFO active policy exits promptly" 2 "$rc"
+_assert_contains "plan: FIFO active policy is rejected as non-regular" \
+  "schema policy is not a regular file: $_fifo_policy" "$output"
+_assert_not_contains "plan: FIFO active policy emits no partial JSON" \
+  '"files"' "$output"
+
+_fifo_policy_link="$_td/fifo-associations-link.json"
+ln -s "$_fifo_policy" "$_fifo_policy_link"
+set +e
+output=$(_with_timeout 2 env CHECKRUN_SCHEMA_ASSOCIATIONS="$_fifo_policy_link" \
+  "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "plan: symlink to FIFO active policy exits promptly" 2 "$rc"
+_assert_contains "plan: symlink to FIFO active policy is rejected as non-regular" \
+  "schema policy is not a regular file: $_fifo_policy_link" "$output"
+_assert_not_contains "plan: symlink to FIFO active policy emits no partial JSON" \
+  '"files"' "$output"
+
+_regular_policy_link="$_td/regular-associations-link.json"
+ln -s "$_policy" "$_regular_policy_link"
+output=$(env CHECKRUN_SCHEMA_ASSOCIATIONS="$_regular_policy_link" \
+  "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+rc=$?
+_assert_exit "plan: symlink to regular active policy exits zero" 0 "$rc"
+_assert_contains "plan: symlink to regular active policy emits its plan" \
+  '"files"' "$output"
+
+_bad_cfg=$(_tmpdir)
+printf '%s\n' '*/settings.json' >"$_bad_cfg/lint-ignore"
+for case_name in format missing ignored; do
+  case "$case_name" in
+    format)
+      case_args=(plan --json --phase format "$_td/.config/example/settings.json")
+      case_env=""
+      ;;
+    missing)
+      case_args=(plan --json --phase lint "$_td/missing.json")
+      case_env=""
+      ;;
+    ignored)
+      case_args=(plan --json --phase lint "$_td/.config/example/settings.json")
+      case_env="$_bad_cfg"
+      ;;
+  esac
+  set +e
+  output=$(CHECKRUN_CONFIG_DIR="$case_env" CHECKRUN_SCHEMA_ASSOCIATIONS="$_bad_policy" \
+    "$CHECKRUN" "${case_args[@]}" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "plan: $case_name path validates malformed active policy" 2 "$rc"
+  _assert_contains "plan: $case_name path reports malformed active policy" \
+    "associations must be an array" "$output"
+  _assert_not_contains "plan: $case_name path emits no partial JSON" \
+    '"files"' "$output"
+done
+
+_huge_policy="$_td/huge-number-associations.json"
+printf '{"version":1%04999d,"associations":[]}\n' 0 >"$_huge_policy"
+set +e
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_huge_policy" \
+  "$CHECKRUN" explain --json "$_td/keep.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "explain json: oversized policy number exits usage-style nonzero" 2 "$rc"
+_assert_contains "explain json: oversized policy number is actionable" \
+  "invalid JSON in schema policy" "$output"
+_assert_not_contains "explain json: oversized policy number omits traceback" \
+  "Traceback" "$output"
+_assert_not_contains "explain json: oversized policy number emits no partial JSON" \
+  '"filetype"' "$output"
+
+_control_policy="$_td/control-character-associations.json"
+cat >"$_control_policy" <<'JSON'
+{
+  "version": 1,
+  "associations": [
+    {
+      "name": "Control byte",
+      "format": "json",
+      "schema": "schema.json",
+      "dependency": "bad\u0000dep",
+      "matches": ["*.json"],
+      "enforce": true
+    }
+  ]
+}
+JSON
+set +e
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_control_policy" \
+  "$CHECKRUN" plan --json --phase lint "$_td/.config/example/settings.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "plan: policy control character exits usage-style nonzero" 2 "$rc"
+_assert_contains "plan: policy control character is actionable" \
+  "dependency must not contain control characters" "$output"
+_assert_not_contains "plan: policy control character omits traceback" "Traceback" "$output"
+_assert_not_contains "plan: policy control character emits no partial JSON" \
+  '"files"' "$output"
+
 echo "=== checkrun: plan ==="
 
 output=$(CHECKRUN_CONFIG_DIR="$_cfg" "$CHECKRUN" plan --json --phase lint "$_td/keep.py" 2>&1)

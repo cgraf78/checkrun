@@ -12,7 +12,8 @@
     },
     "schemaDataDir": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
     },
     "associations": {
       "type": "array",
@@ -48,7 +49,8 @@
         "properties": {
           "name": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
           },
           "format": {
             "type": "string",
@@ -56,26 +58,31 @@
           },
           "schema": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
           },
           "dependency": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
           },
           "source": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
           },
           "editorSource": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
           },
           "matches": {
             "type": "array",
             "minItems": 1,
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
             }
           },
           "enforce": {
@@ -83,7 +90,8 @@
           },
           "note": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": { "pattern": "[\\u0000-\\u001F\\u007F]" }
           }
         }
       }

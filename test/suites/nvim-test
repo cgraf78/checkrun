@@ -19,6 +19,7 @@ fi
 td=$(_tmpdir)
 capabilities_cmd="$td/checkrun-capabilities"
 schema_cmd="$td/checkrun-schema"
+flaky_schema_cmd="$td/checkrun-schema-flaky"
 lua_test="$td/checkrun-nvim-test.lua"
 
 cat >"$capabilities_cmd" <<'SH'
@@ -58,10 +59,26 @@ SH
 
 chmod +x "$capabilities_cmd" "$schema_cmd"
 
+cat >"$flaky_schema_cmd" <<'SH'
+#!/usr/bin/env bash
+marker="${0}.fail-once"
+if [[ -e "$marker" ]]; then
+  rm -f -- "$marker"
+  echo "active schema policy is invalid" >&2
+  exit 2
+fi
+cat <<'JSON'
+{"json":{"https://example.invalid/recovered.schema":["recovered.json"]},"yaml":{},"toml":{}}
+JSON
+SH
+chmod +x "$flaky_schema_cmd"
+touch "${flaky_schema_cmd}.fail-once"
+
 cat >"$lua_test" <<'LUA'
 local root = assert(os.getenv("CHECKRUN_REPO_ROOT"), "CHECKRUN_REPO_ROOT missing")
 local capabilities_cmd = assert(os.getenv("CHECKRUN_CAPABILITIES_CMD"), "CHECKRUN_CAPABILITIES_CMD missing")
 local schema_cmd = assert(os.getenv("CHECKRUN_SCHEMA_CMD"), "CHECKRUN_SCHEMA_CMD missing")
+local flaky_schema_cmd = assert(os.getenv("CHECKRUN_FLAKY_SCHEMA_CMD"), "CHECKRUN_FLAKY_SCHEMA_CMD missing")
 local checkrun_nvim = dofile(root .. "/lib/checkrun/nvim.lua")
 
 local function assert_eq(desc, expected, actual)
@@ -101,6 +118,22 @@ local toml_schemas = checkrun_nvim.toml_schema_associations({
 })
 assert_eq("toml schema command output", "example.toml", toml_schemas["https://example.invalid/toml.schema"][1])
 
+local failed, failure = pcall(checkrun_nvim.json_schemas, {
+  command = { flaky_schema_cmd },
+})
+assert_eq("schema command failure propagates", false, failed)
+if not tostring(failure):find("active schema policy is invalid", 1, true) then
+  error("schema command failure is actionable: " .. tostring(failure), 0)
+end
+local recovered = checkrun_nvim.json_schemas({
+  command = { flaky_schema_cmd },
+})
+assert_eq(
+  "schema command failure is not cached as empty policy",
+  "recovered.json",
+  recovered["https://example.invalid/recovered.schema"][1]
+)
+
 local before_init = checkrun_nvim.yaml_before_init({
   command = { schema_cmd },
   env = { CHECKRUN_NVIM_TEST_ENV = "present" },
@@ -134,6 +167,7 @@ output=$(
   CHECKRUN_REPO_ROOT="$CHECKRUN_REPO_ROOT" \
     CHECKRUN_CAPABILITIES_CMD="$capabilities_cmd" \
     CHECKRUN_SCHEMA_CMD="$schema_cmd" \
+    CHECKRUN_FLAKY_SCHEMA_CMD="$flaky_schema_cmd" \
     nvim --headless --clean -n -u NONE -i NONE -l "$lua_test" 2>&1
 )
 rc=$?
