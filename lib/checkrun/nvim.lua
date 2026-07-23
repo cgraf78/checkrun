@@ -55,7 +55,7 @@ end
 local function system_json(command, opts)
   opts = opts or {}
   if not executable(command) then
-    return nil
+    return nil, "command is not executable: " .. tostring(command and command[1] or "")
   end
 
   local result
@@ -70,7 +70,7 @@ local function system_json(command, opts)
         :wait()
     end)
     if not ok then
-      return nil
+      return nil, "command failed to start: " .. tostring(completed)
     end
     result = completed
   else
@@ -85,15 +85,26 @@ local function system_json(command, opts)
     end
   end
 
-  if not result or result.code ~= 0 or result.stdout == "" then
-    return nil
+  if not result then
+    return nil, "command returned no result"
+  end
+  if result.code ~= 0 then
+    local detail = result.stderr or result.stdout or ""
+    detail = detail:gsub("%s+$", "")
+    if detail == "" then
+      detail = "command exited with status " .. tostring(result.code)
+    end
+    return nil, detail
+  end
+  if result.stdout == "" then
+    return nil, "command produced no JSON output"
   end
 
   local ok, decoded = pcall(vim.json.decode, result.stdout)
   if ok and type(decoded) == "table" then
     return decoded
   end
-  return nil
+  return nil, "command produced invalid JSON: " .. tostring(decoded)
 end
 
 local function normalize_capabilities(capabilities)
@@ -133,8 +144,12 @@ local function schema_editor_config(opts)
     return deepcopy(schema_cache[key])
   end
 
-  schema_cache[key] = system_json(command, opts) or {}
-  return deepcopy(schema_cache[key])
+  local config, command_error = system_json(command, opts)
+  if config == nil then
+    error("checkrun schema policy: " .. tostring(command_error), 2)
+  end
+  schema_cache[key] = config
+  return deepcopy(config)
 end
 
 local function schema_config(kind, opts)

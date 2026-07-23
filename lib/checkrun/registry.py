@@ -795,7 +795,7 @@ def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
     return {"ignored": False}
 
 
-def _schema_associations(path: Path) -> list[dict[str, Any]]:
+def _load_schema_policy() -> tuple[Any, dict[str, Any] | None]:
     # Schema association policy remains outside the tooling registry. The plan
     # reports matching associations for explainability, but the association file
     # itself is still owned by dotfiles/project policy.
@@ -803,15 +803,22 @@ def _schema_associations(path: Path) -> list[dict[str, Any]]:
     sys.path.insert(0, str(schemas_dir))
     try:
         import schema_policy  # type: ignore
-    except ImportError:
-        return []
+    except ImportError as exc:
+        raise RegistryError(f"cannot load schema policy interpreter: {exc}") from exc
 
     policy_path = schema_policy.policy_path()
-    if not policy_path.is_file():
-        return []
     try:
-        policy = schema_policy.load_json(policy_path)
-    except Exception:
+        policy = schema_policy.load_policy(policy_path)
+    except schema_policy.SchemaPolicyError as exc:
+        raise RegistryError(str(exc)) from exc
+    return schema_policy, policy
+
+
+def _schema_associations(
+    path: Path, schema_context: tuple[Any, dict[str, Any] | None]
+) -> list[dict[str, Any]]:
+    schema_policy, policy = schema_context
+    if policy is None:
         return []
 
     result = []
@@ -914,7 +921,13 @@ def _collect_steps(
     return steps, skipped
 
 
-def _plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None) -> dict[str, Any]:
+def _plan_file(
+    registry: dict[str, Any],
+    file_arg: str,
+    phase: str | None = None,
+    *,
+    schema_context: tuple[Any, dict[str, Any] | None],
+) -> dict[str, Any]:
     # Planning inspects local files and config only; it never executes tools.
     # Shell entrypoints consume this as their policy answer and keep adapter
     # invocation separate.
@@ -972,7 +985,7 @@ def _plan_file(registry: dict[str, Any], file_arg: str, phase: str | None = None
             schemas = (
                 []
                 if schema_ignore["ignored"] or lint_ignore["ignored"] or not path.is_file()
-                else _schema_associations(path)
+                else _schema_associations(path, schema_context)
             )
             item["lint"] = {
                 "ignored": lint_ignore["ignored"],
@@ -1010,9 +1023,12 @@ def plan(registry: dict[str, Any], files: list[str], phase: str | None = None) -
     if phase is not None and phase not in _PLAN_PHASES:
         expected = ", ".join(sorted(_PLAN_PHASES))
         raise RegistryError(f"unknown plan phase {phase!r}; expected one of {expected}")
+    schema_context = _load_schema_policy()
     return {
         "version": 1,
-        "files": [_plan_file(registry, file, phase) for file in files],
+        "files": [
+            _plan_file(registry, file, phase, schema_context=schema_context) for file in files
+        ],
     }
 
 
@@ -1059,8 +1075,9 @@ def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, 
     """Return the public JSON payload used by `checkrun explain --json`."""
 
     items = []
+    schema_context = _load_schema_policy()
     for file in files:
-        item = _plan_file(registry, file)
+        item = _plan_file(registry, file, schema_context=schema_context)
         fmt = item["format"]
         lint = item["lint"]
         items.append(

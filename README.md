@@ -242,6 +242,14 @@ payload names resolve under `$XDG_DATA_HOME/checkrun/schemas` when
 `~/.local/share/checkrun/schemas`; a policy can override that with
 `schemaDataDir`.
 
+The policy is optional when no file exists. Once a policy file is present, it
+must be a regular file; symlinks resolving to regular files are accepted, while
+special files are rejected without reading. Checkrun validates the complete
+policy shape before planning, explaining, linting, refreshing, or producing
+editor configuration. Invalid JSON, unreadable files, and malformed associations
+fail with an actionable configuration error instead of silently disabling schema
+policy.
+
 Normal schema validation never fetches association `source` URLs. `schema-lint`
 uses local schema payloads through `schema_policy.schema_path()` so hooks and CI
 remain deterministic offline. Portable LSP consumers can prefer public `source`

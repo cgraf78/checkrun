@@ -228,13 +228,11 @@ def _refresh_candidate(candidate: Candidate, *, check: bool, timeout: float) -> 
 def _load_policy() -> tuple[Path, dict[str, Any]]:
     path = schema_policy.policy_path()
     try:
-        policy = schema_policy.load_json(path)
-    except FileNotFoundError as exc:
-        raise RefreshError(f"schema policy not found: {path}") from exc
-    except (JSONDecodeError, OSError) as exc:
-        raise RefreshError(f"cannot load schema policy {path}: {exc}") from exc
-    if not isinstance(policy, dict):
-        raise RefreshError(f"schema policy must be a JSON object: {path}")
+        policy = schema_policy.load_policy(path)
+    except schema_policy.SchemaPolicyError as exc:
+        raise RefreshError(str(exc)) from exc
+    if policy is None:
+        raise RefreshError(f"schema policy not found: {path}")
     return path, policy
 
 

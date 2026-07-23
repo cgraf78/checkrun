@@ -8,6 +8,7 @@ expand paths, matches, and schema URLs the same way.
 Public contract:
   - `schema_policy.py --lsp-schemas [--editor-sources]`
   - `load_json()`
+  - `load_policy()`
   - `policy_path()`
   - `policy_schema_path()`
   - `schema_path()`
@@ -28,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -44,12 +46,42 @@ import checkrun_paths  # noqa: E402  # Direct script loads parent-owned policy.
 
 PathPolicyError = checkrun_paths.PathPolicyError
 
+
+class SchemaPolicyError(ValueError):
+    """An active schema association policy cannot be parsed or validated."""
+
+
+class _ValidatedPolicy(dict[str, Any]):
+    """Marker for a policy that passed the repository-owned shape contract."""
+
+
 _CHECKRUN_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_POLICY_SCHEMA = _CHECKRUN_ROOT / "share/checkrun/schemas/associations.schema.json"
+_POLICY_FIELDS = frozenset({"version", "schemaDataDir", "associations"})
+_POLICY_REQUIRED = frozenset({"version", "associations"})
+_ASSOCIATION_FIELDS = frozenset(
+    {
+        "name",
+        "format",
+        "schema",
+        "dependency",
+        "source",
+        "editorSource",
+        "matches",
+        "enforce",
+        "note",
+    }
+)
+_ASSOCIATION_REQUIRED = frozenset({"name", "format", "matches", "enforce"})
+_FORMATS = frozenset({"json", "yaml", "toml"})
+_MISSING_POLICY = object()
 
 __all__ = [
     "PathPolicyError",
+    "SchemaPolicyError",
     "load_json",
+    "load_policy",
+    "validate_policy",
     "policy_path",
     "policy_schema_path",
     "schema_path",
@@ -71,6 +103,131 @@ def load_json(path: Path) -> Any:
 
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def _load_active_policy(path: Path) -> Any:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise SchemaPolicyError(f"schema policy is not a regular file: {path}")
+        file = os.fdopen(descriptor, "r", encoding="utf-8")
+        descriptor = -1
+        with file:
+            return json.load(file)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _load_policy_document(path: Path, *, optional: bool = False) -> Any:
+    """Load raw active-policy JSON through one checked file descriptor."""
+
+    try:
+        return _load_active_policy(path)
+    except FileNotFoundError as exc:
+        if optional:
+            return _MISSING_POLICY
+        raise SchemaPolicyError(f"cannot read schema policy {path}: {exc}") from exc
+    except SchemaPolicyError:
+        raise
+    except UnicodeError as exc:
+        raise SchemaPolicyError(f"invalid UTF-8 in schema policy {path}: {exc}") from exc
+    except JSONDecodeError as exc:
+        raise SchemaPolicyError(f"invalid JSON in schema policy {path}: {exc}") from exc
+    except (ValueError, RecursionError) as exc:
+        raise SchemaPolicyError(f"invalid JSON in schema policy {path}: {exc}") from exc
+    except OSError as exc:
+        raise SchemaPolicyError(f"cannot read schema policy {path}: {exc}") from exc
+
+
+def _nonempty_string(value: Any, field: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise SchemaPolicyError(f"{field} must be a non-empty string")
+    if re.search(r"[\x00-\x1F\x7F]", value):
+        raise SchemaPolicyError(f"{field} must not contain control characters")
+
+
+def _validate_association(value: Any, index: int) -> None:
+    field = f"associations[{index}]"
+    if not isinstance(value, dict):
+        raise SchemaPolicyError(f"{field} must be an object")
+
+    unexpected = sorted(set(value) - _ASSOCIATION_FIELDS)
+    if unexpected:
+        raise SchemaPolicyError(f"{field} has unknown field {unexpected[0]!r}")
+
+    for required in sorted(_ASSOCIATION_REQUIRED):
+        if required not in value:
+            raise SchemaPolicyError(f"{field}.{required} is required")
+
+    _nonempty_string(value["name"], f"{field}.name")
+    if not isinstance(value["format"], str) or value["format"] not in _FORMATS:
+        raise SchemaPolicyError(f"{field}.format must be one of json, yaml, or toml")
+
+    matches = value["matches"]
+    if not isinstance(matches, list) or not matches:
+        raise SchemaPolicyError(f"{field}.matches must be a non-empty array")
+    for match_index, match in enumerate(matches):
+        _nonempty_string(match, f"{field}.matches[{match_index}]")
+
+    if not isinstance(value["enforce"], bool):
+        raise SchemaPolicyError(f"{field}.enforce must be a boolean")
+
+    for optional in ("schema", "dependency", "source", "editorSource", "note"):
+        if optional in value:
+            _nonempty_string(value[optional], f"{field}.{optional}")
+
+    if "schema" not in value and "editorSource" not in value:
+        raise SchemaPolicyError(f"{field} requires schema or editorSource")
+    if value["enforce"] is True and "schema" not in value:
+        raise SchemaPolicyError(f"{field}.schema is required when enforce is true")
+    if "source" in value and "schema" not in value:
+        raise SchemaPolicyError(f"{field}.schema is required when source is set")
+
+
+def validate_policy(policy: Any, *, path: Path | None = None) -> dict[str, Any]:
+    """Validate and return one active schema association policy."""
+
+    if isinstance(policy, _ValidatedPolicy):
+        return policy
+    suffix = f": {path}" if path is not None else ""
+    if not isinstance(policy, dict):
+        raise SchemaPolicyError(f"schema policy must be a JSON object{suffix}")
+
+    unexpected = sorted(set(policy) - _POLICY_FIELDS)
+    if unexpected:
+        raise SchemaPolicyError(f"schema policy has unknown field {unexpected[0]!r}{suffix}")
+    missing = sorted(_POLICY_REQUIRED - set(policy))
+    if missing:
+        raise SchemaPolicyError(f"schema policy {missing[0]} is required{suffix}")
+    version = policy["version"]
+    if isinstance(version, bool) or not isinstance(version, (int, float)) or version != 1:
+        raise SchemaPolicyError(f"schema policy version must be 1{suffix}")
+    if "associations" not in policy:
+        raise SchemaPolicyError(f"schema policy associations is required{suffix}")
+    associations = policy["associations"]
+    if not isinstance(associations, list):
+        raise SchemaPolicyError(f"schema policy associations must be an array{suffix}")
+    if not associations:
+        raise SchemaPolicyError(f"schema policy associations must not be empty{suffix}")
+    try:
+        if "schemaDataDir" in policy:
+            _nonempty_string(policy["schemaDataDir"], "schema policy schemaDataDir")
+        for index, association in enumerate(associations):
+            _validate_association(association, index)
+    except SchemaPolicyError as exc:
+        raise SchemaPolicyError(f"{exc}{suffix}") from exc
+    return _ValidatedPolicy(policy)
+
+
+def load_policy(path: Path | None = None) -> dict[str, Any] | None:
+    """Load an optional active policy, rejecting malformed or unreadable files."""
+
+    target = path if path is not None else policy_path()
+    policy = _load_policy_document(target, optional=True)
+    if policy is _MISSING_POLICY:
+        return None
+    return validate_policy(policy, path=target)
 
 
 def _home_path(value: str) -> Path:
@@ -171,7 +328,7 @@ def _dependency_file_path(dependency: str, asset_path: str) -> Path:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         _shdeps_notice_once(dependency, "oserror", str(exc))
         return Path(f"shdeps:{dependency}/{asset_path}")
     if result.returncode != 0:
@@ -294,19 +451,8 @@ def _matches(path: Path, association: dict[str, Any]) -> bool:
 
 
 def _associations(policy: Any, *, enforce_only: bool = False) -> list[dict[str, Any]]:
-    # A malformed top-level policy should never make consumers traceback. The
-    # policy file itself is validated separately by schema-lint's bootstrap
-    # check; other consumers can safely treat it as having no associations.
-    if not isinstance(policy, dict):
-        return []
-    items = policy.get("associations", [])
-    if not isinstance(items, list):
-        return []
-    return [
-        item
-        for item in items
-        if isinstance(item, dict) and (not enforce_only or item.get("enforce") is True)
-    ]
+    items = validate_policy(policy)["associations"]
+    return [item for item in items if not enforce_only or item.get("enforce") is True]
 
 
 def matching_associations(policy: dict[str, Any], path: Path) -> list[dict[str, Any]]:
@@ -392,15 +538,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         path = policy_path()
-        if not path.is_file():
+        policy = load_policy(path)
+        if policy is None:
             print(json.dumps({"json": [], "yaml": {}, "toml": {}}, separators=(",", ":")))
             return 0
-        policy = load_json(path)
         config = lsp_schema_config(policy, editor_sources=args.editor_sources)
     except PathPolicyError as exc:
         print(f"schema policy: {exc}", file=sys.stderr)
         return 1
-    except (JSONDecodeError, OSError) as exc:
+    except SchemaPolicyError as exc:
         print(f"schema policy: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(config, separators=(",", ":")))

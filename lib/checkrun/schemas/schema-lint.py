@@ -218,13 +218,13 @@ def _is_same_file(left: Path, right: Path) -> bool:
     # spelling the same file differently.
     try:
         return left.resolve() == right.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return left == right
 
 
 def _validate_policy_file(
     policy_path: Path,
-    policy: dict[str, Any],
+    policy: Any,
     path: Path,
 ) -> list[Diagnostic]:
     if not _is_same_file(path, policy_path):
@@ -241,26 +241,52 @@ def _validate_policy_file(
 
 def _run(files: list[str], *, json_output: bool) -> int:
     policy_path = schema_policy.policy_path()
-    if not policy_path.is_file():
-        return 0
-    try:
-        policy = schema_policy.load_json(policy_path)
-    except (JSONDecodeError, OSError) as exc:
-        diagnostic = Diagnostic(path=str(policy_path), message=f"schema policy: {exc}")
-        print(diagnostic.as_json() if json_output else diagnostic.as_text())
-        return 1
-
-    if files:
-        _ensure_optional_deps()
-
-    diagnostics: list[Diagnostic] = []
+    resolved_files = []
     for file_arg in files:
         path = Path(file_arg)
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        resolved_files.append(path if path.is_absolute() else Path.cwd() / path)
+
+    policy_requested = any(
+        path.is_file() and _is_same_file(path, policy_path) for path in resolved_files
+    )
+    diagnostics: list[Diagnostic] = []
+
+    if policy_requested:
+        try:
+            raw_policy = schema_policy._load_policy_document(policy_path)
+        except schema_policy.SchemaPolicyError as exc:
+            diagnostic = Diagnostic(path=str(policy_path), message=f"schema policy: {exc}")
+            print(diagnostic.as_json() if json_output else diagnostic.as_text())
+            return 1
+        _ensure_optional_deps()
+        for path in resolved_files:
+            if path.is_file() and _is_same_file(path, policy_path):
+                diagnostics.extend(_validate_policy_file(policy_path, raw_policy, path))
+        if diagnostics:
+            for diagnostic in diagnostics:
+                print(diagnostic.as_json() if json_output else diagnostic.as_text())
+            return 1
+        try:
+            policy = schema_policy.validate_policy(raw_policy, path=policy_path)
+        except schema_policy.SchemaPolicyError as exc:
+            diagnostic = Diagnostic(path=str(policy_path), message=f"schema policy: {exc}")
+            print(diagnostic.as_json() if json_output else diagnostic.as_text())
+            return 1
+    else:
+        try:
+            policy = schema_policy.load_policy(policy_path)
+        except schema_policy.SchemaPolicyError as exc:
+            diagnostic = Diagnostic(path=str(policy_path), message=f"schema policy: {exc}")
+            print(diagnostic.as_json() if json_output else diagnostic.as_text())
+            return 1
+        if policy is None:
+            return 0
+        if files:
+            _ensure_optional_deps()
+
+    for path in resolved_files:
         if path.is_file():
             if _is_same_file(path, policy_path):
-                diagnostics.extend(_validate_policy_file(policy_path, policy, path))
                 continue
             diagnostics.extend(_validate(policy, path))
 

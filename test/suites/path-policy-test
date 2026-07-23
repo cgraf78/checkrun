@@ -179,12 +179,14 @@ loaded_policy="$_xdg_config/checkrun/associations.json"
 mkdir -p "$(dirname "$loaded_policy")"
 cat >"$loaded_policy" <<JSON
 {
+  "version": 1,
   "associations": [
     {
       "name": "HOME-relative match",
       "format": "json",
       "matches": ["*.json"],
-      "schema": "$_td/schema.json"
+      "schema": "$_td/schema.json",
+      "enforce": true
     }
   ]
 }
@@ -205,12 +207,16 @@ _assert_not_contains "schema policy CLI: loaded path failure omits traceback" \
 
 cat >"$loaded_policy" <<'JSON'
 {
+  "version": 1,
   "schemaDataDir": "relative/schemas",
   "associations": [
     {
       "name": "Relative refresh destination",
+      "format": "json",
       "schema": "settings.schema.json",
-      "source": "file:///missing/settings.schema.json"
+      "source": "file:///missing/settings.schema.json",
+      "matches": [".config/example/settings.json"],
+      "enforce": false
     }
   ]
 }
@@ -230,6 +236,7 @@ _assert_not_contains "schema refresh: loaded path failure omits traceback" \
 
 cat >"$loaded_policy" <<JSON
 {
+  "version": 1,
   "associations": [
     {
       "name": "HOME-relative lint match",
