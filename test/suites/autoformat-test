@@ -756,7 +756,7 @@ _assert_contains_path_arg "toml: relative fallback config path resolved before d
 
 echo "=== Config discovery ==="
 
-# shellcheck source=../format/common.sh
+# shellcheck source=../../lib/checkrun/common.sh
 . "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh"
 
 _find_abs=$(_tmpdir)
