@@ -6,6 +6,9 @@ set -euo pipefail
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 for suite in "$test_dir"/suites/*-test; do
+  case "${CHECKRUN_SKIP_SHELLCHECK_SUITES:-0}:${suite##*/}" in
+    1:shellcheck-inventory-test | 1:shellcheck-test) continue ;;
+  esac
   "$suite"
 done
 

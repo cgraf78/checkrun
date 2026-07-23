@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# Exercise repository shell inventory discovery in isolated Git repositories.
+# shellcheck disable=SC2016 # Fixture source must contain literal shell expansions.
+
+set -uo pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+gate="$CHECKRUN_TEST_DIR/suites/shellcheck-test"
+gate_status=0
+gate_output=""
+
+_new_inventory_repo() {
+  local repo
+  repo=$(_tmpdir)
+  git -C "$repo" init --quiet
+  git -C "$repo" config user.name "Checkrun Test"
+  git -C "$repo" config user.email "checkrun-test@example.invalid"
+  git -C "$repo" config core.hooksPath /dev/null
+  printf '%s\n' "$repo"
+}
+
+_run_inventory_gate() {
+  local repo="$1" inventory="$2"
+  gate_output=$("$gate" "$repo" "$inventory" 2>&1)
+  gate_status=$?
+}
+
+_run_validation_gate() {
+  local repo="$1" inventory="$2" mock_bin="$3" marker_dir="$4"
+  rm -f "$marker_dir/git" "$marker_dir/shellcheck"
+  gate_output=$(GIT_MARKER="$marker_dir/git" \
+    SHELLCHECK_MARKER="$marker_dir/shellcheck" \
+    PATH="$mock_bin:$PATH" \
+    "$gate" "$repo" "$inventory" 2>&1)
+  gate_status=$?
+}
+
+_assert_validation_aborts() {
+  local label="$1" expected="$2" marker_dir="$3"
+  _assert_exit "$label: validation fails" 1 "$gate_status"
+  _assert_contains "$label: validation error is actionable" \
+    "$expected" "$gate_output"
+  _assert_not_contains "$label: inventory is not parsed" \
+    "malformed inventory record" "$gate_output"
+  _assert_file_missing "$label: repository discovery is not run" \
+    "$marker_dir/git"
+  _assert_file_missing "$label: ShellCheck is not run" \
+    "$marker_dir/shellcheck"
+}
+
+echo "=== checkrun: shellcheck inventory discovery ==="
+
+# The repository gate derives its checkout and inventory from its own path, not
+# the caller's current directory.
+repo=$(_tmpdir)
+gate_output=$(cd "$repo" && "$gate" 2>&1)
+gate_status=$?
+_assert_exit "discovery: default gate runs from an arbitrary directory" 0 "$gate_status"
+
+# One fixture covers tracked and untracked files, arbitrary repository paths,
+# sourced fragments, and a filename that cannot be represented in a line-based
+# inventory. Every candidate must be reported without corrupting adjacent paths.
+repo=$(_new_inventory_repo)
+inventory="$repo/shellcheck-files.txt"
+: >"$inventory"
+mkdir -p "$repo/scripts" "$repo/.github/scripts" "$repo/lib" "$repo/hostile"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" $UNQUOTED\n' >"$repo/scripts/release.sh"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" $UNQUOTED\n' >"$repo/.github/scripts/ci.sh"
+printf '# shellcheck shell=bash\nprintf "%%s\\n" $UNQUOTED\n' >"$repo/lib/new-fragment.bash"
+printf '# shellcheck shell=bash\nprintf "%%s\\n" $UNQUOTED\n' >"$repo/lib/new-fragment"
+hostile_path=$'hostile/line\nbreak.sh'
+printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' >"$repo/$hostile_path"
+git -C "$repo" add scripts/release.sh lib/new-fragment.bash
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "discovery: missing candidates fail inventory validation" 1 "$gate_status"
+for expected in \
+  scripts/release.sh .github/scripts/ci.sh lib/new-fragment.bash \
+  lib/new-fragment; do
+  _assert_contains "discovery: reports $expected" "$expected" "$gate_output"
+done
+_assert_contains "discovery: preserves hostile newline path as one escaped value" \
+  "\$'hostile/line\\nbreak.sh'" "$gate_output"
+
+# Fixture records are reviewed exclusions: discover them, but do not lint their
+# deliberately invalid shell contents as standalone programs.
+repo=$(_new_inventory_repo)
+inventory="$repo/shellcheck-files.txt"
+mkdir -p "$repo/test/fixtures"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" $UNQUOTED\n' >"$repo/test/fixtures/invalid.sh"
+printf 'fixture\ttest/fixtures/invalid.sh\n' >"$inventory"
+git -C "$repo" add test/fixtures/invalid.sh
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: reviewed fixture is excluded from ShellCheck" 0 "$gate_status"
+
+# Program records are linted, and a valid typed inventory is accepted.
+repo=$(_new_inventory_repo)
+inventory="$repo/shellcheck-files.txt"
+mkdir -p "$repo/lib"
+printf '# shellcheck shell=bash\nprintf "ok\\n"\n' >"$repo/lib/clean.bash"
+printf 'program\tlib/clean.bash\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: typed program record is linted" 0 "$gate_status"
+
+no_cmp_bin=$(_tmpdir)
+for command in bash dirname git mktemp rm shellcheck tr; do
+  ln -s "$(type -P "$command")" "$no_cmp_bin/$command"
+done
+gate_output=$(PATH="$no_cmp_bin" "$gate" "$repo" "$inventory" 2>&1)
+gate_status=$?
+_assert_exit "inventory bytes: missing cmp uses the builtin fallback" \
+  0 "$gate_status"
+
+printf 'program\tlib/clean\0.bash\n' >"$inventory"
+printf 'malformed record\n' >>"$inventory"
+mock_bin=$(_tmpdir)
+marker_dir=$(_tmpdir)
+printf '#!/usr/bin/env bash\nprintf "invoked\\n" >"$GIT_MARKER"\nexit 99\n' \
+  >"$mock_bin/git"
+printf '#!/usr/bin/env bash\nprintf "invoked\\n" >"$SHELLCHECK_MARKER"\n' \
+  >"$mock_bin/shellcheck"
+chmod +x "$mock_bin/git" "$mock_bin/shellcheck"
+_run_validation_gate "$repo" "$inventory" "$mock_bin" "$marker_dir"
+_assert_validation_aborts "inventory NUL byte" \
+  "inventory contains a NUL byte" "$marker_dir"
+
+printf 'program\tlib/clean.bash\nmalformed record\n' >"$inventory"
+printf '#!/usr/bin/env bash\nexit 99\n' >"$mock_bin/tr"
+chmod +x "$mock_bin/tr"
+_run_validation_gate "$repo" "$inventory" "$mock_bin" "$marker_dir"
+_assert_validation_aborts "inventory byte-validation tool failure" \
+  "inventory bytes can be validated" "$marker_dir"
+
+rm "$mock_bin/tr"
+printf '#!/usr/bin/env bash\nexit 2\n' >"$mock_bin/cmp"
+chmod +x "$mock_bin/cmp"
+_run_validation_gate "$repo" "$inventory" "$mock_bin" "$marker_dir"
+_assert_validation_aborts "inventory comparison failure" \
+  "inventory bytes can be validated" "$marker_dir"
+rm "$mock_bin/cmp"
+
+printf 'program\tlib/clean.bash\nprogram\tlib/clean.bash\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: duplicate paths fail validation" 1 "$gate_status"
+_assert_contains "inventory: duplicate path is actionable" \
+  "duplicate inventory path" "$gate_output"
+
+printf 'program lib/clean.bash\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: malformed records fail validation" 1 "$gate_status"
+_assert_contains "inventory: malformed record is actionable" \
+  "malformed inventory record" "$gate_output"
+
+printf 'unknown\tlib/clean.bash\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: unknown record types fail validation" 1 "$gate_status"
+_assert_contains "inventory: unknown type is actionable" \
+  "unknown inventory type" "$gate_output"
+
+printf 'program\tlib/missing.sh\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: stale paths fail validation" 1 "$gate_status"
+_assert_contains "inventory: stale path is actionable" \
+  "inventory path is not a detected shell program" "$gate_output"
+
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" $UNQUOTED\n' >"$repo/lib/invalid.sh"
+printf 'program\tlib/clean.bash\nprogram\tlib/invalid.sh\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: program records propagate ShellCheck findings" 1 "$gate_status"
+_assert_contains "inventory: program finding names its ShellCheck code" \
+  "SC2086" "$gate_output"
+
+# A repository-relative path can begin with a dash. It must remain an operand
+# when the gate hands the reviewed inventory to ShellCheck.
+repo=$(_new_inventory_repo)
+inventory="$repo/shellcheck-files.txt"
+printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' >"$repo/-clean.sh"
+git -C "$repo" add -- -clean.sh
+printf 'program\t-clean.sh\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "inventory: leading-dash program path is linted" 0 "$gate_status"
+
+# Extensionless scripts are detected only when their shebang selects a dialect
+# that ShellCheck supports. Include direct, env, env -S, and BusyBox sh forms.
+repo=$(_new_inventory_repo)
+inventory="$repo/shellcheck-files.txt"
+mkdir -p "$repo/scripts"
+printf '#!/bin/sh\nprintf "ok\\n"\n' >"$repo/scripts/sh-tool"
+printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' >"$repo/scripts/bash-tool"
+printf '#!/bin/dash\nprintf "ok\\n"\n' >"$repo/scripts/dash-tool"
+printf '#!/usr/bin/ksh\nprintf "ok\\n"\n' >"$repo/scripts/ksh-tool"
+printf '#!/usr/bin/env -S bash -eu\nprintf "ok\\n"\n' \
+  >"$repo/scripts/env-s-tool"
+printf '#!/bin/busybox sh\nprintf "ok\\n"\n' >"$repo/scripts/busybox-sh-tool"
+printf 'program\tscripts/sh-tool\nprogram\tscripts/bash-tool\n' >"$inventory"
+printf 'program\tscripts/dash-tool\nprogram\tscripts/ksh-tool\n' >>"$inventory"
+printf 'program\tscripts/env-s-tool\nprogram\tscripts/busybox-sh-tool\n' \
+  >>"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "shebang discovery: supported ShellCheck dialects are linted" \
+  0 "$gate_status"
+
+mock_bin=$(_tmpdir)
+dialect_log="$repo/shellcheck-dialects.log"
+cat >"$mock_bin/shellcheck" <<'MOCK'
+#!/usr/bin/env bash
+set -u
+dialect=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s)
+      dialect="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *) shift ;;
+  esac
+done
+for path; do
+  case "$path" in
+    scripts/sh-tool | scripts/busybox-sh-tool) expected=sh ;;
+    scripts/bash-tool | scripts/env-s-tool) expected=bash ;;
+    scripts/dash-tool) expected=dash ;;
+    scripts/ksh-tool) expected=ksh ;;
+    *) exit 96 ;;
+  esac
+  [[ "$dialect" == "$expected" ]] || exit 97
+  printf '%s\t%s\n' "$dialect" "$path" >>"$SHELLCHECK_DIALECT_LOG"
+done
+MOCK
+chmod +x "$mock_bin/shellcheck"
+: >"$dialect_log"
+gate_output=$(SHELLCHECK_DIALECT_LOG="$dialect_log" PATH="$mock_bin:$PATH" \
+  "$gate" "$repo" "$inventory" 2>&1)
+gate_status=$?
+_assert_exit "shebang lint: every supported form has an explicit dialect" \
+  0 "$gate_status"
+for expected in \
+  $'sh\tscripts/sh-tool' $'sh\tscripts/busybox-sh-tool' \
+  $'bash\tscripts/bash-tool' $'bash\tscripts/env-s-tool' \
+  $'dash\tscripts/dash-tool' $'ksh\tscripts/ksh-tool'; do
+  _assert_contains "shebang lint: routes ${expected#*$'\t'}" \
+    "$expected" "$(cat "$dialect_log")"
+done
+
+# Unsupported interpreters are not ShellCheck candidates. Listing one as a
+# fixture or program must be stale rather than providing a misleading escape.
+repo=$(_new_inventory_repo)
+inventory="$repo/shellcheck-files.txt"
+mkdir -p "$repo/scripts"
+printf '#!/usr/bin/env fish\nprintf "ok\\n"\n' >"$repo/scripts/fish-tool"
+printf '#!/usr/bin/env pwsh\nprintf "ok\\n"\n' >"$repo/scripts/pwsh-tool"
+printf '#!/usr/bin/env zsh\nprintf "ok\\n"\n' >"$repo/scripts/zsh-tool"
+printf '#!/usr/bin/env busybox sh\nprintf "ok\\n"\n' \
+  >"$repo/scripts/env-busybox-tool"
+printf '#!sh\nprintf "ok\\n"\n' >"$repo/scripts/relative-sh-tool"
+printf '#!/usr/bin/env -- bash\nprintf "ok\\n"\n' \
+  >"$repo/scripts/env-option-tool"
+: >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "shebang discovery: unsupported interpreters are ignored" \
+  0 "$gate_status"
+
+printf 'fixture\tscripts/fish-tool\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "shebang inventory: unsupported fixture record is stale" \
+  1 "$gate_status"
+_assert_contains "shebang inventory: stale fixture is actionable" \
+  "inventory path is not a detected shell program: scripts/fish-tool" \
+  "$gate_output"
+
+printf 'program\tscripts/zsh-tool\n' >"$inventory"
+_run_inventory_gate "$repo" "$inventory"
+_assert_exit "shebang inventory: unsupported program record is stale" \
+  1 "$gate_status"
+_assert_contains "shebang inventory: stale program is actionable" \
+  "inventory path is not a detected shell program: scripts/zsh-tool" \
+  "$gate_output"
+
+_test_summary

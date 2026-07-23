@@ -24,4 +24,13 @@ jobs:
     uses: cgraf78/actions/.github/workflows/shell-ci.yml@485940fa141828a3f13430b5219a3d5c33c4f367
     with:
       setup: checkrun
-      test-command: test/checkrun-test
+      test-command: CHECKRUN_SKIP_SHELLCHECK_SUITES=1 test/checkrun-test
+
+  shellcheck:
+    # Dependency profiles and named setup modes are separate shared-workflow
+    # paths. Keep ShellCheck on the profile path so every platform, including
+    # Alpine where Checkrun's mise bootstrap is intentionally skipped, gets it.
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@485940fa141828a3f13430b5219a3d5c33c4f367
+    with:
+      profiles: base,shellcheck
+      test-command: test/suites/shellcheck-inventory-test && test/suites/shellcheck-test

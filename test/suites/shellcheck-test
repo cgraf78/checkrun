@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# Validate and lint every shell program owned by this repository.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+default_repo_root="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+echo "=== checkrun: repository shellcheck ==="
+
+CHECKRUN_REPO_ROOT="${1:-$default_repo_root}"
+inventory_file="${2:-$CHECKRUN_TEST_DIR/shellcheck-files.txt}"
+if [[ "$CHECKRUN_REPO_ROOT" != "$default_repo_root" ]]; then
+  CHECKRUN_REPO_ROOT=$(cd -- "$CHECKRUN_REPO_ROOT" && pwd -P) || {
+    _fail "shellcheck: repository root is accessible"
+    _test_summary
+  }
+fi
+_assert_file_exists "shellcheck: tracked-file inventory exists" "$inventory_file"
+
+_shellcheck_display_path() {
+  printf '%q' "$1"
+}
+
+_shellcheck_array_contains() {
+  local wanted="$1" candidate
+  shift
+  for candidate; do
+    [[ "$candidate" == "$wanted" ]] && return 0
+  done
+  return 1
+}
+
+_shellcheck_shebang_dialect() {
+  local line="${1#\#!}" interpreter index=1 via_env=0
+  local -a words=()
+
+  read -r -a words <<<"$line"
+  [[ "${#words[@]}" -gt 0 ]] || return 1
+  [[ "${words[0]}" == /* ]] || return 1
+  interpreter="${words[0]##*/}"
+
+  if [[ "$interpreter" == env ]]; then
+    via_env=1
+    if [[ "${words[index]-}" == -S ]]; then
+      index=$((index + 1))
+    elif [[ "${words[index]-}" == -* ]]; then
+      return 1
+    fi
+    interpreter="${words[index]-}"
+    interpreter="${interpreter##*/}"
+    index=$((index + 1))
+  fi
+
+  case "$interpreter" in
+    sh | bash | dash | ksh) printf '%s\n' "$interpreter" ;;
+    busybox)
+      [[ "$via_env" -eq 0 && "${words[index]-}" == sh ]] || return 1
+      printf '%s\n' sh
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_shellcheck_shebang_is_supported() {
+  _shellcheck_shebang_dialect "$1" >/dev/null
+}
+
+_shellcheck_file_is_program() {
+  local path="$1" line line_number=0
+  case "$path" in
+    *.sh | *.bash | *.bats | *.dash | *.ksh) return 0 ;;
+  esac
+  [[ -f "$CHECKRUN_REPO_ROOT/$path" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_number=$((line_number + 1))
+    if [[ "$line_number" -eq 1 && "$line" == '#!'* ]] &&
+      _shellcheck_shebang_is_supported "$line"; then
+      return 0
+    fi
+    case "$line" in
+      '# shellcheck shell='*) return 0 ;;
+    esac
+    [[ "$line_number" -lt 5 ]] || break
+  done <"$CHECKRUN_REPO_ROOT/$path"
+  return 1
+}
+
+_shellcheck_file_dialect() {
+  local path="$1" line line_number=0 shebang_dialect="" directive
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_number=$((line_number + 1))
+    if [[ "$line_number" -eq 1 && "$line" == '#!'* ]]; then
+      shebang_dialect=$(_shellcheck_shebang_dialect "$line") || true
+    fi
+    case "$line" in
+      '# shellcheck shell='*)
+        directive="${line#\# shellcheck shell=}"
+        directive="${directive%%[[:space:]]*}"
+        case "$directive" in
+          sh | bash | dash | ksh)
+            printf '%s\n' "$directive"
+            return 0
+            ;;
+        esac
+        ;;
+    esac
+    [[ "$line_number" -lt 5 ]] || break
+  done <"$CHECKRUN_REPO_ROOT/$path"
+
+  if [[ -n "$shebang_dialect" ]]; then
+    printf '%s\n' "$shebang_dialect"
+    return 0
+  fi
+  case "$path" in
+    *.bash | *.bats) printf '%s\n' bash ;;
+    *.dash) printf '%s\n' dash ;;
+    *.ksh) printf '%s\n' ksh ;;
+    *) return 1 ;;
+  esac
+}
+
+inventory_paths=()
+lint_files=()
+inventory_ok=1
+if [[ -f "$inventory_file" ]]; then
+  inventory_without_nul="$(_tmpdir)/inventory-without-nul"
+  if LC_ALL=C tr -d '\000' <"$inventory_file" >"$inventory_without_nul"; then
+    if command -v cmp >/dev/null 2>&1; then
+      if cmp -s "$inventory_file" "$inventory_without_nul"; then
+        comparison_status=0
+      else
+        comparison_status=$?
+      fi
+    elif IFS= read -r -d '' _inventory_prefix <"$inventory_file"; then
+      comparison_status=1
+    else
+      comparison_status=0
+    fi
+    unset _inventory_prefix
+    case "$comparison_status" in
+      0) ;;
+      1)
+        _fail "shellcheck: inventory contains a NUL byte"
+        inventory_ok=0
+        ;;
+      *)
+        _fail "shellcheck: inventory bytes can be validated"
+        inventory_ok=0
+        ;;
+    esac
+  else
+    _fail "shellcheck: inventory bytes can be validated"
+    inventory_ok=0
+  fi
+fi
+[[ "$inventory_ok" -eq 1 ]] || _test_summary
+line_number=0
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line_number=$((line_number + 1))
+  [[ -n "$line" && "$line" != '#'* ]] || continue
+  case "$line" in
+    *$'\t'*) ;;
+    *)
+      _fail "shellcheck: malformed inventory record on line $line_number"
+      inventory_ok=0
+      continue
+      ;;
+  esac
+  type="${line%%$'\t'*}"
+  path="${line#*$'\t'}"
+  if [[ -z "$path" || "$path" == *$'\t'* || "$path" == /* ||
+    "$path" == ./* || "$path" == ../* || "$path" == */../* ]]; then
+    _fail "shellcheck: invalid inventory path on line $line_number"
+    inventory_ok=0
+    continue
+  fi
+  case "$type" in
+    program | fixture) ;;
+    *)
+      _fail "shellcheck: unknown inventory type '$type' on line $line_number"
+      inventory_ok=0
+      continue
+      ;;
+  esac
+  if _shellcheck_array_contains "$path" \
+    "${inventory_paths[@]+"${inventory_paths[@]}"}"; then
+    _fail "shellcheck: duplicate inventory path: $(_shellcheck_display_path "$path")"
+    inventory_ok=0
+    continue
+  fi
+  inventory_paths+=("$path")
+  [[ "$type" == fixture ]] || lint_files+=("$path")
+done <"$inventory_file"
+
+discovery_file="$(_tmpdir)/repository-files"
+if ! git -C "$CHECKRUN_REPO_ROOT" ls-files -z --cached --others \
+  --exclude-standard -- >"$discovery_file"; then
+  _fail "shellcheck: repository files can be discovered"
+  inventory_ok=0
+fi
+
+discovered=()
+while IFS= read -r -d '' path; do
+  _shellcheck_file_is_program "$path" && discovered+=("$path")
+done <"$discovery_file"
+
+for path in "${discovered[@]+"${discovered[@]}"}"; do
+  if ! _shellcheck_array_contains "$path" \
+    "${inventory_paths[@]+"${inventory_paths[@]}"}"; then
+    _fail "shellcheck: unlisted shell program: $(_shellcheck_display_path "$path")"
+    inventory_ok=0
+  fi
+done
+for path in "${inventory_paths[@]+"${inventory_paths[@]}"}"; do
+  if ! _shellcheck_array_contains "$path" \
+    "${discovered[@]+"${discovered[@]}"}"; then
+    _fail "shellcheck: inventory path is not a detected shell program: $(_shellcheck_display_path "$path")"
+    inventory_ok=0
+  fi
+done
+[[ "$inventory_ok" -ne 1 ]] ||
+  _pass "shellcheck: inventory covers every repository shell program"
+
+if ! command -v shellcheck >/dev/null 2>&1; then
+  _fail "shellcheck: command is available"
+else
+  _pass "shellcheck: command is available"
+  if [[ "${#lint_files[@]}" -eq 0 ]]; then
+    _pass "shellcheck: repository shell programs pass"
+  else
+    shellcheck_auto_files=()
+    shellcheck_sh_files=()
+    shellcheck_bash_files=()
+    shellcheck_dash_files=()
+    shellcheck_ksh_files=()
+    for path in "${lint_files[@]}"; do
+      if dialect=$(_shellcheck_file_dialect "$path"); then
+        case "$dialect" in
+          sh) shellcheck_sh_files+=("$path") ;;
+          bash) shellcheck_bash_files+=("$path") ;;
+          dash) shellcheck_dash_files+=("$path") ;;
+          ksh) shellcheck_ksh_files+=("$path") ;;
+        esac
+      else
+        shellcheck_auto_files+=("$path")
+      fi
+    done
+  fi
+  if [[ "${#lint_files[@]}" -gt 0 ]] && (
+    cd "$CHECKRUN_REPO_ROOT" || exit 1
+    shellcheck_status=0
+    [[ "${#shellcheck_auto_files[@]}" -eq 0 ]] ||
+      shellcheck -x -P SCRIPTDIR -- "${shellcheck_auto_files[@]}" || shellcheck_status=1
+    [[ "${#shellcheck_sh_files[@]}" -eq 0 ]] ||
+      shellcheck -x -P SCRIPTDIR -s sh -- "${shellcheck_sh_files[@]}" || shellcheck_status=1
+    [[ "${#shellcheck_bash_files[@]}" -eq 0 ]] ||
+      shellcheck -x -P SCRIPTDIR -s bash -- "${shellcheck_bash_files[@]}" || shellcheck_status=1
+    [[ "${#shellcheck_dash_files[@]}" -eq 0 ]] ||
+      shellcheck -x -P SCRIPTDIR -s dash -- "${shellcheck_dash_files[@]}" || shellcheck_status=1
+    [[ "${#shellcheck_ksh_files[@]}" -eq 0 ]] ||
+      shellcheck -x -P SCRIPTDIR -s ksh -- "${shellcheck_ksh_files[@]}" || shellcheck_status=1
+    exit "$shellcheck_status"
+  ); then
+    _pass "shellcheck: repository shell programs pass"
+  elif [[ "${#lint_files[@]}" -gt 0 ]]; then
+    _fail "shellcheck: repository shell programs pass"
+  fi
+fi
+
+_test_summary

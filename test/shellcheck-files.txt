@@ -1,0 +1,34 @@
+# type<TAB>repository-relative path
+# `fixture` records are discovered but intentionally excluded from ShellCheck.
+program	bin/autoformat
+program	bin/autolint
+program	bin/checkrun
+program	lib/checkrun/autoformat.sh
+program	lib/checkrun/autolint.sh
+program	lib/checkrun/common.sh
+program	lib/checkrun/linters/build.sh
+program	lib/checkrun/linters/config.sh
+program	lib/checkrun/linters/core.sh
+program	lib/checkrun/linters/docs.sh
+program	lib/checkrun/linters/github-actions.sh
+program	lib/checkrun/linters/languages.sh
+program	lib/checkrun/linters/shell.sh
+program	lib/checkrun/linters/web.sh
+program	share/checkrun/shell.sh
+program	test/checkrun-test
+program	test/helpers.sh
+program	test/suites/autoformat-test
+program	test/suites/autolint-test
+program	test/suites/capabilities-test
+program	test/suites/checkrun-cli-test
+program	test/suites/ci-toolchain-test
+program	test/suites/manpage-test
+program	test/suites/nvim-test
+program	test/suites/path-policy-test
+program	test/suites/registry-test
+program	test/suites/schema-lint-test
+program	test/suites/schema-refresh-test
+program	test/suites/shellcheck-inventory-test
+program	test/suites/shellcheck-test
+program	test/suites/timeout-test
+program	test/suites/verify-test

@@ -8,7 +8,10 @@ python3 "$repo_root/.github/scripts/verify_mise_lock.py" \
   "$repo_root/.github/mise/checkrun-ci.toml" \
   "$repo_root/.github/mise/mise.lock"
 
-python3 - "$repo_root/.github/scripts/verify_mise_lock.py" <<'PY'
+python3 - \
+  "$repo_root/.github/scripts/verify_mise_lock.py" \
+  "$repo_root/.github/workflows/test.yml" \
+  "$repo_root/test/checkrun-test" <<'PY'
 from __future__ import annotations
 
 import importlib.util
@@ -17,6 +20,8 @@ from copy import deepcopy
 from pathlib import Path
 
 script = Path(sys.argv[1])
+workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
+test_runner = Path(sys.argv[3]).read_text(encoding="utf-8")
 spec = importlib.util.spec_from_file_location("verify_mise_lock", script)
 if spec is None or spec.loader is None:
     raise RuntimeError(f"cannot load {script}")
@@ -64,6 +69,41 @@ assert_error("aqua:owner/tool: linux-x64 has no locked URL", config, missing_url
 duplicate = deepcopy(lock)
 duplicate["tools"]["aqua:owner/tool"].append(deepcopy(entry))
 assert_error("aqua:owner/tool: expected exactly one locked version", config, duplicate)
+
+
+def job_block(name: str) -> str:
+    """Return one top-level job block from the repository workflow."""
+    lines = workflow.splitlines()
+    marker = f"  {name}:"
+    try:
+        start = lines.index(marker)
+    except ValueError as error:
+        raise AssertionError(f"missing workflow job: {name}") from error
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("  ") and not line.startswith("    ") and line.endswith(":"):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+shell_job = job_block("shell")
+if "setup: checkrun" not in shell_job:
+    raise AssertionError("main shell job must retain the named Checkrun setup")
+if "test-command: CHECKRUN_SKIP_SHELLCHECK_SUITES=1 test/checkrun-test" not in shell_job:
+    raise AssertionError("main shell job must delegate ShellCheck to its dedicated job")
+
+shellcheck_job = job_block("shellcheck")
+if "profiles: base,shellcheck" not in shellcheck_job:
+    raise AssertionError("ShellCheck job must use the normal dependency profile path")
+if "setup:" in shellcheck_job:
+    raise AssertionError("ShellCheck job must not bypass profiles with a named setup")
+if "test/suites/shellcheck-inventory-test && test/suites/shellcheck-test" not in shellcheck_job:
+    raise AssertionError("ShellCheck job must run inventory and repository lint suites")
+
+if "CHECKRUN_SKIP_SHELLCHECK_SUITES" not in test_runner:
+    raise AssertionError("test runner does not support the main CI delegation contract")
 PY
 
 printf 'ci-toolchain-test: ok\n'
