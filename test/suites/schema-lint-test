@@ -583,6 +583,38 @@ rc=$?
 _assert_exit "schema lint: missing optional policy exits zero" 0 "$rc"
 _assert_eq "schema lint: missing optional policy stays quiet" "" "$output"
 
+_missing_parent_policy="$_bad_policy_dir/missing-parent/associations.json"
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_missing_parent_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+_assert_exit "editor policy: absent parent keeps optional policy missing" 0 "$rc"
+_assert_eq "editor policy: absent parent emits empty config" \
+  '{"json":[],"yaml":{},"toml":{}}' "$output"
+
+_dangling_policy="$_bad_policy_dir/dangling-associations.json"
+ln -s missing-policy-target.json "$_dangling_policy"
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_dangling_policy" \
+  python3 "$POLICY_SCRIPT" --lsp-schemas 2>&1)
+rc=$?
+set -e
+_assert_exit "editor policy: dangling active policy exits nonzero" 1 "$rc"
+_assert_contains "editor policy: dangling active policy names the file" \
+  "cannot read schema policy $_dangling_policy" "$output"
+_assert_not_contains "editor policy: dangling active policy omits traceback" \
+  "Traceback" "$output"
+
+set +e
+output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_dangling_policy" \
+  "$SCRIPT" "$_home/.config/example/schema.d/test-settings-ok.json" 2>&1)
+rc=$?
+set -e
+_assert_exit "schema lint: dangling active policy exits nonzero" 1 "$rc"
+_assert_contains "schema lint: dangling active policy names the file" \
+  "cannot read schema policy $_dangling_policy" "$output"
+_assert_not_contains "schema lint: dangling active policy omits traceback" \
+  "Traceback" "$output"
+
 _open_failure_policy="$_bad_policy_dir/open-failure-associations.json"
 # A symlink loop makes open(2) fail for both ordinary users and container root.
 ln -s "$(basename "$_open_failure_policy")" "$_open_failure_policy"
@@ -634,8 +666,17 @@ with mock.patch.object(module.os, "open", side_effect=denied):
         assert "Permission denied" in message
     else:
         raise AssertionError("PermissionError did not fail closed")
+
+missing = FileNotFoundError(errno.ENOENT, "No such file or directory", str(policy_path))
+with mock.patch.object(module.os, "open", side_effect=missing):
+    try:
+        module._load_policy_document(policy_path, optional=True)
+    except module.SchemaPolicyError as exc:
+        assert f"cannot read schema policy {policy_path}" in str(exc)
+    else:
+        raise AssertionError("an observable policy entry was treated as missing")
 PY
-_assert_exit "policy loader: PermissionError is actionable" 0 "$?"
+_assert_exit "policy loader: open failures remain actionable" 0 "$?"
 
 _invalid_json_policy="$_bad_policy_dir/invalid-json-associations.json"
 printf '{not-json\n' >"$_invalid_json_policy"
