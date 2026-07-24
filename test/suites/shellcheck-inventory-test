@@ -185,27 +185,73 @@ _run_inventory_gate "$repo" "$inventory"
 _assert_exit "inventory: leading-dash program path is linted" 0 "$gate_status"
 
 # Extensionless scripts are detected only when their shebang selects a dialect
-# that ShellCheck supports. Include direct, env, env -S, and BusyBox sh forms.
+# that ShellCheck supports. Include direct, env, env -S, and BusyBox forms.
 repo=$(_new_inventory_repo)
 inventory="$repo/shellcheck-files.txt"
 mkdir -p "$repo/scripts"
 printf '#!/bin/sh\nprintf "ok\\n"\n' >"$repo/scripts/sh-tool"
+printf '#!/bin/ash\nprintf "ok\\n"\n' >"$repo/scripts/ash-tool"
 printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' >"$repo/scripts/bash-tool"
 printf '#!/bin/dash\nprintf "ok\\n"\n' >"$repo/scripts/dash-tool"
 printf '#!/usr/bin/ksh\nprintf "ok\\n"\n' >"$repo/scripts/ksh-tool"
 printf '#!/usr/bin/env -S bash -eu\nprintf "ok\\n"\n' \
   >"$repo/scripts/env-s-tool"
+printf '#!/usr/bin/env -S busybox ash\nprintf "ok\\n"\n' \
+  >"$repo/scripts/env-s-busybox-ash-tool"
 printf '#!/bin/busybox sh\nprintf "ok\\n"\n' >"$repo/scripts/busybox-sh-tool"
-printf 'program\tscripts/sh-tool\nprogram\tscripts/bash-tool\n' >"$inventory"
-printf 'program\tscripts/dash-tool\nprogram\tscripts/ksh-tool\n' >>"$inventory"
-printf 'program\tscripts/env-s-tool\nprogram\tscripts/busybox-sh-tool\n' \
-  >>"$inventory"
+printf '#!/bin/busybox ash\nprintf "ok\\n"\n' >"$repo/scripts/busybox-ash-tool"
+cat >"$repo/scripts/header-dash-tool" <<'EOF'
+# Copyright 2026
+#
+# Licensed for use under the repository license.
+
+# Keep this header above the ShellCheck directive.
+# The inventory scanner must not impose a line limit.
+# shellcheck shell=dash
+printf "ok\n"
+EOF
+cat >"$repo/scripts/header-ash-tool" <<'EOF'
+# Copyright 2026
+
+#  shellcheck shell=ash
+printf "ok\n"
+EOF
+cat >"$repo/scripts/body-directive" <<'EOF'
+This is not a shell program.
+  #shellcheck shell=bash
+EOF
+cat >"$inventory" <<'EOF'
+program	scripts/sh-tool
+program	scripts/ash-tool
+program	scripts/bash-tool
+program	scripts/dash-tool
+program	scripts/ksh-tool
+program	scripts/env-s-tool
+program	scripts/env-s-busybox-ash-tool
+program	scripts/busybox-sh-tool
+program	scripts/busybox-ash-tool
+program	scripts/header-dash-tool
+program	scripts/header-ash-tool
+EOF
 _run_inventory_gate "$repo" "$inventory"
 _assert_exit "shebang discovery: supported ShellCheck dialects are linted" \
   0 "$gate_status"
+_assert_not_contains "header discovery: body directives do not classify files" \
+  "scripts/body-directive" "$gate_output"
+
+# ShellCheck 0.9 rejects the BusyBox directive before `-s sh` can provide the
+# compatibility fallback. Exercise directive discovery with the dialect mock.
+cat >"$repo/scripts/header-busybox-tool" <<'EOF'
+# Copyright 2026
+
+  #shellcheck shell=busybox
+printf "ok\n"
+EOF
+printf 'program\tscripts/header-busybox-tool\n' >>"$inventory"
 
 mock_bin=$(_tmpdir)
 dialect_log="$repo/shellcheck-dialects.log"
+probe_log="$repo/shellcheck-probes.log"
 cat >"$mock_bin/shellcheck" <<'MOCK'
 #!/usr/bin/env bash
 set -u
@@ -220,12 +266,19 @@ while [[ $# -gt 0 ]]; do
       shift
       break
       ;;
+    -)
+      printf 'probe\n' >>"$SHELLCHECK_PROBE_LOG"
+      exit "${SHELLCHECK_BUSYBOX_PROBE_STATUS:-0}"
+      ;;
     *) shift ;;
   esac
 done
+busybox_expected="${SHELLCHECK_BUSYBOX_EXPECTED:-busybox}"
 for path; do
   case "$path" in
-    scripts/sh-tool | scripts/busybox-sh-tool) expected=sh ;;
+    scripts/sh-tool) expected=sh ;;
+    scripts/ash-tool | scripts/header-dash-tool | scripts/header-ash-tool) expected=dash ;;
+    scripts/busybox-sh-tool | scripts/busybox-ash-tool | scripts/env-s-busybox-ash-tool | scripts/header-busybox-tool) expected="$busybox_expected" ;;
     scripts/bash-tool | scripts/env-s-tool) expected=bash ;;
     scripts/dash-tool) expected=dash ;;
     scripts/ksh-tool) expected=ksh ;;
@@ -237,18 +290,60 @@ done
 MOCK
 chmod +x "$mock_bin/shellcheck"
 : >"$dialect_log"
-gate_output=$(SHELLCHECK_DIALECT_LOG="$dialect_log" PATH="$mock_bin:$PATH" \
+: >"$probe_log"
+gate_output=$(SHELLCHECK_DIALECT_LOG="$dialect_log" \
+  SHELLCHECK_PROBE_LOG="$probe_log" PATH="$mock_bin:$PATH" \
   "$gate" "$repo" "$inventory" 2>&1)
 gate_status=$?
 _assert_exit "shebang lint: every supported form has an explicit dialect" \
   0 "$gate_status"
+_assert_eq "shebang lint: BusyBox support is probed once" \
+  "probe" "$(cat "$probe_log")"
 for expected in \
-  $'sh\tscripts/sh-tool' $'sh\tscripts/busybox-sh-tool' \
+  $'sh\tscripts/sh-tool' $'dash\tscripts/ash-tool' \
+  $'busybox\tscripts/busybox-sh-tool' \
+  $'busybox\tscripts/busybox-ash-tool' \
+  $'busybox\tscripts/env-s-busybox-ash-tool' \
   $'bash\tscripts/bash-tool' $'bash\tscripts/env-s-tool' \
-  $'dash\tscripts/dash-tool' $'ksh\tscripts/ksh-tool'; do
+  $'dash\tscripts/dash-tool' $'dash\tscripts/header-dash-tool' \
+  $'dash\tscripts/header-ash-tool' \
+  $'busybox\tscripts/header-busybox-tool' \
+  $'ksh\tscripts/ksh-tool'; do
   _assert_contains "shebang lint: routes ${expected#*$'\t'}" \
     "$expected" "$(cat "$dialect_log")"
 done
+
+: >"$dialect_log"
+: >"$probe_log"
+gate_output=$(SHELLCHECK_BUSYBOX_PROBE_STATUS=4 SHELLCHECK_BUSYBOX_EXPECTED=sh \
+  SHELLCHECK_DIALECT_LOG="$dialect_log" SHELLCHECK_PROBE_LOG="$probe_log" \
+  PATH="$mock_bin:$PATH" "$gate" "$repo" "$inventory" 2>&1)
+gate_status=$?
+_assert_exit "shebang lint: unsupported BusyBox dialect falls back to sh" \
+  0 "$gate_status"
+_assert_eq "shebang lint: unsupported BusyBox support is probed once" \
+  "probe" "$(cat "$probe_log")"
+for path in \
+  scripts/busybox-sh-tool scripts/busybox-ash-tool \
+  scripts/env-s-busybox-ash-tool scripts/header-busybox-tool; do
+  _assert_contains "shebang lint: fallback routes $path as sh" \
+    $'sh\t'"$path" "$(cat "$dialect_log")"
+done
+
+: >"$dialect_log"
+: >"$probe_log"
+gate_output=$(SHELLCHECK_BUSYBOX_PROBE_STATUS=2 \
+  SHELLCHECK_DIALECT_LOG="$dialect_log" SHELLCHECK_PROBE_LOG="$probe_log" \
+  PATH="$mock_bin:$PATH" "$gate" "$repo" "$inventory" 2>&1)
+gate_status=$?
+_assert_exit "shebang lint: unexpected probe failures fail the gate" \
+  1 "$gate_status"
+_assert_contains "shebang lint: unexpected probe failure is actionable" \
+  "BusyBox dialect capability probe failed with exit 2" "$gate_output"
+_assert_eq "shebang lint: failed BusyBox support is probed once" \
+  "probe" "$(cat "$probe_log")"
+_assert_eq "shebang lint: probe failure prevents lint invocation" \
+  "" "$(cat "$dialect_log")"
 
 # Unsupported interpreters are not ShellCheck candidates. Listing one as a
 # fixture or program must be stale rather than providing a misleading escape.
