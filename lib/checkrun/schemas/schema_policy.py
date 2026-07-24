@@ -126,7 +126,16 @@ def _load_policy_document(path: Path, *, optional: bool = False) -> Any:
         return _load_active_policy(path)
     except FileNotFoundError as exc:
         if optional:
-            return _MISSING_POLICY
+            # Unlike exists(), lstat() observes a dangling final symlink. It
+            # only classifies ENOENT; the descriptor still owns all reads.
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                return _MISSING_POLICY
+            except OSError as lstat_exc:
+                raise SchemaPolicyError(
+                    f"cannot read schema policy {path}: {lstat_exc}"
+                ) from lstat_exc
         raise SchemaPolicyError(f"cannot read schema policy {path}: {exc}") from exc
     except SchemaPolicyError:
         raise

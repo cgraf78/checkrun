@@ -323,6 +323,27 @@ _assert_contains "plan: symlink to FIFO active policy is rejected as non-regular
 _assert_not_contains "plan: symlink to FIFO active policy emits no partial JSON" \
   '"files"' "$output"
 
+_missing_policy="$_td/missing-associations.json"
+output=$(env CHECKRUN_SCHEMA_ASSOCIATIONS="$_missing_policy" \
+  "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+rc=$?
+_assert_exit "plan: missing optional policy exits zero" 0 "$rc"
+_assert_contains "plan: missing optional policy still emits its plan" \
+  '"files"' "$output"
+
+_dangling_policy="$_td/dangling-associations.json"
+ln -s missing-policy-target.json "$_dangling_policy"
+set +e
+output=$(env CHECKRUN_SCHEMA_ASSOCIATIONS="$_dangling_policy" \
+  "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "plan: dangling active policy exits usage-style nonzero" 2 "$rc"
+_assert_contains "plan: dangling active policy names the file" \
+  "cannot read schema policy $_dangling_policy" "$output"
+_assert_not_contains "plan: dangling active policy emits no partial JSON" \
+  '"files"' "$output"
+
 _regular_policy_link="$_td/regular-associations-link.json"
 ln -s "$_policy" "$_regular_policy_link"
 output=$(env CHECKRUN_SCHEMA_ASSOCIATIONS="$_regular_policy_link" \
