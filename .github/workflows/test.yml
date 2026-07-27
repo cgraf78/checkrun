@@ -21,17 +21,21 @@ jobs:
     # To update the pin, run locally:
     #   gh api repos/cgraf78/actions/branches/main --jq '.commit.sha'
     # and replace the ref below (form: `...@<40-char-sha>`).
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@1db322ef8a998a904974d0c81fb94515d1b16973
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@663f83780f58f231e810d0c9eca642bbf859353b
     with:
       matrix-set: full
+      profiles: base,python
       setup: checkrun
       test-command: CHECKRUN_SKIP_SHELLCHECK_SUITES=1 test/checkrun-test
+      termux-command: |-
+        test/suites/path-policy-test
+        test/suites/registry-test
 
   shellcheck:
     # Dependency profiles and named setup modes are separate shared-workflow
     # paths. Keep ShellCheck on the profile path so every platform, including
     # Alpine where Checkrun's mise bootstrap is intentionally skipped, gets it.
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@1db322ef8a998a904974d0c81fb94515d1b16973
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@663f83780f58f231e810d0c9eca642bbf859353b
     with:
       matrix-set: full
       profiles: base,shellcheck
