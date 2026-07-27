@@ -2428,6 +2428,7 @@ echo "=== ruff check fallback ==="
 _ruff_dir=$(_tmpdir)
 cat >"$_ruff_dir/ruff.toml" <<'EOF'
 [lint]
+select = ["F"]
 ignore = ["F401"]
 EOF
 
