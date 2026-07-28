@@ -30,6 +30,10 @@ CHECKRUN_LINT_HOOK_MEDIAN_BUDGET_MS=1200
 CHECKRUN_LINT_HOOK_DARWIN_MEDIAN_BUDGET_MS=1800
 CHECKRUN_LINT_HOOK_P95_BUDGET_MS=3500
 CHECKRUN_LINT_HOOK_DARWIN_P95_BUDGET_MS=5000
+CHECKRUN_EMPTY_BATCH_MEDIAN_BUDGET_MS=1000
+CHECKRUN_EMPTY_BATCH_DARWIN_MEDIAN_BUDGET_MS=1500
+CHECKRUN_EMPTY_BATCH_P95_BUDGET_MS=3000
+CHECKRUN_EMPTY_BATCH_DARWIN_P95_BUDGET_MS=4500
 
 _perf_budget_ms() {
   local budget_ms="$1" darwin_budget_ms="$2"
@@ -45,11 +49,12 @@ _perf_budget_ms() {
 }
 
 _measure_hook_perf() {
-  local command="$1" target="$2"
+  local command="$1"
+  shift
 
   PATH="$hook_path" TMPDIR="$td" CHECKRUN_CONFIG_DIR=/nonexistent \
     CHECKRUN_SCHEMA_LINT=/nonexistent python3 - \
-    "$command" "$target" "$CHECKRUN_HOOK_PERF_RUNS" <<'PY'
+    "$CHECKRUN_HOOK_PERF_RUNS" "$command" "$@" <<'PY'
 import math
 import os
 import signal
@@ -58,8 +63,8 @@ import sys
 import tempfile
 import time
 
-command = sys.argv[1:3]
-runs = int(sys.argv[3])
+runs = int(sys.argv[1])
+command = sys.argv[2:]
 timeout = float(os.environ.get("CHECKRUN_HOOK_PERF_TIMEOUT_SECONDS", "10"))
 timeout_ms = math.ceil(timeout * 1000)
 
@@ -142,6 +147,12 @@ echo "=== checkrun: edit-hook performance ==="
 td=$(_tmpdir)
 unsupported="$td/unsupported.no-checkrun-tool"
 printf 'plain text\n' >"$unsupported"
+unsupported_batch=()
+for index in {0..19}; do
+  batch_file="$td/unsupported-$index.no-checkrun-tool"
+  printf 'plain text %s\n' "$index" >"$batch_file"
+  unsupported_batch+=("$batch_file")
+done
 host_ps=$(command -v ps || true)
 
 hook_path=$(_mock_bin)
@@ -282,6 +293,113 @@ _assert_not_contains "hook startup: lint shell does not resolve config separatel
 _assert_contains "hook startup: lint registry planner owns the no-op decision" \
   "registry.py shell-plan" "$python_calls"
 
+empty_plan_dir="$td/empty-plans"
+mkdir -p "$empty_plan_dir"
+empty_plan_files=()
+for index in "${!unsupported_batch[@]}"; do
+  : >"$empty_plan_dir/$index.plan"
+  empty_plan_files+=("${unsupported_batch[$index]}")
+done
+
+runner_path=$(_mock_bin)
+for tool in bash cat rm; do
+  ln -s "$(command -v "$tool")" "$runner_path/$tool"
+done
+real_mktemp=$(command -v mktemp)
+mktemp_log="$td/empty-plan-mktemp.log"
+worker_log="$td/empty-plan-worker.log"
+cat >"$runner_path/mktemp" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CHECKRUN_MKTEMP_LOG"
+exec "$CHECKRUN_REAL_MKTEMP" "$@"
+EOF
+chmod +x "$runner_path/mktemp"
+
+_probe_empty_plan_runner() {
+  local runner="$1" rc worker_count allocation_count
+
+  : >"$mktemp_log"
+  : >"$worker_log"
+  CHECKRUN_REAL_MKTEMP="$real_mktemp" \
+    CHECKRUN_MKTEMP_LOG="$mktemp_log" \
+    CHECKRUN_WORKER_LOG="$worker_log" \
+    PATH="$runner_path" \
+    bash -c '
+      . "$1"
+      runner=$2
+      plan_dir=$3
+      shift 3
+      _lint_one_with_plan() {
+        printf "%s\n" "$1" >>"$CHECKRUN_WORKER_LOG"
+      }
+      case "$runner" in
+        pool) _autolint_run_files_pool 8 "$plan_dir" "$@" ;;
+        barrier) _autolint_run_file_batch "$plan_dir" 0 "$@" ;;
+      esac
+    ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
+    "$runner" "$empty_plan_dir" "${empty_plan_files[@]}"
+  rc=$?
+
+  worker_count=$(wc -l <"$worker_log")
+  worker_count=${worker_count//[[:space:]]/}
+  allocation_count=$(wc -l <"$mktemp_log")
+  allocation_count=${allocation_count//[[:space:]]/}
+  _assert_exit "empty-plan batch: ${runner} runner exits 0" 0 "$rc"
+  _assert_eq "empty-plan batch: ${runner} runner starts no workers" \
+    0 "$worker_count"
+  _assert_eq "empty-plan batch: ${runner} runner allocates no output files" \
+    0 "$allocation_count"
+}
+
+if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] ||
+  [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 3 ]]; then
+  _probe_empty_plan_runner pool
+else
+  echo "  - skipping pool-runner assertions (wait -n unavailable)"
+fi
+_probe_empty_plan_runner barrier
+
+mixed_plan_dir="$td/mixed-plans"
+mkdir -p "$mixed_plan_dir"
+: >"$mixed_plan_dir/0.plan"
+printf 'step\n' >"$mixed_plan_dir/1.plan"
+: >"$mixed_plan_dir/2.plan"
+printf 'step\n' >"$mixed_plan_dir/3.plan"
+
+_probe_mixed_plan_runner() {
+  local runner="$1" output rc
+
+  : >"$mktemp_log"
+  output=$(CHECKRUN_REAL_MKTEMP="$real_mktemp" \
+    CHECKRUN_MKTEMP_LOG="$mktemp_log" \
+    PATH="$runner_path" bash -c '
+    . "$1"
+    runner=$2
+    plan_dir=$3
+    shift 3
+    _lint_one_with_plan() {
+      printf "%s\n" "${1##*/}"
+    }
+    case "$runner" in
+      pool) _autolint_run_files_pool 2 "$plan_dir" "$@" ;;
+      barrier) _autolint_run_file_batch "$plan_dir" 0 "$@" ;;
+    esac
+  ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
+    "$runner" "$mixed_plan_dir" \
+    "${unsupported_batch[@]:0:4}")
+  rc=$?
+
+  _assert_exit "mixed-plan batch: ${runner} runner exits 0" 0 "$rc"
+  _assert_eq "mixed-plan batch: ${runner} runner preserves non-empty plan order" \
+    $'1.plan\n3.plan' "$output"
+}
+
+if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] ||
+  [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 3 ]]; then
+  _probe_mixed_plan_runner pool
+fi
+_probe_mixed_plan_runner barrier
+
 if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   perf_result=$(_measure_hook_perf "$AUTOLINT" "$unsupported")
   rc=$?
@@ -292,6 +410,17 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
     "$CHECKRUN_LINT_HOOK_P95_BUDGET_MS" \
     "$CHECKRUN_LINT_HOOK_DARWIN_P95_BUDGET_MS")
   _assert_perf_result "unsupported autolint" "$perf_result" "$rc" \
+    "$median_budget_ms" "$p95_budget_ms"
+
+  perf_result=$(_measure_hook_perf "$AUTOLINT" "${unsupported_batch[@]}")
+  rc=$?
+  median_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_EMPTY_BATCH_MEDIAN_BUDGET_MS" \
+    "$CHECKRUN_EMPTY_BATCH_DARWIN_MEDIAN_BUDGET_MS")
+  p95_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_EMPTY_BATCH_P95_BUDGET_MS" \
+    "$CHECKRUN_EMPTY_BATCH_DARWIN_P95_BUDGET_MS")
+  _assert_perf_result "20-file unsupported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
 fi
 

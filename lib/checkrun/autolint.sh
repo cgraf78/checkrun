@@ -284,18 +284,25 @@ _autolint_run_file_batch() {
 
   for index in "${!batch_files[@]}"; do
     global_index=$((base_index + index))
+    # Empty plans are authoritative no-ops. Do not pay for a worker and two
+    # output buffers when the registry already decided this file has no lint
+    # steps. Keep the original index so non-empty plan/output ordering is
+    # unchanged when supported and unsupported files are interleaved.
+    [ -s "$plan_dir/$global_index.plan" ] || continue
     stdout_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stdout.XXXXXX")
     stderr_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stderr.XXXXXX")
     (
       _lint_one_with_plan "$plan_dir/$global_index.plan"
     ) >"$stdout_file" 2>"$stderr_file" &
     pid=$!
-    batch_pids+=("$pid")
-    batch_stdout_files+=("$stdout_file")
-    batch_stderr_files+=("$stderr_file")
+    batch_pids[index]="$pid"
+    batch_stdout_files[index]="$stdout_file"
+    batch_stderr_files[index]="$stderr_file"
   done
 
   for index in "${!batch_files[@]}"; do
+    global_index=$((base_index + index))
+    [ -s "$plan_dir/$global_index.plan" ] || continue
     pid=${batch_pids[$index]}
     stdout_file=${batch_stdout_files[$index]}
     stderr_file=${batch_stderr_files[$index]}
@@ -351,6 +358,10 @@ _autolint_run_files_pool() {
   # immediately with its stored exit status, so this is cheap.
   while [ "$next" -lt "$n" ] || [ "$in_flight" -gt 0 ]; do
     while [ "$next" -lt "$n" ] && [ "$in_flight" -lt "$jobs" ]; do
+      if [ ! -s "$plan_dir/$next.plan" ]; then
+        next=$((next + 1))
+        continue
+      fi
       stdout_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stdout.XXXXXX")
       stderr_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stderr.XXXXXX")
       (
@@ -373,6 +384,7 @@ _autolint_run_files_pool() {
   done
 
   for i in "${!files[@]}"; do
+    [ -s "$plan_dir/$i.plan" ] || continue
     if wait "${pids[$i]}"; then
       file_rc=0
     else
