@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# Guard the startup shape and latency of Checkrun's edit-hook no-op path.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+AUTOFORMAT="$CHECKRUN_REPO_ROOT/bin/autoformat"
+AUTOLINT="$CHECKRUN_REPO_ROOT/bin/autolint"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
+  _require_compatible_libc "hook-performance-test"
+fi
+_mock_home
+
+CHECKRUN_HOOK_PERF_RUNS=${CHECKRUN_HOOK_PERF_RUNS:-20}
+# Process-count assertions below diagnose the specific startup regression.
+# Keep wall-clock limits coarse enough to tolerate scheduler and filesystem
+# contention on shared runners while still rejecting multi-second steady-state
+# hook latency.
+CHECKRUN_FORMAT_HOOK_MEDIAN_BUDGET_MS=1000
+CHECKRUN_FORMAT_HOOK_DARWIN_MEDIAN_BUDGET_MS=1500
+CHECKRUN_FORMAT_HOOK_P95_BUDGET_MS=3000
+CHECKRUN_FORMAT_HOOK_DARWIN_P95_BUDGET_MS=4500
+CHECKRUN_LINT_HOOK_MEDIAN_BUDGET_MS=1200
+CHECKRUN_LINT_HOOK_DARWIN_MEDIAN_BUDGET_MS=1800
+CHECKRUN_LINT_HOOK_P95_BUDGET_MS=3500
+CHECKRUN_LINT_HOOK_DARWIN_P95_BUDGET_MS=5000
+
+_perf_budget_ms() {
+  local budget_ms="$1" darwin_budget_ms="$2"
+  local multiplier="${CHECKRUN_PERF_BUDGET_MULTIPLIER:-1}"
+
+  if [[ "$(uname -s)" == Darwin ]]; then
+    budget_ms="$darwin_budget_ms"
+  fi
+  if ! [[ "$multiplier" =~ ^[1-9][0-9]*$ ]]; then
+    multiplier=1
+  fi
+  printf '%s\n' "$((budget_ms * multiplier))"
+}
+
+_measure_hook_perf() {
+  local command="$1" target="$2"
+
+  PATH="$hook_path" TMPDIR="$td" CHECKRUN_CONFIG_DIR=/nonexistent \
+    CHECKRUN_SCHEMA_LINT=/nonexistent python3 - \
+    "$command" "$target" "$CHECKRUN_HOOK_PERF_RUNS" <<'PY'
+import math
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+command = sys.argv[1:3]
+runs = int(sys.argv[3])
+timeout = float(os.environ.get("CHECKRUN_HOOK_PERF_TIMEOUT_SECONDS", "10"))
+timeout_ms = math.ceil(timeout * 1000)
+
+
+def sample() -> int:
+    started = time.perf_counter_ns()
+    with tempfile.TemporaryDirectory(
+        prefix="checkrun-hook-sample.", dir=os.environ["TMPDIR"]
+    ) as sample_tmp:
+        sample_env = os.environ.copy()
+        sample_env["TMPDIR"] = sample_tmp
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=sample_env,
+            start_new_session=True,
+        )
+        try:
+            output, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Kill the whole isolated group before TemporaryDirectory removes
+            # planner scratch. One timeout is excluded by a 20-sample p95;
+            # two still make the coarse wall-clock gate fail.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                output, _ = process.communicate(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                output, _ = process.communicate()
+            return timeout_ms
+    elapsed_ms = max(1, (time.perf_counter_ns() - started) // 1_000_000)
+    if process.returncode != 0:
+        output = output.decode(errors="replace")
+        raise SystemExit(
+            f"{command[0]} exited {process.returncode} during performance sample: {output}"
+        )
+    return elapsed_ms
+
+
+sample()  # Warm interpreter and filesystem caches before collecting samples.
+durations = sorted(sample() for _ in range(runs))
+p95_index = math.ceil(len(durations) * 0.95) - 1
+timeouts = sum(duration >= timeout_ms for duration in durations)
+print(f"{durations[p95_index]} {durations[len(durations) // 2]} {timeouts}")
+PY
+}
+
+_assert_perf_result() {
+  local name="$1" result="$2" rc="$3" median_budget_ms="$4" p95_budget_ms="$5"
+  local p95_ms median_ms timeout_count
+
+  _assert_exit "hook performance: all ${name} samples exit 0" 0 "$rc"
+  read -r p95_ms median_ms timeout_count <<<"$result"
+  if [[ "$p95_ms" =~ ^[0-9]+$ && "$median_ms" =~ ^[0-9]+$ && "$timeout_count" =~ ^[0-9]+$ ]]; then
+    echo "  PERF: ${name} median ${median_ms}ms / ${median_budget_ms}ms, p95 ${p95_ms}ms / ${p95_budget_ms}ms (timeouts ${timeout_count}, runs ${CHECKRUN_HOOK_PERF_RUNS})"
+    if [[ "$median_ms" -le "$median_budget_ms" ]]; then
+      _pass "hook performance: ${name} median stays within budget"
+    else
+      _fail "hook performance: ${name} median ${median_ms}ms exceeds ${median_budget_ms}ms"
+    fi
+    if [[ "$p95_ms" -le "$p95_budget_ms" ]]; then
+      _pass "hook performance: ${name} p95 stays within budget"
+    else
+      _fail "hook performance: ${name} p95 ${p95_ms}ms exceeds ${p95_budget_ms}ms"
+    fi
+  else
+    _fail "hook performance: ${name} timer returned invalid result '$result'"
+  fi
+}
+
+echo "=== checkrun: edit-hook performance ==="
+
+td=$(_tmpdir)
+unsupported="$td/unsupported.no-checkrun-tool"
+printf 'plain text\n' >"$unsupported"
+host_ps=$(command -v ps || true)
+
+hook_path=$(_mock_bin)
+for tool in bash cat dirname getconf mkdir mktemp python3 rm sleep; do
+  ln -s "$(command -v "$tool")" "$hook_path/$tool"
+done
+cat >"$hook_path/yq" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$hook_path/yq"
+
+if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
+  timeout_count_file="$td/timeout-count"
+  timeout_child_file="$td/timeout-child"
+  timeout_fixture="$td/timeout-fixture"
+  printf '0\n' >"$timeout_count_file"
+  cat >"$timeout_fixture" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=$(cat "$CHECKRUN_TIMEOUT_COUNT_FILE")
+count=$((count + 1))
+printf '%s\n' "$count" >"$CHECKRUN_TIMEOUT_COUNT_FILE"
+if [[ "$count" -eq 2 ]]; then
+  mkdir -p "$TMPDIR/planner-scratch"
+  sleep 30 &
+  printf '%s\n' "$!" >"$CHECKRUN_TIMEOUT_CHILD_FILE"
+  wait
+fi
+EOF
+  chmod +x "$timeout_fixture"
+  timeout_result=$(
+    CHECKRUN_HOOK_PERF_RUNS=2 \
+      CHECKRUN_HOOK_PERF_TIMEOUT_SECONDS=1 \
+      CHECKRUN_TIMEOUT_COUNT_FILE="$timeout_count_file" \
+      CHECKRUN_TIMEOUT_CHILD_FILE="$timeout_child_file" \
+      _measure_hook_perf "$timeout_fixture" "$td/unused"
+  )
+  read -r _ _ timeout_count <<<"$timeout_result"
+  _assert_eq "hook timeout: one stalled sample is reported" "1" "$timeout_count"
+  timeout_child=""
+  [[ -f "$timeout_child_file" ]] && timeout_child=$(cat "$timeout_child_file")
+  if [[ "$timeout_child" =~ ^[1-9][0-9]*$ ]]; then
+    _pass "hook timeout: descendant process was observed"
+    timeout_child_state=""
+    if [[ -n "$host_ps" ]]; then
+      for _ in {1..20}; do
+        timeout_child_state=$("$host_ps" -p "$timeout_child" -o stat= 2>/dev/null || true)
+        [[ -z "$timeout_child_state" || "$timeout_child_state" == Z* ]] && break
+        sleep 0.05
+      done
+    fi
+    if [[ -z "$host_ps" ]]; then
+      echo "  - skipping descendant process-state assertion (ps unavailable)"
+    elif [[ -z "$timeout_child_state" || "$timeout_child_state" == Z* ]]; then
+      _pass "hook timeout: isolated descendant process is terminated"
+    else
+      _fail "hook timeout: descendant remained alive (pid=$timeout_child state=$timeout_child_state)"
+      kill "$timeout_child" 2>/dev/null || true
+    fi
+  else
+    _fail "hook timeout: descendant PID was not observed"
+  fi
+  if compgen -G "$td/checkrun-hook-sample.*" >/dev/null; then
+    _fail "hook timeout: per-sample scratch directory remains"
+  else
+    _pass "hook timeout: per-sample scratch directory is removed"
+  fi
+fi
+
+real_python=$(command -v python3)
+python_log="$td/python.log"
+python_wrapper="$td/python-wrapper"
+cat >"$python_wrapper" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CHECKRUN_PYTHON_LOG"
+exec "$CHECKRUN_REAL_PYTHON" "$@"
+EOF
+chmod +x "$python_wrapper"
+: >"$python_log"
+
+CHECKRUN_REAL_PYTHON="$real_python" \
+  CHECKRUN_PYTHON_LOG="$python_log" \
+  CHECKRUN_PYTHON="$python_wrapper" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$hook_path" \
+  "$AUTOFORMAT" "$unsupported"
+rc=$?
+_assert_exit "hook startup: unsupported file exits 0" 0 "$rc"
+
+python_processes=$(wc -l <"$python_log")
+python_processes=${python_processes//[[:space:]]/}
+if [[ "$python_processes" -le 2 ]]; then
+  _pass "hook startup: unsupported file starts at most one probe and one planner"
+else
+  _fail "hook startup: unsupported file starts ${python_processes} Python processes (expected at most 2)"
+fi
+python_calls=$(cat "$python_log")
+_assert_not_contains "hook startup: shell does not resolve config in a separate interpreter" \
+  "checkrun_paths.py config" "$python_calls"
+_assert_contains "hook startup: registry planner still owns the no-op decision" \
+  "registry.py shell-plan" "$python_calls"
+
+if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
+  perf_result=$(_measure_hook_perf "$AUTOFORMAT" "$unsupported")
+  rc=$?
+  median_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_FORMAT_HOOK_MEDIAN_BUDGET_MS" \
+    "$CHECKRUN_FORMAT_HOOK_DARWIN_MEDIAN_BUDGET_MS")
+  p95_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_FORMAT_HOOK_P95_BUDGET_MS" \
+    "$CHECKRUN_FORMAT_HOOK_DARWIN_P95_BUDGET_MS")
+  _assert_perf_result "unsupported autoformat" "$perf_result" "$rc" \
+    "$median_budget_ms" "$p95_budget_ms"
+fi
+
+: >"$python_log"
+CHECKRUN_REAL_PYTHON="$real_python" \
+  CHECKRUN_PYTHON_LOG="$python_log" \
+  CHECKRUN_PYTHON="$python_wrapper" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  CHECKRUN_SCHEMA_LINT=/nonexistent \
+  PATH="$hook_path" \
+  "$AUTOLINT" "$unsupported"
+rc=$?
+_assert_exit "hook startup: unsupported lint file exits 0" 0 "$rc"
+
+python_processes=$(wc -l <"$python_log")
+python_processes=${python_processes//[[:space:]]/}
+if [[ "$python_processes" -le 2 ]]; then
+  _pass "hook startup: unsupported lint starts at most one probe and one planner"
+else
+  _fail "hook startup: unsupported lint starts ${python_processes} Python processes (expected at most 2)"
+fi
+python_calls=$(cat "$python_log")
+_assert_not_contains "hook startup: lint shell does not resolve config separately" \
+  "checkrun_paths.py config" "$python_calls"
+_assert_contains "hook startup: lint registry planner owns the no-op decision" \
+  "registry.py shell-plan" "$python_calls"
+
+if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
+  perf_result=$(_measure_hook_perf "$AUTOLINT" "$unsupported")
+  rc=$?
+  median_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_LINT_HOOK_MEDIAN_BUDGET_MS" \
+    "$CHECKRUN_LINT_HOOK_DARWIN_MEDIAN_BUDGET_MS")
+  p95_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_LINT_HOOK_P95_BUDGET_MS" \
+    "$CHECKRUN_LINT_HOOK_DARWIN_P95_BUDGET_MS")
+  _assert_perf_result "unsupported autolint" "$perf_result" "$rc" \
+    "$median_budget_ms" "$p95_budget_ms"
+fi
+
+_test_summary

@@ -22,6 +22,7 @@ program	test/suites/autolint-test
 program	test/suites/capabilities-test
 program	test/suites/checkrun-cli-test
 program	test/suites/ci-toolchain-test
+program	test/suites/hook-performance-test
 program	test/suites/manpage-test
 program	test/suites/nvim-test
 program	test/suites/path-policy-test

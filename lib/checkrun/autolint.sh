@@ -167,11 +167,13 @@ _autolint_pre_plan() {
   # input file into a fresh dir whose path is echoed on stdout for the caller
   # to capture. Returns non-zero (and removes the dir) if the planner itself
   # fails — empty per-file plans are legitimate skips, not failures.
-  local out_dir
-  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-plans.XXXXXX") || return 1
-  if ! _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint -- "$@"; then
+  local out_dir rc
+  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-plans.XXXXXX") || return 125
+  _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint -- "$@"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     rm -rf "$out_dir"
-    return 1
+    return "$rc"
   fi
   printf '%s\n' "$out_dir"
 }
@@ -403,19 +405,18 @@ _autolint_main() {
 
   [ "${#file_args[@]}" -eq 0 ] && return 0
 
-  _checkrun_resolve_config_dir CHECKRUN_CONFIG_DIR || return
-
-  # Export so the Python planner subprocess sees the bash-resolved absolute
-  # path.
-  export CHECKRUN_CONFIG_DIR
-
   for file in "${file_args[@]}"; do
     if lint_file=$(_lintable_path "$file"); then
       lint_files+=("$lint_file")
     fi
   done
 
-  [ "${#lint_files[@]}" -eq 0 ] && return 0
+  if [ "${#lint_files[@]}" -eq 0 ]; then
+    # No registry planner will run, so retain the direct CLI's historical path
+    # policy validation without adding a duplicate interpreter to real files.
+    _checkrun_config_dir >/dev/null || return
+    return 0
+  fi
 
   if [ "$fix" -eq 1 ]; then
     # Keep mutation mode sequential. Several backends operate at package/project
@@ -445,16 +446,16 @@ _autolint_main() {
     else
       # Plan every file in a single Python invocation. The pre-built plan
       # directory survives the spawn/wait below and is cleaned up after the
-      # runner returns. If pre-planning itself fails (registry corruption,
-      # tmpdir unavailable), fall back to per-file planning inside _lint_one
-      # so a broken host gets the same diagnostic flow it used to.
-      local plan_dir=""
-      plan_dir=$(_autolint_pre_plan "${lint_files[@]}") || plan_dir=""
-      if [ -n "$plan_dir" ] && _autolint_supports_pool; then
+      # runner returns. If the batch scratch directory is unavailable, fall
+      # back to per-file planning. An authoritative registry error is returned
+      # directly instead of being retried once per file.
+      local plan_dir="" plan_rc=0
+      plan_dir=$(_autolint_pre_plan "${lint_files[@]}") || plan_rc=$?
+      if [ "$plan_rc" -eq 0 ] && _autolint_supports_pool; then
         # Modern bash: keep ${jobs} workers in flight at all times.
         _autolint_run_files_pool "$jobs" "$plan_dir" "${lint_files[@]}"
         rc=$(_autolint_merge_rc "$rc" "$?")
-      elif [ -n "$plan_dir" ]; then
+      elif [ "$plan_rc" -eq 0 ]; then
         # Legacy bash (e.g. macOS system bash 3.2): wave-style barrier
         # batching. Pass the plan_dir + the global base index of each wave so
         # workers find their pre-built plan via plan_dir/<global_index>.plan.
@@ -463,15 +464,15 @@ _autolint_main() {
             "${lint_files[@]:start:jobs}"
           rc=$(_autolint_merge_rc "$rc" "$?")
         done
-      else
-        # Pre-planning failed — fall through to per-file planning. Each
-        # _lint_one call runs its own python3 invocation, matching legacy
-        # behavior, so the user still gets diagnostics instead of a silent
-        # skip.
+      elif [ "$plan_rc" -eq 125 ]; then
+        # Batch scratch allocation failed. Each _lint_one call uses the
+        # portable single-plan tempfile path, preserving the legacy fallback.
         for file in "${lint_files[@]}"; do
           _lint_one "$file"
           rc=$(_autolint_merge_rc "$rc" "$?")
         done
+      else
+        rc=$(_autolint_merge_rc "$rc" "$plan_rc")
       fi
       [ -n "$plan_dir" ] && rm -rf "$plan_dir"
     fi
