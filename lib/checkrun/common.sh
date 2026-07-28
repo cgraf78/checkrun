@@ -80,37 +80,112 @@ _checkrun_python_usable() {
   "$python" -c "$probe" >/dev/null 2>&1
 }
 
-_checkrun_python() {
-  local candidate resolved probe="${1:-import tomllib}"
+_checkrun_python_candidates() {
+  local candidate duplicate emitted resolved
+  local -a candidates=("") emitted_candidates=("")
 
   # Hooks and tests often constrain PATH to prove missing formatter/linter
   # behavior. Python entry points still need an interpreter in those
   # environments, so do not rely solely on `/usr/bin/env python3` from script
   # shebangs.
-  if [ -n "${CHECKRUN_PYTHON:-}" ] && _checkrun_python_usable "$CHECKRUN_PYTHON" "$probe"; then
-    printf '%s\n' "$CHECKRUN_PYTHON"
-    return 0
+  if [ -n "${CHECKRUN_PYTHON:-}" ] && [ -x "$CHECKRUN_PYTHON" ]; then
+    candidates+=("$CHECKRUN_PYTHON")
   fi
 
   for candidate in python3 /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
     case "$candidate" in
       */*)
-        _checkrun_python_usable "$candidate" "$probe" || continue
-        printf '%s\n' "$candidate"
-        return 0
+        [ -x "$candidate" ] || continue
+        candidates+=("$candidate")
         ;;
       *)
         if command -v "$candidate" >/dev/null 2>&1; then
           resolved=$(command -v "$candidate")
-          _checkrun_python_usable "$resolved" "$probe" || continue
-          printf '%s\n' "$resolved"
-          return 0
+          [ -x "$resolved" ] || continue
+          candidates+=("$resolved")
         fi
         ;;
     esac
   done
 
+  for candidate in "${candidates[@]}"; do
+    [ -n "$candidate" ] || continue
+    duplicate=0
+    for emitted in "${emitted_candidates[@]}"; do
+      if [ "$candidate" = "$emitted" ]; then
+        duplicate=1
+        break
+      fi
+    done
+    [ "$duplicate" -eq 0 ] || continue
+    printf '%s\n' "$candidate"
+    emitted_candidates+=("$candidate")
+  done
+}
+
+_checkrun_python() {
+  local python probe="${1:-import tomllib}"
+
+  while IFS= read -r python; do
+    _checkrun_python_usable "$python" "$probe" || continue
+    printf '%s\n' "$python"
+    return 0
+  done < <(_checkrun_python_candidates)
+
   return 1
+}
+
+# Run the public plan/explain registry CLI while testing tomllib and executing
+# the command in the same interpreter process. A side-channel marker separates
+# interpreter startup failures from registry exits without reserving an exit
+# code that the registry itself may return.
+_checkrun_registry_exec() {
+  local python rc ready
+
+  while IFS= read -r -u 9 python; do
+    # Isolate unusable candidates from caller streams. The bootstrap restores
+    # all three standard descriptors after imports succeed, then publishes READY.
+    {
+      ready=$("$python" -c '
+import sys
+
+ready_fd = int(sys.argv.pop(1))
+stdin_fd = int(sys.argv.pop(1))
+stdout_fd = int(sys.argv.pop(1))
+stderr_fd = int(sys.argv.pop(1))
+script_dir = sys.argv.pop(1)
+script = sys.argv.pop(1)
+sys.path[0] = script_dir
+
+import os
+import runpy
+
+try:
+    import tomllib  # noqa: F401
+except ImportError:
+    raise SystemExit(1)
+
+try:
+    os.dup2(stdin_fd, 0)
+    os.dup2(stdout_fd, 1)
+    os.dup2(stderr_fd, 2)
+    os.close(stdin_fd)
+    os.close(stdout_fd)
+    os.close(stderr_fd)
+    os.write(ready_fd, b"READY\n")
+    os.close(ready_fd)
+except OSError:
+    raise SystemExit(1)
+
+runpy.run_path(script, run_name="__main__")
+' 3 6 4 5 "$CHECKRUN_LIB_DIR" "$CHECKRUN_LIB_DIR/registry.py" "$@" 3>&1 9<&- </dev/null >/dev/null 2>/dev/null)
+      rc=$?
+    } 6<&0 4>&1 5>&2
+    [ "$ready" = READY ] && return "$rc"
+  done 9< <(_checkrun_python_candidates)
+
+  echo "checkrun: python3 with tomllib is required for registry planning" >&2
+  return 127
 }
 
 _checkrun_registry() {

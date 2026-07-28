@@ -39,6 +39,11 @@ _run_registry() {
   exec "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"
 }
 
+_run_registry_single_start() {
+  _checkrun_registry_exec "$@"
+  exit $?
+}
+
 _run_schema_refresh() {
   local python
   python=$(_checkrun_python 'import sys') || {
@@ -121,11 +126,11 @@ case "$cmd" in
     ;;
   plan)
     shift
-    _run_registry plan "$@"
+    _run_registry_single_start plan "$@"
     ;;
   explain)
     shift
-    _run_registry explain "$@"
+    _run_registry_single_start explain "$@"
     ;;
   schema)
     shift

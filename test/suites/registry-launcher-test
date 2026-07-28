@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# registry-launcher-test - interpreter fallback and startup-shape coverage.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "registry-launcher-test"
+
+CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
+REGISTRY_PY="$CHECKRUN_REPO_ROOT/lib/checkrun/registry.py"
+REAL_PYTHON=$(command -v python3)
+
+echo "=== checkrun: registry launcher ==="
+
+td=$(_tmpdir)
+mock_bin=$(_mock_bin)
+ln -s "$(command -v bash)" "$mock_bin/bash"
+
+cat >"$mock_bin/supported-python" <<'EOF'
+#!/usr/bin/env bash
+printf 'invoke' >>"${CHECKRUN_INTERPRETER_LOG:?}"
+printf '\t%q' "$@" >>"$CHECKRUN_INTERPRETER_LOG"
+printf '\n' >>"$CHECKRUN_INTERPRETER_LOG"
+exec "${CHECKRUN_REAL_PYTHON:?}" "$@"
+EOF
+chmod +x "$mock_bin/supported-python"
+
+for command in plan explain; do
+  log="$td/${command}-supported.log"
+  : >"$log"
+  case "$command" in
+    plan) args=(plan --json README.md) ;;
+    explain) args=(explain --json README.md) ;;
+  esac
+  output=$(PATH="$mock_bin:$PATH" \
+    CHECKRUN_PYTHON="$mock_bin/supported-python" \
+    CHECKRUN_INTERPRETER_LOG="$log" \
+    CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+    "$CHECKRUN" "${args[@]}" 2>&1)
+  rc=$?
+  _assert_exit "$command: supported interpreter exits zero" 0 "$rc"
+  _assert_contains "$command: supported interpreter emits registry JSON" \
+    '"filetype"' "$output"
+  _assert_eq "$command: supported interpreter starts once" \
+    "1" "$(wc -l <"$log" | tr -d ' ')"
+  _assert_contains "$command: single startup executes registry" \
+    "lib/checkrun/registry.py" "$(cat "$log")"
+done
+
+shadow_dir="$td/stdlib-shadow"
+mkdir -p "$shadow_dir"
+cat >"$shadow_dir/fnmatch.py" <<'EOF'
+raise RuntimeError("cwd fnmatch.py must not shadow the standard library")
+EOF
+set +e
+shadow_output=$(
+  cd "$shadow_dir" || exit
+  PATH="$mock_bin:$PATH" \
+    CHECKRUN_PYTHON="$mock_bin/supported-python" \
+    CHECKRUN_INTERPRETER_LOG="$td/shadow.log" \
+    CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+    "$CHECKRUN" plan --json "$CHECKRUN_REPO_ROOT/README.md" 2>&1
+)
+shadow_rc=$?
+set -e
+_assert_exit "plan: cwd standard-library collision does not change registry imports" 0 "$shadow_rc"
+_assert_contains "plan: cwd standard-library collision still emits registry JSON" \
+  '"filetype"' "$shadow_output"
+
+cat >"$mock_bin/no-tomllib-python" <<'EOF'
+#!/usr/bin/env bash
+printf 'invoke' >>"${CHECKRUN_NO_TOMLLIB_LOG:?}"
+printf '\t%q' "$@" >>"$CHECKRUN_NO_TOMLLIB_LOG"
+printf '\n' >>"$CHECKRUN_NO_TOMLLIB_LOG"
+case "${1:-}:${2:-}" in
+  -c:*tomllib*) exit 126 ;;
+esac
+exec "${CHECKRUN_REAL_PYTHON:?}" "$@"
+EOF
+cat >"$mock_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf 'invoke' >>"${CHECKRUN_FALLBACK_LOG:?}"
+printf '\t%q' "$@" >>"$CHECKRUN_FALLBACK_LOG"
+printf '\n' >>"$CHECKRUN_FALLBACK_LOG"
+exec "${CHECKRUN_REAL_PYTHON:?}" "$@"
+EOF
+chmod +x "$mock_bin/no-tomllib-python" "$mock_bin/python3"
+
+for command in plan explain; do
+  no_tomllib_log="$td/${command}-no-tomllib.log"
+  fallback_log="$td/${command}-fallback.log"
+  : >"$no_tomllib_log"
+  : >"$fallback_log"
+  case "$command" in
+    plan) args=(plan --json README.md) ;;
+    explain) args=(explain --json README.md) ;;
+  esac
+  output=$(PATH="$mock_bin" \
+    CHECKRUN_PYTHON="$mock_bin/no-tomllib-python" \
+    CHECKRUN_NO_TOMLLIB_LOG="$no_tomllib_log" \
+    CHECKRUN_FALLBACK_LOG="$fallback_log" \
+    CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+    "$CHECKRUN" "${args[@]}" 2>&1)
+  rc=$?
+  _assert_exit "$command: missing tomllib falls back" 0 "$rc"
+  _assert_contains "$command: fallback emits registry JSON" '"filetype"' "$output"
+  _assert_eq "$command: unsupported interpreter starts once" \
+    "1" "$(wc -l <"$no_tomllib_log" | tr -d ' ')"
+  _assert_eq "$command: fallback interpreter starts once" \
+    "1" "$(wc -l <"$fallback_log" | tr -d ' ')"
+done
+
+cat >"$mock_bin/broken-python" <<'EOF'
+#!/usr/bin/env bash
+printf 'invoke\n' >>"${CHECKRUN_BROKEN_LOG:?}"
+printf 'broken candidate stdout\n'
+printf 'broken candidate stderr\n' >&2
+exit 42
+EOF
+chmod +x "$mock_bin/broken-python"
+
+for broken_python in /bin/false "$mock_bin/broken-python"; do
+  broken_log="$td/$(basename "$broken_python").log"
+  fallback_log="$td/$(basename "$broken_python")-fallback.log"
+  : >"$broken_log"
+  : >"$fallback_log"
+  set +e
+  output=$(PATH="$mock_bin" \
+    CHECKRUN_PYTHON="$broken_python" \
+    CHECKRUN_BROKEN_LOG="$broken_log" \
+    CHECKRUN_FALLBACK_LOG="$fallback_log" \
+    CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+    "$CHECKRUN" plan --json README.md 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "$(basename "$broken_python"): startup failure falls back" 0 "$rc"
+  _assert_contains "$(basename "$broken_python"): fallback emits registry JSON" \
+    '"filetype"' "$output"
+  _assert_not_contains "$(basename "$broken_python"): failed candidate stdout stays suppressed" \
+    "broken candidate stdout" "$output"
+  _assert_not_contains "$(basename "$broken_python"): failed candidate stderr stays suppressed" \
+    "broken candidate stderr" "$output"
+  _assert_eq "$(basename "$broken_python"): fallback interpreter starts once" \
+    "1" "$(wc -l <"$fallback_log" | tr -d ' ')"
+done
+
+closed_stdout_log="$td/closed-stdout.log"
+closed_stdout_fallback_log="$td/closed-stdout-fallback.log"
+: >"$closed_stdout_log"
+: >"$closed_stdout_fallback_log"
+cat >"$mock_bin/closed-stdout-python" <<'EOF'
+#!/usr/bin/env bash
+printf 'invoke\n' >>"${CHECKRUN_CLOSED_STDOUT_LOG:?}"
+exec 4>&-
+exec "${CHECKRUN_REAL_PYTHON:?}" "$@"
+EOF
+chmod +x "$mock_bin/closed-stdout-python"
+set +e
+closed_stdout_output=$(PATH="$mock_bin" \
+  CHECKRUN_PYTHON="$mock_bin/closed-stdout-python" \
+  CHECKRUN_CLOSED_STDOUT_LOG="$closed_stdout_log" \
+  CHECKRUN_FALLBACK_LOG="$closed_stdout_fallback_log" \
+  CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+  "$CHECKRUN" plan --json README.md 2>&1)
+closed_stdout_rc=$?
+set -e
+_assert_exit "closed output descriptor: bootstrap failure falls back" 0 "$closed_stdout_rc"
+_assert_contains "closed output descriptor: fallback emits registry JSON" \
+  '"filetype"' "$closed_stdout_output"
+_assert_not_contains "closed output descriptor: bootstrap failure stays quiet" \
+  "Traceback" "$closed_stdout_output"
+_assert_eq "closed output descriptor: broken candidate starts once" \
+  "1" "$(wc -l <"$closed_stdout_log" | tr -d ' ')"
+_assert_eq "closed output descriptor: fallback starts once" \
+  "1" "$(wc -l <"$closed_stdout_fallback_log" | tr -d ' ')"
+
+# The focused helper test constrains the candidate set so host Python installs
+# cannot make the all-interpreters-missing case nondeterministic.
+CHECKRUN_LIB_DIR="$CHECKRUN_REPO_ROOT/lib/checkrun"
+# shellcheck source=../../lib/checkrun/common.sh
+. "$CHECKRUN_LIB_DIR/common.sh"
+
+duplicate_candidates=$(
+  CHECKRUN_PYTHON="$mock_bin/python3" \
+    PATH="$mock_bin" \
+    _checkrun_python_candidates
+)
+duplicate_candidate_count=$(printf '%s\n' "$duplicate_candidates" | grep -Fxc "$mock_bin/python3")
+_assert_eq "python candidates: configured and PATH-resolved executable is emitted once" \
+  "1" "$duplicate_candidate_count"
+
+_checkrun_python_candidates() {
+  printf '%s\n' "$mock_bin/no-tomllib-python"
+}
+missing_log="$td/all-missing.log"
+: >"$missing_log"
+set +e
+output=$(CHECKRUN_NO_TOMLLIB_LOG="$missing_log" \
+  CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+  _checkrun_registry_exec plan --json README.md 2>&1)
+rc=$?
+set -e
+_assert_exit "missing tomllib: all candidates exit 127" 127 "$rc"
+_assert_contains "missing tomllib: diagnostic preserves compatibility contract" \
+  "python3 with tomllib is required for registry planning" "$output"
+_assert_eq "missing tomllib: candidate is attempted once" \
+  "1" "$(wc -l <"$missing_log" | tr -d ' ')"
+
+registry_exit_lib="$td/registry-exit-lib"
+registry_fallback_log="$td/registry-exit-fallback.log"
+mkdir -p "$registry_exit_lib"
+: >"$registry_fallback_log"
+cat >"$registry_exit_lib/registry.py" <<'EOF'
+import hashlib
+import sys
+
+if sys.argv[1] == "stdin":
+    payload = sys.stdin.buffer.read()
+    print(f"{len(payload)}:{hashlib.sha256(payload).hexdigest()}")
+    raise SystemExit(0)
+
+print(f"registry exit {sys.argv[1]}")
+raise SystemExit(int(sys.argv[1]))
+EOF
+cat >"$mock_bin/registry-fallback-python" <<'EOF'
+#!/usr/bin/env bash
+printf 'invoke\n' >>"${CHECKRUN_REGISTRY_FALLBACK_LOG:?}"
+exec "${CHECKRUN_REAL_PYTHON:?}" "$@"
+EOF
+chmod +x "$mock_bin/registry-fallback-python"
+
+set +e
+registry_126_output=$(
+  # shellcheck disable=SC2329 # The launcher resolves this override by name.
+  _checkrun_python_candidates() {
+    printf '%s\n' "$REAL_PYTHON" "$mock_bin/registry-fallback-python"
+  }
+  CHECKRUN_LIB_DIR="$registry_exit_lib" \
+    CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+    CHECKRUN_REGISTRY_FALLBACK_LOG="$registry_fallback_log" \
+    _checkrun_registry_exec 126
+)
+registry_126_rc=$?
+set -e
+_assert_exit "registry exit: 126 passes through unchanged" 126 "$registry_126_rc"
+_assert_eq "registry exit: output is emitted once" \
+  "registry exit 126" "$registry_126_output"
+_assert_eq "registry exit: ready interpreter does not fall through" \
+  "" "$(cat "$registry_fallback_log")"
+
+registry_stdin_expected=$(
+  printf 'registry stdin\nsecond line\n' | "$REAL_PYTHON" "$registry_exit_lib/registry.py" stdin
+)
+registry_stdin_actual=$(
+  printf 'registry stdin\nsecond line\n' |
+    (
+      # shellcheck disable=SC2329 # The launcher resolves this override by name.
+      _checkrun_python_candidates() {
+        printf '%s\n' "$REAL_PYTHON"
+      }
+      CHECKRUN_LIB_DIR="$registry_exit_lib" _checkrun_registry_exec stdin
+    )
+)
+_assert_eq "registry stdin: launcher preserves the caller input stream" \
+  "$registry_stdin_expected" "$registry_stdin_actual"
+
+registry_stdin_drain_log="$td/registry-stdin-drain.log"
+: >"$registry_stdin_drain_log"
+cat >"$mock_bin/draining-python" <<'EOF'
+#!/usr/bin/env bash
+printf 'invoke\n' >>"${CHECKRUN_STDIN_DRAIN_LOG:?}"
+while IFS= read -r _line; do :; done
+exit 42
+EOF
+chmod +x "$mock_bin/draining-python"
+registry_stdin_fallback_actual=$(
+  printf 'registry stdin\nsecond line\n' |
+    (
+      # shellcheck disable=SC2329 # The launcher resolves this override by name.
+      _checkrun_python_candidates() {
+        printf '%s\n' "$mock_bin/draining-python" "$REAL_PYTHON"
+      }
+      CHECKRUN_LIB_DIR="$registry_exit_lib" \
+        CHECKRUN_STDIN_DRAIN_LOG="$registry_stdin_drain_log" \
+        _checkrun_registry_exec stdin
+    )
+)
+_assert_eq "registry stdin: rejected candidate cannot drain fallback input" \
+  "$registry_stdin_expected" "$registry_stdin_fallback_actual"
+_assert_eq "registry stdin: draining candidate starts once" \
+  "1" "$(wc -l <"$registry_stdin_drain_log" | tr -d ' ')"
+
+for command in plan explain; do
+  case "$command" in
+    plan) args=(plan README.md) ;;
+    explain) args=(explain --not-an-option README.md) ;;
+  esac
+  set +e
+  expected=$("$REAL_PYTHON" "$REGISTRY_PY" "${args[@]}" 2>&1)
+  expected_rc=$?
+  actual=$(PATH="$mock_bin:$PATH" \
+    CHECKRUN_PYTHON="$mock_bin/supported-python" \
+    CHECKRUN_INTERPRETER_LOG="$td/parity.log" \
+    CHECKRUN_REAL_PYTHON="$REAL_PYTHON" \
+    "$CHECKRUN" "${args[@]}" 2>&1)
+  actual_rc=$?
+  set -e
+  _assert_exit "$command: registry error exit is unchanged" "$expected_rc" "$actual_rc"
+  _assert_eq "$command: registry error output is unchanged" "$expected" "$actual"
+done
+
+_test_summary

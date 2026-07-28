@@ -27,6 +27,7 @@ program	test/suites/hook-performance-test
 program	test/suites/manpage-test
 program	test/suites/nvim-test
 program	test/suites/path-policy-test
+program	test/suites/registry-launcher-test
 program	test/suites/registry-test
 program	test/suites/schema-lint-test
 program	test/suites/schema-refresh-test
