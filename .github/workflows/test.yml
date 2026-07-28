@@ -31,6 +31,7 @@ jobs:
       termux-command: |-
         test/suites/path-policy-test
         test/suites/registry-test
+        CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY=1 test/suites/hook-performance-test
 
   shellcheck:
     # Dependency profiles and named setup modes are separate shared-workflow

@@ -1277,10 +1277,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "shell-plan":
-        if args.output_dir:
-            _write_shell_plan_dir(registry, args.phase, args.files, Path(args.output_dir))
-        else:
-            _print_shell_plan(registry, args.phase, args.files)
+        try:
+            if args.output_dir:
+                _write_shell_plan_dir(registry, args.phase, args.files, Path(args.output_dir))
+            else:
+                _print_shell_plan(registry, args.phase, args.files)
+        except checkrun_paths.PathPolicyError as exc:
+            # Direct autoformat/autolint callers historically use exit 1 for an
+            # unusable HOME/XDG policy. Keep that shell-entrypoint contract while
+            # public plan/explain commands retain structural exit 2 below.
+            print(f"checkrun: {exc}", file=sys.stderr)
+            return 1
         return 0
     raise AssertionError(args.command)
 

@@ -1134,6 +1134,8 @@ rc=$?
 set -e
 _assert_exit "invalid registry: autoformat exits non-zero" 2 "$rc"
 _assert_contains "invalid registry: autoformat reports registry error" "invalid JSON" "$output"
+_assert_eq "invalid registry: autoformat reports the planner failure once" \
+  "1" "$(grep -c 'invalid JSON' <<<"$output")"
 
 cp "$CHECKRUN_REPO_ROOT/share/checkrun/registry.json" "$_td/unknown-format-registry.json"
 python3 - "$_td/unknown-format-registry.json" <<'PY'

@@ -407,11 +407,13 @@ _autoformat_pre_plan() {
   # input file into a fresh dir whose path is echoed on stdout for the caller
   # to capture. Returns non-zero (and removes the dir) if the planner itself
   # fails — empty per-file plans are legitimate skips, not failures.
-  local out_dir
-  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/autoformat-plans.XXXXXX") || return 1
-  if ! _checkrun_registry shell-plan --output-dir "$out_dir" --phase format -- "$@"; then
+  local out_dir rc
+  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/autoformat-plans.XXXXXX") || return 125
+  _checkrun_registry shell-plan --output-dir "$out_dir" --phase format -- "$@"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     rm -rf "$out_dir"
-    return 1
+    return "$rc"
   fi
   printf '%s\n' "$out_dir"
 }
@@ -433,13 +435,11 @@ _autoformat_main() {
   # anyway (e.g. `autoformat $(get-changed-files)` with an empty result).
   [ "$#" -eq 0 ] && return 0
 
-  _checkrun_resolve_config_dir CHECKRUN_CONFIG_DIR || return
-
-  # Export so the Python planner subprocess sees the shell-resolved absolute
-  # path without resolving it a second time after a backend changes cwd.
-  export CHECKRUN_CONFIG_DIR
-
   if ! command -v yq >/dev/null 2>&1; then
+    # Preserve path-policy error precedence on this exceptional path. Normal
+    # edit-hook calls let the registry planner resolve it without a duplicate
+    # interpreter startup.
+    _checkrun_config_dir >/dev/null || return
     echo "autoformat: yq is required" >&2
     return 1
   fi
@@ -449,23 +449,25 @@ _autoformat_main() {
   # (clang-format, biome, rustfmt) operate on shared project caches and racing
   # them on the same files corrupts the cache. The win here is only on the
   # planner cost — N python startups become one — which dominates save-hook
-  # latency for any file count above ~5. If pre-planning fails (broken tmpdir,
-  # registry corruption), fall back to per-file planning so we still produce
-  # the same diagnostic flow. We can pass "$@" directly because any -h/--help
-  # arg would have returned above before reaching this point.
-  local plan_dir=""
-  plan_dir=$(_autoformat_pre_plan "$@") || plan_dir=""
-  if [ -n "$plan_dir" ]; then
+  # latency for any file count above ~5. If the batch scratch directory cannot
+  # be created, fall back to per-file planning. A registry failure is already
+  # authoritative and must not be retried just to repeat its diagnostic. We can
+  # pass "$@" directly because any -h/--help arg returned above.
+  local plan_dir="" plan_rc=0
+  plan_dir=$(_autoformat_pre_plan "$@") || plan_rc=$?
+  if [ "$plan_rc" -eq 0 ]; then
     local idx=0
     for file in "$@"; do
       _format_one_with_plan "$plan_dir/$idx.plan" || rc=$?
       idx=$((idx + 1))
     done
     rm -rf "$plan_dir"
-  else
+  elif [ "$plan_rc" -eq 125 ]; then
     for file in "$@"; do
       _format_one "$file" || rc=$?
     done
+  else
+    rc=$plan_rc
   fi
 
   return "$rc"
