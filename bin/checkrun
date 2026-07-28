@@ -30,15 +30,6 @@ CHECKRUN_LIB_DIR="$_bin_dir/../lib/checkrun"
 # shellcheck source=../lib/checkrun/common.sh
 . "$CHECKRUN_LIB_DIR/common.sh"
 
-_run_registry() {
-  local python
-  python=$(_checkrun_python) || {
-    echo "checkrun: python3 with tomllib is required for registry planning" >&2
-    exit 127
-  }
-  exec "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"
-}
-
 _run_registry_single_start() {
   _checkrun_registry_exec "$@"
   exit $?
@@ -90,7 +81,7 @@ case "$cmd" in
     case "${1:-}" in
       --json)
         shift
-        _run_registry registry --json "$@"
+        _run_registry_single_start registry --json "$@"
         ;;
       *)
         printf 'checkrun registry: expected --json\n' >&2
@@ -103,7 +94,7 @@ case "$cmd" in
     case "${1:-}" in
       --json | "")
         [ "${1:-}" = "--json" ] && shift
-        _run_registry capabilities --json "$@"
+        _run_registry_single_start capabilities --json "$@"
         ;;
       *)
         printf 'checkrun capabilities: unknown option: %s\n' "$1" >&2
@@ -116,7 +107,7 @@ case "$cmd" in
     case "${1:-}" in
       --json)
         shift
-        _run_registry editor-metadata --json "$@"
+        _run_registry_single_start editor-metadata --json "$@"
         ;;
       *)
         printf 'checkrun editor-metadata: expected --json\n' >&2
