@@ -70,6 +70,7 @@ assert registry_mod.__all__ == [
     "load_registry",
     "plan",
     "capabilities",
+    "editor_metadata",
     "explain_items",
     "resolve_config",
 ]

@@ -4,6 +4,7 @@
 Public contract:
   - `checkrun registry --json`
   - `checkrun capabilities --json`
+  - `checkrun editor-metadata --json`
   - `checkrun explain [--json] FILE...`
   - `checkrun plan --json [--phase format|lint] FILE...`
 
@@ -39,6 +40,7 @@ __all__ = [
     "load_registry",
     "plan",
     "capabilities",
+    "editor_metadata",
     "explain_items",
     "resolve_config",
 ]
@@ -1071,6 +1073,22 @@ def capabilities(registry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def editor_metadata(registry: dict[str, Any]) -> dict[str, Any]:
+    """Return portable, versioned metadata for editor configuration generation."""
+
+    schema_policy, policy = _load_schema_policy()
+    schemas = (
+        {"json": [], "yaml": {}, "toml": {}}
+        if policy is None
+        else schema_policy._portable_lsp_schema_config(policy)
+    )
+    return {
+        "version": 1,
+        "capabilities": capabilities(registry),
+        "schemas": schemas,
+    }
+
+
 def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, Any]]:
     """Return the public JSON payload used by `checkrun explain --json`."""
 
@@ -1221,6 +1239,9 @@ def main(argv: list[str] | None = None) -> int:
     cap_parser = subparsers.add_parser("capabilities")
     cap_parser.add_argument("--json", action="store_true", help="emit capabilities JSON")
 
+    editor_parser = subparsers.add_parser("editor-metadata")
+    editor_parser.add_argument("--json", action="store_true", help="emit editor metadata JSON")
+
     explain_parser = subparsers.add_parser("explain")
     explain_parser.add_argument("--json", action="store_true", help="emit JSON")
     explain_parser.add_argument("files", nargs="*")
@@ -1257,6 +1278,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.json:
             parser.error("capabilities requires --json")
         print(json.dumps(capabilities(registry), indent=2, sort_keys=True))
+        return 0
+    if args.command == "editor-metadata":
+        if not args.json:
+            parser.error("editor-metadata requires --json")
+        print(json.dumps(editor_metadata(registry), indent=2, sort_keys=True))
         return 0
     if args.command == "explain":
         if not args.files:
