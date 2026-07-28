@@ -22,6 +22,7 @@ output=$("$CHECKRUN" --help 2>&1)
 rc=$?
 _assert_exit "help: --help exits 0" 0 "$rc"
 _assert_contains "help: lists capabilities command" "capabilities" "$output"
+_assert_contains "help: lists editor metadata command" "editor-metadata" "$output"
 _assert_contains "help: lists registry command" "registry" "$output"
 _assert_contains "help: lists plan command" "plan" "$output"
 _assert_contains "help: lists explain command" "explain" "$output"

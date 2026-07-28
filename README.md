@@ -17,6 +17,7 @@ the bundled `man/man1/` pages into the user-local manpath.
 ```text
 checkrun registry --json
 checkrun capabilities --json
+checkrun editor-metadata --json
 checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
 checkrun schema refresh [--check] [--association NAME]
@@ -54,6 +55,12 @@ without a language toolchain does not break unrelated workflows.
 language-ID metadata for editor integrations. `checkrun plan --json` emits the
 stable execution-plan API for integrations that need to inspect Checkrun
 decisions without running tools.
+`checkrun editor-metadata --json` combines those capabilities with the active
+policy's LSP schema configuration in a versioned, deterministic object for
+update-time editor cache generation. Unlike the live schema projection, it does
+not resolve dependency assets or expand host paths: `$HOME` remains a literal
+placeholder and dependency assets use
+`shdeps:<dependency>/<repository-relative-asset>`.
 `checkrun explain` reports the normalized path, inferred filetype,
 phase-specific ignore decisions, candidate formatter/linter tools, fallback
 config names, and matching schema associations for selected files.
@@ -138,7 +145,16 @@ dependency manager's contract:
 python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --lsp-schemas
 python3 "$(shdeps dep-file cgraf78/checkrun lib/checkrun/schemas/schema_policy.py)" --lsp-schemas --editor-sources
 checkrun capabilities --json
+checkrun editor-metadata --json
 ```
+
+The editor metadata object has version `1`, with the existing versioned
+capability object under `capabilities` and portable LSP maps under `schemas`.
+Consumers materialize it while generating their local cache: replace `$HOME` in
+ordinary paths and URLs, regex-escape HOME when replacing it in TOML pattern
+keys, and resolve each `shdeps:` reference through `shdeps dep-file` before
+converting it to a `file://` URL. This command is intended for explicit update
+and CI workflows, not Neovim startup or save-time hooks.
 
 ### Neovim Adapter API
 

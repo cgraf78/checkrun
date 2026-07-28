@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# editor-metadata-test - verify the portable editor policy projection.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "editor-metadata-test"
+
+CHECKRUN="$CHECKRUN_REPO_ROOT/bin/checkrun"
+POLICY_SCRIPT="$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema_policy.py"
+_td=$(_tmpdir)
+_policy="$_td/associations.json"
+_home_one="$_td/home-one"
+_home_two="$_td/home-two"
+_mock=$(_mock_bin)
+_shdeps_marker="$_td/shdeps-invoked"
+_dependency_root="$_td/dependency"
+mkdir -p "$_home_one" "$_home_two" "$_dependency_root/schemas"
+
+_same_bytes() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+
+left, right = map(Path, sys.argv[1:])
+raise SystemExit(left.read_bytes() != right.read_bytes())
+PY
+}
+
+cat >"$_policy" <<'JSON'
+{
+  "version": 1,
+  "schemaDataDir": "$HOME/.local/share/checkrun/schemas",
+  "associations": [
+    {
+      "name": "Remote TOML",
+      "format": "toml",
+      "schema": "remote.schema.json",
+      "source": "https://example.invalid/remote.schema.json",
+      "matches": ["remote.toml"],
+      "enforce": true
+    },
+    {
+      "name": "Local YAML",
+      "format": "yaml",
+      "schema": "local.schema.json",
+      "matches": [".config/example/local.yml"],
+      "enforce": true
+    },
+    {
+      "name": "Dependency JSON",
+      "format": "json",
+      "dependency": "example/dependency",
+      "schema": "schemas/dependency.schema.json",
+      "matches": [
+        "$HOME/.config/example/dependency.json",
+        ".config/example/dependency-*.json"
+      ],
+      "enforce": true
+    },
+    {
+      "name": "Remote JSON",
+      "format": "json",
+      "schema": "remote-json.schema.json",
+      "source": "https://example.invalid/remote-json.schema.json",
+      "matches": ["remote.json"],
+      "enforce": true
+    }
+  ]
+}
+JSON
+
+cat >"$_mock/shdeps" <<'SH'
+#!/usr/bin/env bash
+printf 'invoked\n' >"$SHDEPS_MARKER"
+if [[ "$*" == "dep-file example/dependency schemas/dependency.schema.json" ]]; then
+  printf '%s\n' "$DEPENDENCY_ROOT/schemas/dependency.schema.json"
+  exit 0
+fi
+exit 2
+SH
+chmod +x "$_mock/shdeps"
+
+echo "=== checkrun: editor metadata ==="
+
+output_one="$_td/editor-one.json"
+output_two="$_td/editor-two.json"
+output_no_home="$_td/editor-no-home.json"
+capabilities_output="$_td/capabilities.json"
+HOME="$_home_one" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" \
+  SHDEPS_MARKER="$_shdeps_marker" DEPENDENCY_ROOT="$_dependency_root" \
+  PATH="$_mock:$PATH" "$CHECKRUN" editor-metadata --json >"$output_one" 2>"$_td/editor-one.err"
+rc=$?
+_assert_exit "editor metadata: command exits 0" 0 "$rc"
+_assert_file_missing "editor metadata: does not invoke shdeps" "$_shdeps_marker"
+_assert_eq "editor metadata: emits no dependency resolution warnings" \
+  "" "$(cat "$_td/editor-one.err")"
+"$CHECKRUN" capabilities --json >"$capabilities_output"
+
+HOME="$_home_two" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" \
+  SHDEPS_MARKER="$_shdeps_marker" DEPENDENCY_ROOT="$_dependency_root" \
+  PATH="$_mock:$PATH" "$CHECKRUN" editor-metadata --json >"$output_two" 2>"$_td/editor-two.err"
+rc=$?
+_assert_exit "editor metadata: second HOME exits 0" 0 "$rc"
+if _same_bytes "$output_one" "$output_two"; then
+  _pass "editor metadata: output is host independent"
+else
+  _fail "editor metadata: output changes with HOME"
+fi
+
+(
+  unset HOME
+  CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" \
+    SHDEPS_MARKER="$_shdeps_marker" DEPENDENCY_ROOT="$_dependency_root" \
+    PATH="$_mock:$PATH" "$CHECKRUN" editor-metadata --json
+) >"$output_no_home" 2>"$_td/editor-no-home.err"
+rc=$?
+_assert_exit "editor metadata: absolute policy works without HOME" 0 "$rc"
+if _same_bytes "$output_one" "$output_no_home"; then
+  _pass "editor metadata: HOME is not required to project portable policy"
+else
+  _fail "editor metadata: missing HOME changes portable output"
+fi
+
+python3 - "$output_one" "$capabilities_output" "$_td" "$CHECKRUN_REPO_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+output_path, capabilities_path, fixture_root, repo_root = map(Path, sys.argv[1:])
+raw = output_path.read_text(encoding="utf-8")
+data = json.loads(raw)
+capabilities = json.loads(capabilities_path.read_text(encoding="utf-8"))
+
+assert data["version"] == 1
+assert data["capabilities"]["version"] == 2
+assert data["capabilities"] == capabilities
+assert "python" in data["capabilities"]["filetypes"]["format"]
+assert set(data["schemas"]) == {"json", "yaml", "toml"}
+assert raw == json.dumps(data, indent=2, sort_keys=True) + "\n"
+
+json_schemas = data["schemas"]["json"]
+assert json_schemas == sorted(
+    json_schemas,
+    key=lambda item: (item["url"], item.get("name") or "", item["fileMatch"]),
+)
+dependency = next(item for item in json_schemas if item["name"] == "Dependency JSON")
+assert [item["name"] for item in json_schemas] == ["Remote JSON", "Dependency JSON"]
+assert dependency["url"] == "shdeps:example/dependency/schemas/dependency.schema.json"
+assert dependency["fileMatch"] == sorted(dependency["fileMatch"])
+assert "$HOME/.config/example/dependency.json" in dependency["fileMatch"]
+assert "$HOME/.config/example/dependency-*.json" in dependency["fileMatch"]
+
+local_url = "file://$HOME/.local/share/checkrun/schemas/local.schema.json"
+assert data["schemas"]["yaml"][local_url] == sorted(data["schemas"]["yaml"][local_url])
+assert "$HOME/.config/example/local.yml" in data["schemas"]["yaml"][local_url]
+assert "https://example.invalid/remote.schema.json" in data["schemas"]["toml"].values()
+
+for forbidden in (str(fixture_root), str(repo_root)):
+    assert forbidden not in raw
+PY
+_assert_exit "editor metadata: emits sorted portable versioned metadata" 0 "$?"
+
+legacy_output="$_td/legacy-lsp.json"
+HOME="$_home_one" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" \
+  SHDEPS_MARKER="$_shdeps_marker" DEPENDENCY_ROOT="$_dependency_root" \
+  PATH="$_mock:$PATH" python3 "$POLICY_SCRIPT" --lsp-schemas >"$legacy_output"
+_assert_file_exists "editor metadata: legacy projection still invokes shdeps" "$_shdeps_marker"
+
+python3 - "$output_one" "$legacy_output" "$_home_one" "$_dependency_root" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+portable_path, legacy_path, home_arg, dependency_root = sys.argv[1:]
+home = str(Path(home_arg).resolve())
+portable = json.loads(Path(portable_path).read_text(encoding="utf-8"))["schemas"]
+legacy = json.loads(Path(legacy_path).read_text(encoding="utf-8"))
+
+dependency_prefix = "shdeps:example/dependency/"
+
+
+def materialize(value):
+    if isinstance(value, str):
+        if value.startswith(dependency_prefix):
+            asset = value[len(dependency_prefix) :]
+            return "file://" + str(Path(dependency_root) / asset)
+        return value.replace("$HOME", home)
+    if isinstance(value, list):
+        return [materialize(item) for item in value]
+    if isinstance(value, dict):
+        return {materialize(key): materialize(item) for key, item in value.items()}
+    return value
+
+
+def materialize_config(config):
+    result = materialize({"json": config["json"], "yaml": config["yaml"]})
+    result["toml"] = {
+        key.replace("$HOME", re.escape(home).replace(r"\-", "-")): materialize(value)
+        for key, value in config["toml"].items()
+    }
+    return result
+
+
+def normalized(config):
+    return {
+        "json": sorted(
+            (
+                {
+                    **item,
+                    "fileMatch": sorted(item["fileMatch"]),
+                }
+                for item in config["json"]
+            ),
+            key=lambda item: (item["url"], item.get("name") or "", item["fileMatch"]),
+        ),
+        "yaml": {url: sorted(matches) for url, matches in sorted(config["yaml"].items())},
+        "toml": dict(sorted(config["toml"].items())),
+    }
+
+
+materialized = normalized(materialize_config(portable))
+expected = normalized(legacy)
+assert materialized == expected, (materialized, expected)
+PY
+_assert_exit "editor metadata: portable schemas round-trip to legacy LSP semantics" 0 "$?"
+
+set +e
+output=$("$CHECKRUN" editor-metadata 2>&1)
+rc=$?
+set -e
+_assert_exit "editor metadata: requires --json" 2 "$rc"
+_assert_contains "editor metadata: missing mode is actionable" \
+  "expected --json" "$output"
+
+_test_summary

@@ -36,6 +36,14 @@ Print raw Checkrun registry metadata.
 .B capabilities [--json]
 Print generated capability metadata for editor and integration adapters.
 .TP
+.B editor-metadata --json
+Print a deterministic, versioned editor projection containing capabilities and
+portable LSP schema configuration. Home-relative values retain the
+.B $HOME
+placeholder, and dependency schema assets use
+.BR shdeps: dependency / asset
+references without resolving them.
+.TP
 .B plan --json [--phase format|lint] FILE...
 Emit formatter and linter execution plans without running tools.
 .TP

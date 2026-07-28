@@ -66,6 +66,8 @@ Commands:
             print raw Checkrun registry data
   capabilities
             print Checkrun capability metadata
+  editor-metadata
+            print portable editor metadata
   plan      emit formatter/linter execution plans
   explain   explain formatter/linter/schema policy for files
   schema    schema maintenance commands
@@ -100,6 +102,19 @@ case "$cmd" in
         ;;
       *)
         printf 'checkrun capabilities: unknown option: %s\n' "$1" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  editor-metadata)
+    shift
+    case "${1:-}" in
+      --json)
+        shift
+        _run_registry editor-metadata --json "$@"
+        ;;
+      *)
+        printf 'checkrun editor-metadata: expected --json\n' >&2
         exit 2
         ;;
     esac

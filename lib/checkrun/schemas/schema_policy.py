@@ -264,6 +264,18 @@ def _home_string(value: str) -> str:
     return value
 
 
+def _portable_home_string(value: str) -> str:
+    """Normalize home-relative syntax without resolving it on the current host."""
+
+    if value.startswith("~/"):
+        return "$HOME/" + value[2:]
+    if value == "file://~":
+        return "file://$HOME"
+    if value.startswith("file://~/"):
+        return "file://$HOME/" + value[len("file://~/") :]
+    return value
+
+
 def policy_path() -> Path:
     """Return the active schema association policy path."""
 
@@ -438,6 +450,22 @@ def _expanded_patterns(patterns: Iterable[Any]) -> list[str]:
     return expanded
 
 
+def _portable_expanded_patterns(patterns: Iterable[Any]) -> list[str]:
+    """Expand consumer match forms while retaining a portable HOME token."""
+
+    expanded: set[str] = set()
+    for raw in patterns:
+        if not isinstance(raw, str):
+            continue
+        pattern = raw.strip()
+        if not pattern:
+            continue
+        expanded.add(_portable_home_string(pattern))
+        if not pattern.startswith(("/", "$HOME/", "~/")):
+            expanded.update((f"$HOME/{pattern}", f"**/{pattern}"))
+    return sorted(expanded)
+
+
 def _candidates(path: Path) -> set[str]:
     absolute = str(path)
     names = {absolute}
@@ -498,6 +526,90 @@ def _glob_to_regex(pattern: str) -> str:
     if pattern.startswith("**/"):
         return ".*/" + _glob_body(pattern[3:]) + "$"
     return ".*/" + body + "$"
+
+
+def _portable_glob_to_regex(pattern: str) -> str:
+    """Convert a portable glob while keeping HOME replaceable by consumers."""
+
+    if pattern == "$HOME":
+        return "^$HOME$"
+    if pattern.startswith("$HOME/"):
+        return "^$HOME/" + _glob_body(pattern[len("$HOME/") :]) + "$"
+    return _glob_to_regex(pattern)
+
+
+def _portable_schema_url(policy: dict[str, Any], association: dict[str, Any]) -> str | None:
+    """Return an editor schema reference without host path or process discovery."""
+
+    source = association.get("source")
+    if isinstance(source, str) and source:
+        return _portable_home_string(source)
+
+    schema = association.get("schema")
+    if not isinstance(schema, str) or not schema:
+        return None
+    if schema.startswith(("http://", "https://", "file://")):
+        return _portable_home_string(schema)
+
+    dependency = association.get("dependency")
+    if isinstance(dependency, str) and dependency:
+        return f"shdeps:{dependency}/{schema}"
+
+    schema = _portable_home_string(schema)
+    if schema.startswith("$HOME/"):
+        return "file://" + schema
+    if schema.startswith("/"):
+        return "file://" + schema
+    if "/" in schema:
+        return "file://$HOME/" + schema
+
+    data_dir = _portable_home_string(
+        str(policy.get("schemaDataDir", "$HOME/.local/share/checkrun/schemas"))
+    )
+    if not data_dir.startswith(("/", "$HOME/")):
+        data_dir = "$HOME/" + data_dir
+    return f"file://{data_dir.rstrip('/')}/{schema}"
+
+
+def _portable_lsp_schema_config(policy: dict[str, Any]) -> dict[str, Any]:
+    """Build deterministic LSP config without resolving host or dependency paths."""
+
+    json_schemas: list[dict[str, Any]] = []
+    yaml_schemas: dict[str, set[str]] = {}
+    toml_schemas: dict[str, str] = {}
+
+    for association in _associations(policy):
+        fmt = str(association.get("format", "")).lower()
+        url = _portable_schema_url(policy, association)
+        file_matches = _portable_expanded_patterns(association.get("matches", []))
+        if not url or not file_matches:
+            continue
+        if fmt == "json":
+            json_schemas.append(
+                {
+                    "name": association.get("name"),
+                    "url": url,
+                    "fileMatch": file_matches,
+                }
+            )
+        elif fmt == "yaml":
+            yaml_schemas.setdefault(url, set()).update(file_matches)
+        elif fmt == "toml":
+            for pattern in file_matches:
+                toml_schemas[_portable_glob_to_regex(pattern)] = url
+
+    json_schemas.sort(
+        key=lambda item: (
+            str(item["url"]),
+            str(item.get("name") or ""),
+            tuple(item["fileMatch"]),
+        )
+    )
+    return {
+        "json": json_schemas,
+        "yaml": {url: sorted(yaml_schemas[url]) for url in sorted(yaml_schemas)},
+        "toml": dict(sorted(toml_schemas.items())),
+    }
 
 
 def lsp_schema_config(policy: dict[str, Any], *, editor_sources: bool = False) -> dict[str, Any]:
