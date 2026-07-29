@@ -302,26 +302,44 @@ for index in "${!unsupported_batch[@]}"; do
 done
 
 runner_path=$(_mock_bin)
-for tool in bash cat rm; do
+for tool in bash cat; do
   ln -s "$(command -v "$tool")" "$runner_path/$tool"
 done
 real_mktemp=$(command -v mktemp)
+real_rm=$(command -v rm)
 mktemp_log="$td/empty-plan-mktemp.log"
+rm_log="$td/empty-plan-rm.log"
 worker_log="$td/empty-plan-worker.log"
 cat >"$runner_path/mktemp" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$CHECKRUN_MKTEMP_LOG"
 exec "$CHECKRUN_REAL_MKTEMP" "$@"
 EOF
-chmod +x "$runner_path/mktemp"
+cat >"$runner_path/rm" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CHECKRUN_RM_LOG"
+exec "$CHECKRUN_REAL_RM" "$@"
+EOF
+chmod +x "$runner_path/mktemp" "$runner_path/rm"
+
+pool_supported=0
+if bash -c '
+  . "$1"
+  _autolint_supports_pool
+' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh"; then
+  pool_supported=1
+fi
 
 _probe_empty_plan_runner() {
   local runner="$1" rc worker_count allocation_count
 
   : >"$mktemp_log"
+  : >"$rm_log"
   : >"$worker_log"
   CHECKRUN_REAL_MKTEMP="$real_mktemp" \
     CHECKRUN_MKTEMP_LOG="$mktemp_log" \
+    CHECKRUN_REAL_RM="$real_rm" \
+    CHECKRUN_RM_LOG="$rm_log" \
     CHECKRUN_WORKER_LOG="$worker_log" \
     PATH="$runner_path" \
     bash -c '
@@ -351,8 +369,7 @@ _probe_empty_plan_runner() {
     0 "$allocation_count"
 }
 
-if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] ||
-  [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 3 ]]; then
+if [[ "$pool_supported" == 1 ]]; then
   _probe_empty_plan_runner pool
 else
   echo "  - skipping pool-runner assertions (wait -n unavailable)"
@@ -370,15 +387,23 @@ _probe_mixed_plan_runner() {
   local runner="$1" output rc
 
   : >"$mktemp_log"
+  : >"$rm_log"
   output=$(CHECKRUN_REAL_MKTEMP="$real_mktemp" \
     CHECKRUN_MKTEMP_LOG="$mktemp_log" \
+    CHECKRUN_REAL_RM="$real_rm" \
+    CHECKRUN_RM_LOG="$rm_log" \
     PATH="$runner_path" bash -c '
     . "$1"
     runner=$2
     plan_dir=$3
     shift 3
     _lint_one_with_plan() {
-      printf "%s\n" "${1##*/}"
+      plan=${1##*/}
+      printf "%s\n" "$plan"
+      case "$plan" in
+        1.plan) return 1 ;;
+        3.plan) return 2 ;;
+      esac
     }
     case "$runner" in
       pool) _autolint_run_files_pool 2 "$plan_dir" "$@" ;;
@@ -389,16 +414,90 @@ _probe_mixed_plan_runner() {
     "${unsupported_batch[@]:0:4}")
   rc=$?
 
-  _assert_exit "mixed-plan batch: ${runner} runner exits 0" 0 "$rc"
+  _assert_exit "mixed-plan batch: ${runner} runner preserves strongest exit" 2 "$rc"
   _assert_eq "mixed-plan batch: ${runner} runner preserves non-empty plan order" \
     $'1.plan\n3.plan' "$output"
 }
 
-if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] ||
-  [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 3 ]]; then
+if [[ "$pool_supported" == 1 ]]; then
   _probe_mixed_plan_runner pool
 fi
 _probe_mixed_plan_runner barrier
+
+if [[ "$pool_supported" == 1 ]]; then
+  # Large commits legitimately send hundreds of selected files through this
+  # path. Hold the first wave so this pins both the worker cap and the process
+  # shape: buffering must not return to O(files) allocation/cleanup commands.
+  large_plan_count=300
+  large_plan_dir="$td/large-plans"
+  large_release="$td/large-plans.release"
+  mkdir -p "$large_plan_dir"
+  large_plan_files=()
+  for ((index = 0; index < large_plan_count; index++)); do
+    printf 'step\n' >"$large_plan_dir/$index.plan"
+    large_plan_files+=("$td/large-$index.txt")
+  done
+
+  : >"$mktemp_log"
+  : >"$rm_log"
+  : >"$worker_log"
+  CHECKRUN_REAL_MKTEMP="$real_mktemp" \
+    CHECKRUN_MKTEMP_LOG="$mktemp_log" \
+    CHECKRUN_REAL_RM="$real_rm" \
+    CHECKRUN_RM_LOG="$rm_log" \
+    CHECKRUN_WORKER_LOG="$worker_log" \
+    CHECKRUN_POOL_RELEASE="$large_release" \
+    CHECKRUN_REAL_SLEEP="$(command -v sleep)" \
+    PATH="$runner_path" \
+    bash -c '
+      . "$1"
+      plan_dir=$2
+      shift 2
+      _lint_one_with_plan() {
+        plan=${1##*/}
+        printf "%s\n" "$plan" >>"$CHECKRUN_WORKER_LOG"
+        case "$plan" in
+          0.plan | 1.plan)
+            while [ ! -e "$CHECKRUN_POOL_RELEASE" ]; do
+              "$CHECKRUN_REAL_SLEEP" 0.01
+            done
+            ;;
+        esac
+      }
+      _autolint_run_files_pool 2 "$plan_dir" "$@"
+    ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
+    "$large_plan_dir" "${large_plan_files[@]}" >/dev/null 2>&1 &
+  large_runner_pid=$!
+
+  for ((index = 0; index < 500; index++)); do
+    [[ "$(wc -l <"$worker_log")" -ge 2 ]] && break
+    sleep 0.01
+  done
+  large_blocked_count=$(wc -l <"$worker_log")
+  large_blocked_count=${large_blocked_count//[[:space:]]/}
+  _assert_eq "nonempty-plan batch: pool honors the worker cap" \
+    2 "$large_blocked_count"
+
+  : >"$large_release"
+  wait "$large_runner_pid"
+  rc=$?
+
+  large_worker_count=$(wc -l <"$worker_log")
+  large_worker_count=${large_worker_count//[[:space:]]/}
+  large_allocation_count=$(wc -l <"$mktemp_log")
+  large_allocation_count=${large_allocation_count//[[:space:]]/}
+  large_cleanup_count=$(wc -l <"$rm_log")
+  large_cleanup_count=${large_cleanup_count//[[:space:]]/}
+  _assert_exit "nonempty-plan batch: pool runner exits 0" 0 "$rc"
+  _assert_eq "nonempty-plan batch: pool starts every worker" \
+    "$large_plan_count" "$large_worker_count"
+  _assert_eq "nonempty-plan batch: pool allocates no per-worker files" \
+    0 "$large_allocation_count"
+  _assert_eq "nonempty-plan batch: pool performs no per-worker cleanup" \
+    0 "$large_cleanup_count"
+else
+  echo "  - skipping nonempty pool-runner assertions (wait -n unavailable)"
+fi
 
 if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   perf_result=$(_measure_hook_perf "$AUTOLINT" "$unsupported")
