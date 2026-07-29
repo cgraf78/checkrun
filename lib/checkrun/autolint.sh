@@ -339,7 +339,7 @@ _autolint_run_files_pool() {
   # ${jobs-1} workers for the rest of the wave. Output is still emitted in
   # file_args order at the end to keep
   # diagnostics deterministic for users and editor consumers — buffering is
-  # already required by the per-file temp file scheme.
+  # already required by the per-file output scheme.
   #
   # Each worker reads a pre-built plan file from `plan_dir/<index>.plan`,
   # which _autolint_main built in one Python call before invoking us. That
@@ -362,8 +362,8 @@ _autolint_run_files_pool() {
         next=$((next + 1))
         continue
       fi
-      stdout_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stdout.XXXXXX")
-      stderr_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stderr.XXXXXX")
+      stdout_file="$plan_dir/$next.stdout"
+      stderr_file="$plan_dir/$next.stderr"
       (
         _lint_one_with_plan "$plan_dir/$next.plan"
       ) >"$stdout_file" 2>"$stderr_file" &
@@ -392,7 +392,6 @@ _autolint_run_files_pool() {
     fi
     [ -s "${stdouts[$i]}" ] && cat "${stdouts[$i]}"
     [ -s "${stderrs[$i]}" ] && cat "${stderrs[$i]}" >&2
-    rm -f "${stdouts[$i]}" "${stderrs[$i]}"
     rc=$(_autolint_merge_rc "$rc" "$file_rc")
   done
 
