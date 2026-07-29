@@ -31,12 +31,30 @@ exec "${CHECKRUN_REAL_PYTHON:?}" "$@"
 EOF
 chmod +x "$mock_bin/supported-python"
 
-for command in plan explain; do
+for command in registry capabilities editor-metadata plan explain; do
   log="$td/${command}-supported.log"
   : >"$log"
   case "$command" in
-    plan) args=(plan --json README.md) ;;
-    explain) args=(explain --json README.md) ;;
+    registry)
+      args=(registry --json)
+      marker='"adapters"'
+      ;;
+    capabilities)
+      args=(capabilities --json)
+      marker='"editorLanguageIds"'
+      ;;
+    editor-metadata)
+      args=(editor-metadata --json)
+      marker='"capabilities"'
+      ;;
+    plan)
+      args=(plan --json README.md)
+      marker='"filetype"'
+      ;;
+    explain)
+      args=(explain --json README.md)
+      marker='"filetype"'
+      ;;
   esac
   output=$(PATH="$mock_bin:$PATH" \
     CHECKRUN_PYTHON="$mock_bin/supported-python" \
@@ -46,7 +64,7 @@ for command in plan explain; do
   rc=$?
   _assert_exit "$command: supported interpreter exits zero" 0 "$rc"
   _assert_contains "$command: supported interpreter emits registry JSON" \
-    '"filetype"' "$output"
+    "$marker" "$output"
   _assert_eq "$command: supported interpreter starts once" \
     "1" "$(wc -l <"$log" | tr -d ' ')"
   _assert_contains "$command: single startup executes registry" \
@@ -92,14 +110,32 @@ exec "${CHECKRUN_REAL_PYTHON:?}" "$@"
 EOF
 chmod +x "$mock_bin/no-tomllib-python" "$mock_bin/python3"
 
-for command in plan explain; do
+for command in registry capabilities editor-metadata plan explain; do
   no_tomllib_log="$td/${command}-no-tomllib.log"
   fallback_log="$td/${command}-fallback.log"
   : >"$no_tomllib_log"
   : >"$fallback_log"
   case "$command" in
-    plan) args=(plan --json README.md) ;;
-    explain) args=(explain --json README.md) ;;
+    registry)
+      args=(registry --json)
+      marker='"adapters"'
+      ;;
+    capabilities)
+      args=(capabilities --json)
+      marker='"editorLanguageIds"'
+      ;;
+    editor-metadata)
+      args=(editor-metadata --json)
+      marker='"capabilities"'
+      ;;
+    plan)
+      args=(plan --json README.md)
+      marker='"filetype"'
+      ;;
+    explain)
+      args=(explain --json README.md)
+      marker='"filetype"'
+      ;;
   esac
   output=$(PATH="$mock_bin" \
     CHECKRUN_PYTHON="$mock_bin/no-tomllib-python" \
@@ -109,7 +145,7 @@ for command in plan explain; do
     "$CHECKRUN" "${args[@]}" 2>&1)
   rc=$?
   _assert_exit "$command: missing tomllib falls back" 0 "$rc"
-  _assert_contains "$command: fallback emits registry JSON" '"filetype"' "$output"
+  _assert_contains "$command: fallback emits registry JSON" "$marker" "$output"
   _assert_eq "$command: unsupported interpreter starts once" \
     "1" "$(wc -l <"$no_tomllib_log" | tr -d ' ')"
   _assert_eq "$command: fallback interpreter starts once" \
@@ -296,8 +332,11 @@ _assert_eq "registry stdin: rejected candidate cannot drain fallback input" \
 _assert_eq "registry stdin: draining candidate starts once" \
   "1" "$(wc -l <"$registry_stdin_drain_log" | tr -d ' ')"
 
-for command in plan explain; do
+for command in registry capabilities editor-metadata plan explain; do
   case "$command" in
+    registry) args=(registry --json) ;;
+    capabilities) args=(capabilities --json) ;;
+    editor-metadata) args=(editor-metadata --json) ;;
     plan) args=(plan README.md) ;;
     explain) args=(explain --not-an-option README.md) ;;
   esac

@@ -7,7 +7,7 @@ the focused suites under `test/suites/`.
 
 - `checkrun-cli-test` covers user-facing command behavior.
 - `registry-launcher-test` covers single-start Python selection and fallback for
-  public plan and explain commands.
+  public registry-backed commands.
 - `registry-test`, `capabilities-test`, `editor-metadata-test`,
   `schema-lint-test`, and `schema-refresh-test` cover structured APIs and
   schema policy.

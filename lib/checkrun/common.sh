@@ -135,8 +135,8 @@ _checkrun_python() {
   return 1
 }
 
-# Run the public plan/explain registry CLI while testing tomllib and executing
-# the command in the same interpreter process. A side-channel marker separates
+# Run public registry-backed commands while testing tomllib and executing the
+# command in the same interpreter process. A side-channel marker separates
 # interpreter startup failures from registry exits without reserving an exit
 # code that the registry itself may return.
 _checkrun_registry_exec() {
