@@ -228,7 +228,8 @@ python_log="$td/python.log"
 python_wrapper="$td/python-wrapper"
 cat >"$python_wrapper" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"$CHECKRUN_PYTHON_LOG"
+printf '%q ' "$@" >>"$CHECKRUN_PYTHON_LOG"
+printf '\n' >>"$CHECKRUN_PYTHON_LOG"
 exec "$CHECKRUN_REAL_PYTHON" "$@"
 EOF
 chmod +x "$python_wrapper"
@@ -245,11 +246,8 @@ _assert_exit "hook startup: unsupported file exits 0" 0 "$rc"
 
 python_processes=$(wc -l <"$python_log")
 python_processes=${python_processes//[[:space:]]/}
-if [[ "$python_processes" -le 2 ]]; then
-  _pass "hook startup: unsupported file starts at most one probe and one planner"
-else
-  _fail "hook startup: unsupported file starts ${python_processes} Python processes (expected at most 2)"
-fi
+_assert_eq "hook startup: unsupported file starts one planner process" \
+  1 "$python_processes"
 python_calls=$(cat "$python_log")
 _assert_not_contains "hook startup: shell does not resolve config in a separate interpreter" \
   "checkrun_paths.py config" "$python_calls"
@@ -282,11 +280,8 @@ _assert_exit "hook startup: unsupported lint file exits 0" 0 "$rc"
 
 python_processes=$(wc -l <"$python_log")
 python_processes=${python_processes//[[:space:]]/}
-if [[ "$python_processes" -le 2 ]]; then
-  _pass "hook startup: unsupported lint starts at most one probe and one planner"
-else
-  _fail "hook startup: unsupported lint starts ${python_processes} Python processes (expected at most 2)"
-fi
+_assert_eq "hook startup: unsupported lint starts one planner process" \
+  1 "$python_processes"
 python_calls=$(cat "$python_log")
 _assert_not_contains "hook startup: lint shell does not resolve config separately" \
   "checkrun_paths.py config" "$python_calls"
