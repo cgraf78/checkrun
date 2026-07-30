@@ -135,8 +135,8 @@ _checkrun_python() {
   return 1
 }
 
-# Run public registry-backed commands while testing tomllib and executing the
-# command in the same interpreter process. A side-channel marker separates
+# Run registry-backed commands while testing tomllib and executing the command
+# in the same interpreter process. A side-channel marker separates
 # interpreter startup failures from registry exits without reserving an exit
 # code that the registry itself may return.
 _checkrun_registry_exec() {
@@ -189,12 +189,9 @@ runpy.run_path(script, run_name="__main__")
 }
 
 _checkrun_registry() {
-  local python
-  python=$(_checkrun_python) || {
-    echo "checkrun: python3 with tomllib is required for registry planning" >&2
-    return 127
-  }
-  "$python" "$CHECKRUN_LIB_DIR/registry.py" "$@"
+  # Edit hooks use the same bootstrap as public plan commands so interpreter
+  # compatibility probing and registry execution share one Python process.
+  _checkrun_registry_exec "$@"
 }
 
 _checkrun_tempfile() {
