@@ -68,6 +68,18 @@ _run_fmt() {
   return "$rc"
 }
 
+# Try a multi-file formatter invocation without surfacing its diagnostic. A
+# failed batch is retried through the existing per-file path so one malformed
+# file cannot prevent valid siblings from being formatted.
+_try_fmt_batch() {
+  local err rc
+  err=$(mktemp 2>/dev/null) || return 1
+  "$@" 2>"$err"
+  rc=$?
+  rm -f "$err"
+  return "$rc"
+}
+
 # Dispatch sh/bash/zsh through a single shfmt invocation. Exists
 # purely to dedupe the three extension branches plus the extensionless
 # shebang path; `lang` is the `-ln` value ("" for default bash parsing,
@@ -94,6 +106,32 @@ _format_sh() {
   fi
 
   _run_fmt shfmt ${args[@]+"${args[@]}"} -w "$file"
+}
+
+_format_sh_batch() {
+  local lang="$1" config_source="$2" config_path="$3" file
+  local args=() v_indent="" v_sci=""
+  shift 3
+  command -v shfmt &>/dev/null || return 0
+
+  [ -n "$lang" ] && args+=("-ln=$lang")
+  if [ "$config_source" = "fallback" ] && [ -f "$config_path" ]; then
+    {
+      read -r v_indent
+      read -r v_sci
+    } < <(
+      _toml_read_keys "$config_path" indent switch_case_indent
+    )
+    [ -n "$v_indent" ] && args+=(-i "$v_indent")
+    [ "$v_sci" = "true" ] && args+=(-ci)
+  fi
+
+  if _try_fmt_batch shfmt ${args[@]+"${args[@]}"} -w "$@"; then
+    return 0
+  fi
+  for file in "$@"; do
+    _format_sh "$file" "$(dirname "$file")" "$lang" "$config_source" "$config_path" || true
+  done
 }
 
 _format_cmake() {
@@ -193,6 +231,24 @@ _format_stylua() {
     args=(--config-path "$config_path")
   fi
   _run_fmt stylua ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_stylua_batch() {
+  local config_source="$1" config_path="$2" file
+  local args=()
+  shift 2
+  command -v stylua &>/dev/null || return 0
+
+  if [ "$config_source" = "fallback" ] && [ -n "$config_path" ]; then
+    args=(--config-path "$config_path")
+  fi
+  if _try_fmt_batch stylua ${args[@]+"${args[@]}"} "$@"; then
+    return 0
+  fi
+
+  for file in "$@"; do
+    _format_stylua "$file" "$(dirname "$file")" "$config_source" "$config_path" || true
+  done
 }
 
 _format_rustfmt() {
@@ -374,9 +430,8 @@ _format_one_with_plan() {
 _format_one() {
   # Plan one file inline (one Python invocation per call) and dispatch. Used
   # when _autoformat_pre_plan is unavailable (mktemp/tmpdir broken) or as the
-  # explicit single-file API. The batched path in _autoformat_main shares the
-  # same _format_one_with_plan dispatch loop after pre-planning all files at
-  # once.
+  # explicit single-file API. Successful pre-planning uses the same dispatcher
+  # for one file and the bounded multi-file runner for larger inputs.
   local file="$1" plan_file rc
 
   [ -z "$file" ] && return 0
@@ -402,6 +457,99 @@ _format_one() {
   return "$rc"
 }
 
+_format_batch_group() {
+  local adapter="$1" filetype="$2" config_source="$3" config_path="$4" dispatch_rc
+  shift 4
+
+  if [ "$#" -eq 1 ]; then
+    _format_dispatch "$adapter" "$1" "$filetype" "$config_source" "$config_path"
+    dispatch_rc=$?
+    [ "$dispatch_rc" -eq 125 ] && return "$dispatch_rc"
+    return 0
+  fi
+
+  case "$adapter" in
+    shfmt) _format_sh_batch "" "$config_source" "$config_path" "$@" ;;
+    shfmt-zsh) _format_sh_batch zsh "$config_source" "$config_path" "$@" ;;
+    stylua) _format_stylua_batch "$config_source" "$config_path" "$@" ;;
+    *)
+      for file in "$@"; do
+        _format_dispatch "$adapter" "$file" "$filetype" "$config_source" "$config_path"
+        dispatch_rc=$?
+        [ "$dispatch_rc" -eq 125 ] && return "$dispatch_rc"
+      done
+      ;;
+  esac
+}
+
+_autoformat_run_preplanned() {
+  local plan_dir="$1" plan_count="$2" idx=0 rc=0 dispatch_rc
+  local path filetype adapter config_source config_path record_count
+  local record_path record_filetype _record_phase record_adapter record_source record_config
+  local batch_adapter="" batch_filetype="" batch_source="" batch_path=""
+  local batch_files=()
+
+  while [ "$idx" -lt "$plan_count" ]; do
+    if [ ! -s "$plan_dir/$idx.plan" ]; then
+      idx=$((idx + 1))
+      continue
+    fi
+    path="" adapter="" record_count=0
+    while IFS= read -r -d '' record_path &&
+      IFS= read -r -d '' record_filetype &&
+      IFS= read -r -d '' _record_phase &&
+      IFS= read -r -d '' record_adapter &&
+      IFS= read -r -d '' record_source &&
+      IFS= read -r -d '' record_config; do
+      record_count=$((record_count + 1))
+      if [ "$record_count" -eq 1 ]; then
+        path="$record_path"
+        filetype="$record_filetype"
+        adapter="$record_adapter"
+        config_source="$record_source"
+        config_path="$record_config"
+      fi
+    done <"$plan_dir/$idx.plan"
+
+    if [[ "$adapter" =~ ^(shfmt|shfmt-zsh|stylua)$ ]] && [ "$record_count" -eq 1 ]; then
+      if [ "${#batch_files[@]}" -gt 0 ] && {
+        [ "$adapter" != "$batch_adapter" ] ||
+          [ "$config_source" != "$batch_source" ] ||
+          [ "$config_path" != "$batch_path" ] ||
+          [ "${#batch_files[@]}" -ge 64 ]
+      }; then
+        _format_batch_group "$batch_adapter" "$batch_filetype" \
+          "$batch_source" "$batch_path" "${batch_files[@]}" || rc=$?
+        batch_files=()
+      fi
+      if [ "${#batch_files[@]}" -eq 0 ]; then
+        batch_adapter="$adapter"
+        batch_filetype="$filetype"
+        batch_source="$config_source"
+        batch_path="$config_path"
+      fi
+      batch_files+=("$path")
+    else
+      if [ "${#batch_files[@]}" -gt 0 ]; then
+        _format_batch_group "$batch_adapter" "$batch_filetype" \
+          "$batch_source" "$batch_path" "${batch_files[@]}" || rc=$?
+        batch_files=()
+      fi
+      _format_one_with_plan "$plan_dir/$idx.plan" || {
+        dispatch_rc=$?
+        rc=$dispatch_rc
+      }
+    fi
+    idx=$((idx + 1))
+  done
+
+  if [ "${#batch_files[@]}" -gt 0 ]; then
+    _format_batch_group "$batch_adapter" "$batch_filetype" \
+      "$batch_source" "$batch_path" "${batch_files[@]}" || rc=$?
+  fi
+  return "$rc"
+}
+
 _autoformat_pre_plan() {
   # Plan many files in a single Python invocation. Writes `<index>.plan` per
   # input file into a fresh dir whose path is echoed on stdout for the caller
@@ -419,7 +567,7 @@ _autoformat_pre_plan() {
 }
 
 _autoformat_main() {
-  local arg file rc=0
+  local arg rc=0
 
   for arg in "$@"; do
     case "$arg" in
@@ -445,22 +593,21 @@ _autoformat_main() {
   fi
 
   # Pre-plan all files in one Python invocation, then dispatch each file from
-  # its pre-built plan. Sequential dispatch is intentional: several formatters
-  # (clang-format, biome, rustfmt) operate on shared project caches and racing
-  # them on the same files corrupts the cache. The win here is only on the
-  # planner cost — N python startups become one — which dominates save-hook
-  # latency for any file count above ~5. If the batch scratch directory cannot
-  # be created, fall back to per-file planning. A registry failure is already
-  # authoritative and must not be retried just to repeat its diagnostic. We can
-  # pass "$@" directly because any -h/--help arg returned above.
+  # its pre-built plan. Most adapters remain sequential because some operate on
+  # shared project caches. Consecutive, equivalent shfmt and Stylua plans use
+  # bounded multi-file invocations; every other ordering boundary is retained.
+  # If the batch scratch directory cannot be created, fall back to per-file
+  # planning. A registry failure is authoritative and must not be retried just
+  # to repeat its diagnostic. We can pass "$@" directly because any -h/--help
+  # arg returned above.
   local plan_dir="" plan_rc=0
   plan_dir=$(_autoformat_pre_plan "$@") || plan_rc=$?
   if [ "$plan_rc" -eq 0 ]; then
-    local idx=0
-    for file in "$@"; do
-      _format_one_with_plan "$plan_dir/$idx.plan" || rc=$?
-      idx=$((idx + 1))
-    done
+    if [ "$#" -eq 1 ]; then
+      _format_one_with_plan "$plan_dir/0.plan" || rc=$?
+    else
+      _autoformat_run_preplanned "$plan_dir" "$#" || rc=$?
+    fi
     rm -rf "$plan_dir"
   elif [ "$plan_rc" -eq 125 ]; then
     for file in "$@"; do

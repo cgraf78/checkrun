@@ -1156,6 +1156,15 @@ set -e
 _assert_exit "undispatched adapter: autoformat exits non-zero" 2 "$rc"
 _assert_contains "undispatched adapter: autoformat reports adapter id" "not dispatched" "$output"
 
+set +e
+output=$(CHECKRUN_REGISTRY="$_td/unknown-format-registry.json" \
+  "$AUTOFORMAT" "$_td/registry-format.py" "$_td/test.lua" 2>&1)
+rc=$?
+set -e
+_assert_exit "undispatched adapter: multi-file runner preserves failure" 2 "$rc"
+_assert_contains "undispatched adapter: multi-file runner reports adapter id" \
+  "not dispatched" "$output"
+
 _no_shfmt_bin=$(_mock_bin)
 for _tool in bash dirname mktemp python3 rm yq; do
   ln -s "$(command -v "$_tool")" "$_no_shfmt_bin/$_tool"
@@ -1244,6 +1253,289 @@ set -e
 _assert_exit "hostile filename: tab/newline shell path exits 0" 0 "$rc"
 _assert_contains "hostile filename: tab/newline shell path formats" \
   "  echo hi" "$(cat "$_weird_shell")"
+
+# ---------------------------------------------------------------------------
+# Tests: multi-file formatter batching
+# ---------------------------------------------------------------------------
+
+echo "=== Multi-file formatter batching ==="
+
+_batch_bin=$(_mock_bin)
+_batch_log="$_td/stylua-batch-calls"
+_batch_arg_log="$_td/stylua-batch-args"
+cat >"$_batch_bin/stylua" <<'EOF'
+#!/usr/bin/env bash
+printf 'call\n' >>"$CHECKRUN_BATCH_CALL_LOG"
+if [ -n "${CHECKRUN_BATCH_ARG_LOG:-}" ]; then
+  printf 'call\0' >>"$CHECKRUN_BATCH_ARG_LOG"
+  printf '%s\0' "$@" >>"$CHECKRUN_BATCH_ARG_LOG"
+  printf 'end\0' >>"$CHECKRUN_BATCH_ARG_LOG"
+fi
+EOF
+chmod +x "$_batch_bin/stylua"
+
+_batch_lua_dir=$(_tmpdir)
+for _batch_name in first second third; do
+  printf 'print("%s")\n' "$_batch_name" >"$_batch_lua_dir/$_batch_name.lua"
+done
+
+CHECKRUN_BATCH_CALL_LOG="$_batch_log" CHECKRUN_BATCH_ARG_LOG="$_batch_arg_log" \
+  PATH="$_batch_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_lua_dir/first.lua" \
+  "$_batch_lua_dir/second.lua" \
+  "$_batch_lua_dir/third.lua"
+
+_assert_eq "batch: equivalent consecutive stylua plans use one process" \
+  "1" "$(wc -l <"$_batch_log" | tr -d ' ')"
+_batch_stylua_argv=$(
+  python3 - "$_batch_arg_log" \
+    "$(_canonical_test_path "$CHECKRUN_CONFIG_DIR/stylua.toml")" \
+    "$(_canonical_test_path "$_batch_lua_dir/first.lua")" \
+    "$(_canonical_test_path "$_batch_lua_dir/second.lua")" \
+    "$(_canonical_test_path "$_batch_lua_dir/third.lua")" <<'PY'
+import os
+import sys
+
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+expected = [
+    b"call",
+    b"--config-path",
+    os.fsencode(sys.argv[2]),
+    *(os.fsencode(path) for path in sys.argv[3:]),
+    b"end",
+    b"",
+]
+print("match" if fields == expected else "mismatch")
+PY
+)
+_assert_eq "batch: stylua receives exact config and ordered paths" \
+  "match" "$_batch_stylua_argv"
+
+_batch_shfmt_log="$_td/shfmt-batch-calls"
+cat >"$_batch_bin/shfmt" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CHECKRUN_BATCH_CALL_LOG"
+if [ -n "${CHECKRUN_BATCH_ARG_LOG:-}" ]; then
+  printf 'call\0' >>"$CHECKRUN_BATCH_ARG_LOG"
+  printf '%s\0' "$@" >>"$CHECKRUN_BATCH_ARG_LOG"
+  printf 'end\0' >>"$CHECKRUN_BATCH_ARG_LOG"
+fi
+EOF
+chmod +x "$_batch_bin/shfmt"
+
+_batch_shell_dir=$(_tmpdir)
+for _batch_name in first second; do
+  printf 'echo %s\n' "$_batch_name" >"$_batch_shell_dir/$_batch_name.sh"
+  printf 'echo %s\n' "$_batch_name" >"$_batch_shell_dir/$_batch_name.zsh"
+done
+
+_batch_shfmt_arg_log="$_td/shfmt-batch-args"
+CHECKRUN_BATCH_CALL_LOG="$_batch_shfmt_log" CHECKRUN_BATCH_ARG_LOG="$_batch_shfmt_arg_log" \
+  PATH="$_batch_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_shell_dir/first.sh" \
+  "$_batch_shell_dir/second.sh" \
+  "$_batch_shell_dir/first.zsh" \
+  "$_batch_shell_dir/second.zsh"
+
+_assert_eq "batch: bash and zsh plans use one process per language" \
+  "2" "$(wc -l <"$_batch_shfmt_log" | tr -d ' ')"
+_assert_eq "batch: zsh plans retain the parser flag" \
+  "1" "$(grep -c -- '-ln=zsh' "$_batch_shfmt_log")"
+_batch_shfmt_argv=$(
+  python3 - "$_batch_shfmt_arg_log" \
+    "$(_canonical_test_path "$_batch_shell_dir/first.sh")" \
+    "$(_canonical_test_path "$_batch_shell_dir/second.sh")" \
+    "$(_canonical_test_path "$_batch_shell_dir/first.zsh")" \
+    "$(_canonical_test_path "$_batch_shell_dir/second.zsh")" <<'PY'
+import os
+import sys
+
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+calls = []
+current = None
+for field in fields:
+    if field == b"call":
+        current = []
+    elif field == b"end":
+        calls.append(current)
+        current = None
+    elif current is not None:
+        current.append(field)
+expected_paths = [os.fsencode(path) for path in sys.argv[2:]]
+ok = (
+    len(calls) == 2
+    and calls[0][-3:] == [b"-w", *expected_paths[:2]]
+    and calls[1][0] == b"-ln=zsh"
+    and calls[1][-3:] == [b"-w", *expected_paths[2:]]
+)
+print("match" if ok else "mismatch")
+PY
+)
+_assert_eq "batch: shfmt receives exact ordered paths per language" \
+  "match" "$_batch_shfmt_argv"
+
+printf 'echo bash\n' >"$_batch_shell_dir/mixed.bash"
+printf '#!/bin/bash\necho shebang\n' >"$_batch_shell_dir/mixed-script"
+: >"$_batch_shfmt_log"
+CHECKRUN_BATCH_CALL_LOG="$_batch_shfmt_log" PATH="$_batch_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_shell_dir/first.sh" \
+  "$_batch_shell_dir/mixed.bash" \
+  "$_batch_shell_dir/mixed-script" \
+  "$_batch_shell_dir/second.sh"
+_assert_eq "batch: equivalent bash filetypes share one shfmt process" \
+  "1" "$(wc -l <"$_batch_shfmt_log" | tr -d ' ')"
+
+printf 'ignored\n' >"$_batch_lua_dir/between.txt"
+: >"$_batch_log"
+CHECKRUN_BATCH_CALL_LOG="$_batch_log" PATH="$_batch_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_lua_dir/first.lua" \
+  "$_batch_lua_dir/between.txt" \
+  "$_batch_lua_dir/second.lua"
+_assert_eq "batch: empty plans do not split equivalent formatter work" \
+  "1" "$(wc -l <"$_batch_log" | tr -d ' ')"
+
+_batch_config_a=$(_tmpdir)
+_batch_config_b=$(_tmpdir)
+printf 'column_width = 80\n' >"$_batch_config_a/stylua.toml"
+printf 'column_width = 100\n' >"$_batch_config_b/stylua.toml"
+printf 'print("a1")\n' >"$_batch_config_a/first.lua"
+printf 'print("b")\n' >"$_batch_config_b/middle.lua"
+printf 'print("a2")\n' >"$_batch_config_a/last.lua"
+: >"$_batch_log"
+_batch_config_arg_log="$_td/stylua-config-batch-args"
+CHECKRUN_BATCH_CALL_LOG="$_batch_log" CHECKRUN_BATCH_ARG_LOG="$_batch_config_arg_log" \
+  PATH="$_batch_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_config_a/first.lua" \
+  "$_batch_config_b/middle.lua" \
+  "$_batch_config_a/last.lua"
+_assert_eq "batch: separated config groups retain execution order" \
+  "3" "$(wc -l <"$_batch_log" | tr -d ' ')"
+_batch_config_order=$(
+  python3 - "$_batch_config_arg_log" \
+    "$(_canonical_test_path "$_batch_config_a/first.lua")" \
+    "$(_canonical_test_path "$_batch_config_b/middle.lua")" \
+    "$(_canonical_test_path "$_batch_config_a/last.lua")" <<'PY'
+import os
+import sys
+
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+paths = [field for field in fields if field.endswith(b".lua")]
+print("match" if paths == [os.fsencode(path) for path in sys.argv[2:]] else "mismatch")
+PY
+)
+_assert_eq "batch: separated config groups preserve path order" \
+  "match" "$_batch_config_order"
+
+_batch_cap_files=()
+_batch_cap_i=1
+while [ "$_batch_cap_i" -le 65 ]; do
+  _batch_cap_file="$_batch_lua_dir/cap-$_batch_cap_i.lua"
+  printf 'print(%s)\n' "$_batch_cap_i" >"$_batch_cap_file"
+  _batch_cap_files+=("$_batch_cap_file")
+  _batch_cap_i=$((_batch_cap_i + 1))
+done
+: >"$_batch_log"
+_batch_cap_arg_log="$_td/stylua-cap-batch-args"
+CHECKRUN_BATCH_CALL_LOG="$_batch_log" CHECKRUN_BATCH_ARG_LOG="$_batch_cap_arg_log" \
+  PATH="$_batch_bin:$PATH" \
+  "$AUTOFORMAT" "${_batch_cap_files[@]}"
+_assert_eq "batch: formatter groups are capped at 64 files" \
+  "2" "$(wc -l <"$_batch_log" | tr -d ' ')"
+_batch_cap_sizes=$(
+  python3 - "$_batch_cap_arg_log" <<'PY'
+import sys
+
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+sizes = []
+current = None
+for field in fields:
+    if field == b"call":
+        current = 0
+    elif field == b"end":
+        sizes.append(current)
+        current = None
+    elif current is not None and field.endswith(b".lua"):
+        current += 1
+print("\n".join(str(size) for size in sizes))
+PY
+)
+_assert_eq "batch: formatter cap splits paths 64 then 1" $'64\n1' "$_batch_cap_sizes"
+
+_batch_arg_log="$_td/stylua-hostile-batch-args"
+_batch_weird_one=$_batch_lua_dir/$'tab\tname.lua'
+_batch_weird_two=$_batch_lua_dir/$'line\nbreak.lua'
+printf 'print(1)\n' >"$_batch_weird_one"
+printf 'print(2)\n' >"$_batch_weird_two"
+: >"$_batch_log"
+CHECKRUN_BATCH_CALL_LOG="$_batch_log" CHECKRUN_BATCH_ARG_LOG="$_batch_arg_log" \
+  PATH="$_batch_bin:$PATH" "$AUTOFORMAT" "$_batch_weird_one" "$_batch_weird_two"
+_batch_weird_counts=$(
+  python3 - "$_batch_arg_log" \
+    "$(_canonical_test_path "$_batch_weird_one")" \
+    "$(_canonical_test_path "$_batch_weird_two")" <<'PY'
+import os
+import sys
+
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+for path in sys.argv[2:]:
+    print(fields.count(os.fsencode(path)))
+PY
+)
+_assert_eq "batch: hostile paths reach the formatter exactly once" $'1\n1' "$_batch_weird_counts"
+
+_batch_fallback_bin=$(_mock_bin)
+_batch_fallback_log="$_td/stylua-batch-fallback-calls"
+cat >"$_batch_fallback_bin/stylua" <<'EOF'
+#!/usr/bin/env bash
+files=()
+for arg in "$@"; do
+  case "$arg" in
+    *.lua) files+=("$arg") ;;
+  esac
+done
+printf 'call\n' >>"$CHECKRUN_BATCH_CALL_LOG"
+if [ "${#files[@]}" -gt 1 ]; then
+  echo "batch failed" >&2
+  exit 2
+fi
+case "${files[0]:-}" in
+  *bad.lua)
+    echo "bad lua input" >&2
+    exit 2
+    ;;
+esac
+printf '%s\n' formatted >>"${files[0]}"
+EOF
+chmod +x "$_batch_fallback_bin/stylua"
+
+_batch_fallback_dir=$(_tmpdir)
+printf 'print(1)\n' >"$_batch_fallback_dir/before.lua"
+printf 'not lua\n' >"$_batch_fallback_dir/bad.lua"
+printf 'print(2)\n' >"$_batch_fallback_dir/after.lua"
+set +e
+output=$(CHECKRUN_BATCH_CALL_LOG="$_batch_fallback_log" \
+  PATH="$_batch_fallback_bin:$PATH" "$AUTOFORMAT" \
+  "$_batch_fallback_dir/before.lua" \
+  "$_batch_fallback_dir/bad.lua" \
+  "$_batch_fallback_dir/after.lua" 2>&1)
+rc=$?
+set -e
+_assert_exit "batch fallback: formatter failure remains advisory" 0 "$rc"
+_assert_eq "batch fallback: retries each file after the failed group" \
+  "4" "$(wc -l <"$_batch_fallback_log" | tr -d ' ')"
+_assert_contains "batch fallback: formats a valid file before the failure" \
+  "formatted" "$(cat "$_batch_fallback_dir/before.lua")"
+_assert_contains "batch fallback: formats a valid file after the failure" \
+  "formatted" "$(cat "$_batch_fallback_dir/after.lua")"
+_assert_eq "batch fallback: suppresses the speculative group diagnostic" \
+  "0" "$(grep -c 'batch failed' <<<"$output")"
+_assert_eq "batch fallback: surfaces the per-file diagnostic once" \
+  "1" "$(grep -c 'bad lua input' <<<"$output")"
 
 # ---------------------------------------------------------------------------
 # Tests: required tools
