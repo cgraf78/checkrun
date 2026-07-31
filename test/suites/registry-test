@@ -50,8 +50,10 @@ _td=$(_tmpdir)
 python3 - "$CHECKRUN_REPO_ROOT" "$_td" <<'PY'
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
+from unittest import mock
 
 root = Path(sys.argv[1])
 tmp = Path(sys.argv[2])
@@ -96,6 +98,78 @@ plan = registry_mod.plan(registry, [str(root / "README.md")], "lint")
 steps = plan["files"][0]["lint"]["steps"]
 assert [step["adapter"] for step in steps[:2]] == ["typos", "schema-lint"]
 assert steps[-1]["adapter"] == "rumdl-lint"
+
+
+def shell_plan_adapters(path: Path) -> list[str]:
+    chunks = registry_mod._shell_plan_records(registry, "lint", [str(path)])[0]
+    fields = b"".join(chunks).split(b"\0")
+    assert fields[-1] == b""
+    records = fields[:-1]
+    assert len(records) % 6 == 0
+    return [
+        records[index + 3].decode("utf-8", "surrogateescape")
+        for index in range(0, len(records), 6)
+    ]
+
+
+with mock.patch.object(Path, "resolve", side_effect=RuntimeError("resolution failed")):
+    assert registry_mod._same_resolved_path(Path("left"), Path("right"))
+
+shell_policy = tmp / "shell-plan-associations.json"
+matched_schema_target = tmp / "matched-settings.json"
+unmatched_schema_target = tmp / "unmatched.lua"
+matched_schema_target.write_text("{}\n", encoding="utf-8")
+unmatched_schema_target.write_text("return {}\n", encoding="utf-8")
+shell_policy.write_text(
+    json.dumps(
+        {
+            "version": 1,
+            "associations": [
+                {
+                    "name": "Matched settings",
+                    "format": "json",
+                    "schema": "settings.schema.json",
+                    "matches": [str(matched_schema_target.resolve())],
+                    "enforce": True,
+                }
+            ],
+        }
+    ),
+    encoding="utf-8",
+)
+original_policy_path = os.environ.get("CHECKRUN_SCHEMA_ASSOCIATIONS")
+try:
+    os.environ["CHECKRUN_SCHEMA_ASSOCIATIONS"] = str(shell_policy)
+    unmatched_public = registry_mod.plan(
+        registry, [str(unmatched_schema_target)], "lint"
+    )["files"][0]["lint"]
+    assert [step["adapter"] for step in unmatched_public["steps"]] == [
+        "typos",
+        "schema-lint",
+        "selene",
+    ]
+    assert unmatched_public["schemas"] == []
+    assert shell_plan_adapters(unmatched_schema_target) == ["typos", "selene"]
+    assert shell_plan_adapters(matched_schema_target) == [
+        "typos",
+        "schema-lint",
+        "biome-lint",
+    ]
+    assert shell_plan_adapters(shell_policy) == [
+        "typos",
+        "schema-lint",
+        "biome-lint",
+    ]
+
+    shell_policy_link = tmp / "shell-plan-associations-link.json"
+    shell_policy_link.symlink_to(shell_policy)
+    os.environ["CHECKRUN_SCHEMA_ASSOCIATIONS"] = str(shell_policy_link)
+    assert "schema-lint" in shell_plan_adapters(shell_policy)
+finally:
+    if original_policy_path is None:
+        os.environ.pop("CHECKRUN_SCHEMA_ASSOCIATIONS", None)
+    else:
+        os.environ["CHECKRUN_SCHEMA_ASSOCIATIONS"] = original_policy_path
 
 workflow = tmp / ".github/workflows/ci.yml"
 workflow.parent.mkdir(parents=True, exist_ok=True)

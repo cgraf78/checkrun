@@ -544,6 +544,15 @@ def _abs_path(path: str) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
+def _same_resolved_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except (OSError, RuntimeError):
+        # Elision is only an optimization; uncertain identity must retain the
+        # schema check so policy self-validation cannot fail open.
+        return True
+
+
 def _is_text(path: Path) -> bool:
     try:
         with path.open("rb") as file:
@@ -1171,19 +1180,32 @@ def _shell_plan_records(
     """Return per-input-file NUL-record blobs for the shell dispatch protocol.
 
     One blob per input file, in the same order as `files`. Each blob is the
-    serialized form of every plan step for that file (already-NUL-delimited);
+    serialized form of its executable plan steps (already-NUL-delimited);
     an empty blob means "no steps planned for this file" (ignored / unsupported
     / no matching selectors). The single-stream and per-file-output modes
     below both use this builder so the on-disk byte format never drifts.
     """
 
-    planned = plan(registry, files, phase)
+    schema_context = _load_schema_policy()
+    schema_policy, _ = schema_context
+    policy_path = schema_policy.policy_path() if phase == "lint" else None
+    planned_files = [
+        _plan_file(registry, file, phase, schema_context=schema_context) for file in files
+    ]
     blobs: list[list[bytes]] = []
-    for item in planned["files"]:
+    for item in planned_files:
         chunks: list[bytes] = []
         phase_data = item[phase]
         if not phase_data["ignored"]:
             for step in phase_data["steps"]:
+                if (
+                    phase == "lint"
+                    and step["adapter"] == "schema-lint"
+                    and not phase_data["schemas"]
+                    and policy_path is not None
+                    and not _same_resolved_path(Path(item["path"]), policy_path)
+                ):
+                    continue
                 config = step.get("config", {})
                 fields = [
                     item["path"],

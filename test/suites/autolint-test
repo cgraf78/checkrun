@@ -2126,9 +2126,26 @@ esac
 exit 1
 EOF
 chmod +x "$_phase_schema_validator"
+_phase_schema_policy=$_phase_ign_tgt/associations.json
+_phase_ign_tgt_canonical=$(_canonical_test_path "$_phase_ign_tgt")
+cat >"$_phase_schema_policy" <<EOF
+{
+  "version": 1,
+  "associations": [
+    {
+      "name": "Phase ignore fixture",
+      "format": "json",
+      "schema": "fixture.schema.json",
+      "matches": ["$_phase_ign_tgt_canonical/*.json"],
+      "enforce": true
+    }
+  ]
+}
+EOF
 
 set +e
 output=$(CHECKRUN_CONFIG_DIR="$_phase_ign_dir" \
+  CHECKRUN_SCHEMA_ASSOCIATIONS="$_phase_schema_policy" \
   CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
   CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
   "$AUTOLINT" "$_phase_ign_tgt/schema-only.json" 2>&1)
@@ -2140,6 +2157,7 @@ _assert_not_contains "spell-ignore: typo checker is skipped" "typos ran" "$outpu
 
 set +e
 output=$(CHECKRUN_CONFIG_DIR="$_phase_ign_dir" \
+  CHECKRUN_SCHEMA_ASSOCIATIONS="$_phase_schema_policy" \
   CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
   CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
   "$AUTOLINT" "$_phase_ign_tgt/schema-skipped.json" 2>&1)
@@ -2150,6 +2168,7 @@ _assert_eq "schema-ignore: no phase output when both are skipped" "" "$output"
 
 set +e
 output=$(CHECKRUN_CONFIG_DIR="$_phase_ign_dir" \
+  CHECKRUN_SCHEMA_ASSOCIATIONS="$_phase_schema_policy" \
   CHECKRUN_SCHEMA_LINT="$_phase_schema_validator" \
   CHECKRUN_AUTOLINT_JOBS=1 PATH="$_phase_ign_bin:/usr/bin:/bin" \
   "$AUTOLINT" "$_phase_ign_tgt/all-lint-skipped.json" 2>&1)
