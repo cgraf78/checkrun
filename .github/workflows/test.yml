@@ -21,12 +21,13 @@ jobs:
     # To update the pin, run locally:
     #   gh api repos/cgraf78/actions/branches/main --jq '.commit.sha'
     # and replace the ref below (form: `...@<40-char-sha>`).
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@d0648a98a1585710edb5d1393af84e48025bcaa7
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e
     with:
       concurrency-scope: shell
       matrix-set: full
       profiles: base,python
       setup: checkrun
+      shellcheck-inventory-path: test/shellcheck-files.txt
       test-command: CHECKRUN_SKIP_SHELLCHECK_SUITES=1 test/checkrun-test
       termux-command: |-
         test/suites/path-policy-test
@@ -34,10 +35,11 @@ jobs:
         CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY=1 test/suites/hook-performance-test
 
   shellcheck:
-    # Dependency profiles and named setup modes are separate shared-workflow
-    # paths. Keep ShellCheck on the profile path so every platform, including
-    # Alpine where Checkrun's mise bootstrap is intentionally skipped, gets it.
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@d0648a98a1585710edb5d1393af84e48025bcaa7
+    # Keep the previous required context during the branch-protection
+    # transition. It is removed only after the main shell aggregate proves that
+    # its shared inventory leaf is green. This profile path also keeps the
+    # repository-owned suites on Alpine, where named Checkrun setup skips Mise.
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e
     with:
       concurrency-scope: shellcheck
       matrix-set: full

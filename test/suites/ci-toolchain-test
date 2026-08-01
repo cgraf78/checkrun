@@ -15,12 +15,14 @@ python3 - \
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from copy import deepcopy
 from pathlib import Path
 
 script = Path(sys.argv[1])
-workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
+workflow_path = Path(sys.argv[2])
+workflow = workflow_path.read_text(encoding="utf-8")
 test_runner = Path(sys.argv[3]).read_text(encoding="utf-8")
 spec = importlib.util.spec_from_file_location("verify_mise_lock", script)
 if spec is None or spec.loader is None:
@@ -89,12 +91,24 @@ def job_block(name: str) -> str:
 
 
 shell_job = job_block("shell")
+workflow_refs = re.findall(
+    r"uses: cgraf78/actions/\.github/workflows/shell-ci\.yml@([0-9a-f]{40})",
+    workflow,
+)
+if len(workflow_refs) != 2 or len(set(workflow_refs)) != 1:
+    raise AssertionError("shell workflow calls must share one immutable revision")
+if not (workflow_path.parents[2] / "test/shellcheck-files.txt").is_file():
+    raise AssertionError("shared ShellCheck inventory is missing")
 if "setup: checkrun" not in shell_job:
     raise AssertionError("main shell job must retain the named Checkrun setup")
+if "shellcheck-inventory-path: test/shellcheck-files.txt" not in shell_job:
+    raise AssertionError("main shell job must include the shared ShellCheck gate")
 if "test-command: CHECKRUN_SKIP_SHELLCHECK_SUITES=1 test/checkrun-test" not in shell_job:
-    raise AssertionError("main shell job must delegate ShellCheck to its dedicated job")
+    raise AssertionError("main shell job must avoid duplicate ShellCheck suites")
 
 shellcheck_job = job_block("shellcheck")
+if "shellcheck-inventory-path:" in shellcheck_job:
+    raise AssertionError("transition lane must not add a second shared ShellCheck leaf")
 if "profiles: base,shellcheck" not in shellcheck_job:
     raise AssertionError("ShellCheck job must use the normal dependency profile path")
 if "setup:" in shellcheck_job:
