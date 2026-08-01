@@ -37,7 +37,8 @@ jobs:
   shellcheck:
     # Keep the previous required context during the branch-protection
     # transition. It is removed only after the main shell aggregate proves that
-    # its shared inventory leaf is green.
+    # its shared inventory leaf is green. This profile path also keeps the
+    # repository-owned suites on Alpine, where named Checkrun setup skips Mise.
     uses: cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e
     with:
       concurrency-scope: shellcheck
