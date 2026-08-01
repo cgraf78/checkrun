@@ -28,20 +28,8 @@ jobs:
       profiles: base,python
       setup: checkrun
       shellcheck-inventory-path: test/shellcheck-files.txt
-      test-command: CHECKRUN_SKIP_SHELLCHECK_SUITES=1 test/checkrun-test
+      test-command: test/checkrun-test
       termux-command: |-
         test/suites/path-policy-test
         test/suites/registry-test
         CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY=1 test/suites/hook-performance-test
-
-  shellcheck:
-    # Keep the previous required context during the branch-protection
-    # transition. It is removed only after the main shell aggregate proves that
-    # its shared inventory leaf is green. This profile path also keeps the
-    # repository-owned suites on Alpine, where named Checkrun setup skips Mise.
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e
-    with:
-      concurrency-scope: shellcheck
-      matrix-set: full
-      profiles: base,shellcheck
-      test-command: test/suites/shellcheck-inventory-test && test/suites/shellcheck-test

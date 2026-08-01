@@ -31,7 +31,5 @@ program	test/suites/registry-launcher-test
 program	test/suites/registry-test
 program	test/suites/schema-lint-test
 program	test/suites/schema-refresh-test
-program	test/suites/shellcheck-inventory-test
-program	test/suites/shellcheck-test
 program	test/suites/timeout-test
 program	test/suites/verify-test
