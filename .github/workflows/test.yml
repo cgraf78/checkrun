@@ -21,7 +21,7 @@ jobs:
     # To update the pin, run locally:
     #   gh api repos/cgraf78/actions/branches/main --jq '.commit.sha'
     # and replace the ref below (form: `...@<40-char-sha>`).
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@b171367f9b3d79a7d4ec933b4ecf6473d843f171
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e
     with:
       concurrency-scope: shell
       matrix-set: full
@@ -38,7 +38,7 @@ jobs:
     # Keep the previous required context during the branch-protection
     # transition. It is removed only after the main shell aggregate proves that
     # its shared inventory leaf is green.
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@b171367f9b3d79a7d4ec933b4ecf6473d843f171
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e
     with:
       concurrency-scope: shellcheck
       matrix-set: full
