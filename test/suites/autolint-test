@@ -512,8 +512,10 @@ _assert_eq "json batch guard: Ruff remains per-file" "2" \
   "$(grep -c '^ruff:' "$_batch_json_log")"
 _batch_json_paths=$(printf '%s\n' "$output" | jq -r '.path')
 _assert_eq "json batch guard: diagnostics retain input order" \
-  "$(printf '%s\n' "$_clean_batch_dir/python/file-1.py" \
-    "$_clean_batch_dir/python/file-2.py")" "$_batch_json_paths"
+  "$(printf '%s\n' \
+    "$(_canonical_test_path "$_clean_batch_dir/python/file-1.py")" \
+    "$(_canonical_test_path "$_clean_batch_dir/python/file-2.py")")" \
+  "$_batch_json_paths"
 
 echo "=== Read-only jobs=1 plans the complete file set once ==="
 
