@@ -47,6 +47,22 @@ _abs_path() {
   fi
 }
 
+_checkrun_path_dir() {
+  local output_name="$1" path="$2" value
+
+  # Registry plan paths are normalized absolute file paths. This deliberately
+  # avoids dirname's extra normalization rules for trailing or doubled slashes,
+  # which cannot occur at this private dispatch boundary.
+  case "$path" in
+    */*)
+      value=${path%/*}
+      [ -n "$value" ] || value=/
+      ;;
+    *) value=. ;;
+  esac
+  printf -v "$output_name" '%s' "$value"
+}
+
 _checkrun_resolve_config_dir() {
   local destination="$1" python value
   python=$(_checkrun_python 'import sys') || {

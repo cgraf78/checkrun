@@ -768,6 +768,15 @@ EOF
 found=$(cd "$_find_abs/launch" && _find_config ../project/sub taplo.toml)
 _assert_eq "find_config: relative search returns absolute path" \
   "$_find_abs/project/taplo.toml" "$found"
+root_dir=""
+relative_dir=""
+nested_dir=""
+_checkrun_path_dir root_dir /file.rs
+_checkrun_path_dir relative_dir file.rs
+_checkrun_path_dir nested_dir /project/src/file.rs
+_assert_eq "path dir: root-level absolute path keeps slash" "/" "$root_dir"
+_assert_eq "path dir: relative basename uses current directory" "." "$relative_dir"
+_assert_eq "path dir: nested absolute path keeps parent" "/project/src" "$nested_dir"
 
 # ---------------------------------------------------------------------------
 # Tests: shebang detection for extensionless files
@@ -1376,6 +1385,179 @@ PY
 _assert_eq "batch: shfmt receives exact ordered paths per language" \
   "match" "$_batch_shfmt_argv"
 
+_batch_ruff_log="$_td/ruff-batch-calls"
+_batch_ruff_bin=$(_mock_bin)
+cat >"$_batch_ruff_bin/ruff" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CHECKRUN_BATCH_CALL_LOG"
+EOF
+chmod +x "$_batch_ruff_bin/ruff"
+_batch_python_dir=$(_tmpdir)
+for _batch_name in first second third; do
+  printf 'value_%s=1\n' "$_batch_name" >"$_batch_python_dir/$_batch_name.py"
+done
+CHECKRUN_BATCH_CALL_LOG="$_batch_ruff_log" PATH="$_batch_ruff_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_python_dir/first.py" \
+  "$_batch_python_dir/second.py" \
+  "$_batch_python_dir/third.py"
+_assert_eq "batch: Ruff formats and sorts imports once per group" \
+  "2" "$(wc -l <"$_batch_ruff_log" | tr -d ' ')"
+_assert_eq "batch: Ruff invokes one format group" \
+  "1" "$(grep -c '^format --quiet' "$_batch_ruff_log")"
+_assert_eq "batch: Ruff invokes one import-sort group" \
+  "1" "$(grep -c '^check --quiet --fix --select=I' "$_batch_ruff_log")"
+_assert_contains_path_arg "batch: Ruff keeps fallback config" \
+  "--config " "$CHECKRUN_CONFIG_DIR/ruff.toml" "$(cat "$_batch_ruff_log")"
+for _batch_name in first second third; do
+  _assert_eq "batch: Ruff receives $_batch_name exactly twice" \
+    "2" "$(grep -cF "$(_canonical_test_path "$_batch_python_dir/$_batch_name.py")" \
+      "$_batch_ruff_log")"
+done
+
+_batch_clang_log="$_td/clang-batch-calls"
+_batch_clang_bin=$(_mock_bin)
+cat >"$_batch_clang_bin/clang-format" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CHECKRUN_BATCH_CALL_LOG"
+EOF
+chmod +x "$_batch_clang_bin/clang-format"
+_batch_clang_dir=$(_tmpdir)
+for _batch_name in first second third; do
+  printf 'int %s;\n' "$_batch_name" >"$_batch_clang_dir/$_batch_name.c"
+done
+CHECKRUN_BATCH_CALL_LOG="$_batch_clang_log" PATH="$_batch_clang_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_clang_dir/first.c" \
+  "$_batch_clang_dir/second.c" \
+  "$_batch_clang_dir/third.c"
+_assert_eq "batch: clang-format runs once per equivalent group" \
+  "1" "$(wc -l <"$_batch_clang_log" | tr -d ' ')"
+_assert_contains_path_arg "batch: clang-format keeps fallback config" \
+  "-style=file:" "$CHECKRUN_CONFIG_DIR/clang-format" "$(cat "$_batch_clang_log")"
+for _batch_name in first second third; do
+  _assert_eq "batch: clang-format receives $_batch_name exactly once" \
+    "1" "$(grep -cF "$(_canonical_test_path "$_batch_clang_dir/$_batch_name.c")" \
+      "$_batch_clang_log")"
+done
+
+_batch_rust_log="$_td/rustfmt-batch-calls"
+_batch_rust_bin=$(_mock_bin)
+cat >"$_batch_rust_bin/rustfmt" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CHECKRUN_BATCH_CALL_LOG"
+EOF
+chmod +x "$_batch_rust_bin/rustfmt"
+_batch_rust_dir=$(_tmpdir)
+cat >"$_batch_rust_dir/Cargo.toml" <<'EOF'
+[package]
+name = "batch-fixture"
+version = "0.1.0"
+edition = "2021"
+EOF
+for _batch_name in first second third; do
+  printf 'fn %s() {}\n' "$_batch_name" >"$_batch_rust_dir/$_batch_name.rs"
+done
+CHECKRUN_BATCH_CALL_LOG="$_batch_rust_log" PATH="$_batch_rust_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_rust_dir/first.rs" \
+  "$_batch_rust_dir/second.rs" \
+  "$_batch_rust_dir/third.rs"
+_assert_eq "batch: same-directory rustfmt runs once" \
+  "1" "$(wc -l <"$_batch_rust_log" | tr -d ' ')"
+_assert_contains "batch: rustfmt keeps the Cargo edition" \
+  "--edition 2021" "$(cat "$_batch_rust_log")"
+_assert_contains_path_arg "batch: rustfmt keeps fallback config" \
+  "--config-path " "$CHECKRUN_CONFIG_DIR/rustfmt.toml" "$(cat "$_batch_rust_log")"
+for _batch_name in first second third; do
+  _assert_eq "batch: rustfmt receives $_batch_name exactly once" \
+    "1" "$(grep -cF "$(_canonical_test_path "$_batch_rust_dir/$_batch_name.rs")" \
+      "$_batch_rust_log")"
+done
+
+_batch_rust_2018=$(_tmpdir)
+_batch_rust_2024=$(_tmpdir)
+for _batch_spec in "$_batch_rust_2018:2018" "$_batch_rust_2024:2024"; do
+  _batch_dir=${_batch_spec%:*}
+  _batch_edition=${_batch_spec##*:}
+  cat >"$_batch_dir/Cargo.toml" <<EOF
+[package]
+name = "batch-$_batch_edition"
+version = "0.1.0"
+edition = "$_batch_edition"
+EOF
+  printf 'fn first() {}\n' >"$_batch_dir/first.rs"
+  printf 'fn second() {}\n' >"$_batch_dir/second.rs"
+done
+: >"$_batch_rust_log"
+CHECKRUN_BATCH_CALL_LOG="$_batch_rust_log" PATH="$_batch_rust_bin:$PATH" \
+  "$AUTOFORMAT" \
+  "$_batch_rust_2018/first.rs" "$_batch_rust_2018/second.rs" \
+  "$_batch_rust_2024/first.rs" "$_batch_rust_2024/second.rs"
+_assert_eq "batch: rustfmt splits different source directories" \
+  "2" "$(wc -l <"$_batch_rust_log" | tr -d ' ')"
+_assert_eq "batch: rustfmt applies edition 2018 once" \
+  "1" "$(grep -c -- '--edition 2018' "$_batch_rust_log")"
+_assert_eq "batch: rustfmt applies edition 2024 once" \
+  "1" "$(grep -c -- '--edition 2024' "$_batch_rust_log")"
+
+_batch_equiv=$(_tmpdir)
+mkdir -p \
+  "$_batch_equiv/python-single" "$_batch_equiv/python-batch" \
+  "$_batch_equiv/clang-single" "$_batch_equiv/clang-batch" \
+  "$_batch_equiv/rust-single" "$_batch_equiv/rust-batch"
+for _batch_name in first second third; do
+  cat >"$_batch_equiv/python-single/$_batch_name.py" <<'EOF'
+import sys
+import os
+
+value={"key":1}
+EOF
+  cp "$_batch_equiv/python-single/$_batch_name.py" \
+    "$_batch_equiv/python-batch/$_batch_name.py"
+  printf 'int %s(void) {int value=1;return value;}\n' "$_batch_name" \
+    >"$_batch_equiv/clang-single/$_batch_name.c"
+  cp "$_batch_equiv/clang-single/$_batch_name.c" \
+    "$_batch_equiv/clang-batch/$_batch_name.c"
+  printf 'fn %s()->i32{1}\n' "$_batch_name" \
+    >"$_batch_equiv/rust-single/$_batch_name.rs"
+  cp "$_batch_equiv/rust-single/$_batch_name.rs" \
+    "$_batch_equiv/rust-batch/$_batch_name.rs"
+done
+for _batch_dir in "$_batch_equiv/rust-single" "$_batch_equiv/rust-batch"; do
+  cat >"$_batch_dir/Cargo.toml" <<'EOF'
+[package]
+name = "equivalence"
+version = "0.1.0"
+edition = "2021"
+EOF
+done
+for _batch_name in first second third; do
+  "$AUTOFORMAT" "$_batch_equiv/python-single/$_batch_name.py"
+  "$AUTOFORMAT" "$_batch_equiv/clang-single/$_batch_name.c"
+  "$AUTOFORMAT" "$_batch_equiv/rust-single/$_batch_name.rs"
+done
+"$AUTOFORMAT" "$_batch_equiv/python-batch"/*.py
+"$AUTOFORMAT" "$_batch_equiv/clang-batch"/*.c
+"$AUTOFORMAT" "$_batch_equiv/rust-batch"/*.rs
+_assert_contains "batch equivalence: Ruff fixture was actually formatted" \
+  'value = {"key": 1}' "$(cat "$_batch_equiv/python-single/first.py")"
+_assert_contains "batch equivalence: clang fixture was actually formatted" \
+  'int first(void) {' "$(cat "$_batch_equiv/clang-single/first.c")"
+_assert_contains "batch equivalence: rustfmt fixture was actually formatted" \
+  'fn first() -> i32 {' "$(cat "$_batch_equiv/rust-single/first.rs")"
+for _batch_name in first second third; do
+  _assert_eq "batch equivalence: Ruff preserves $_batch_name output" \
+    "$(cat "$_batch_equiv/python-single/$_batch_name.py")" \
+    "$(cat "$_batch_equiv/python-batch/$_batch_name.py")"
+  _assert_eq "batch equivalence: clang-format preserves $_batch_name output" \
+    "$(cat "$_batch_equiv/clang-single/$_batch_name.c")" \
+    "$(cat "$_batch_equiv/clang-batch/$_batch_name.c")"
+  _assert_eq "batch equivalence: rustfmt preserves $_batch_name output" \
+    "$(cat "$_batch_equiv/rust-single/$_batch_name.rs")" \
+    "$(cat "$_batch_equiv/rust-batch/$_batch_name.rs")"
+done
+
 printf 'echo bash\n' >"$_batch_shell_dir/mixed.bash"
 printf '#!/bin/bash\necho shebang\n' >"$_batch_shell_dir/mixed-script"
 : >"$_batch_shfmt_log"
@@ -1536,6 +1718,155 @@ _assert_eq "batch fallback: suppresses the speculative group diagnostic" \
   "0" "$(grep -c 'batch failed' <<<"$output")"
 _assert_eq "batch fallback: surfaces the per-file diagnostic once" \
   "1" "$(grep -c 'bad lua input' <<<"$output")"
+
+_ruff_fallback_bin=$(_mock_bin)
+_ruff_fallback_log="$_td/ruff-batch-fallback-calls"
+cat >"$_ruff_fallback_bin/ruff" <<'EOF'
+#!/usr/bin/env bash
+command=$1
+shift
+files=()
+for arg in "$@"; do
+  case "$arg" in
+    *.py) files+=("$arg") ;;
+  esac
+done
+printf '%s:%s\n' "$command" "${#files[@]}" >>"$CHECKRUN_BATCH_CALL_LOG"
+if [[ "$command" == "check" && "${#files[@]}" -gt 1 ]]; then
+  echo "speculative Ruff failure" >&2
+  exit 2
+fi
+if [[ "${#files[@]}" == "1" ]]; then
+  if [[ "$command" == "format" ]]; then
+    printf '# formatted\n' >>"${files[0]}"
+  elif [[ "${files[0]}" == *bad.py ]]; then
+    echo "bad Ruff input" >&2
+    exit 2
+  fi
+fi
+EOF
+chmod +x "$_ruff_fallback_bin/ruff"
+_ruff_fallback_dir=$(_tmpdir)
+printf 'before=1\n' >"$_ruff_fallback_dir/before.py"
+printf 'bad=1\n' >"$_ruff_fallback_dir/bad.py"
+printf 'after=1\n' >"$_ruff_fallback_dir/after.py"
+set +e
+output=$(CHECKRUN_BATCH_CALL_LOG="$_ruff_fallback_log" \
+  PATH="$_ruff_fallback_bin:$PATH" "$AUTOFORMAT" \
+  "$_ruff_fallback_dir/before.py" \
+  "$_ruff_fallback_dir/bad.py" \
+  "$_ruff_fallback_dir/after.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "Ruff batch fallback: failure remains advisory" 0 "$rc"
+_assert_eq "Ruff batch fallback: retries both phases per file" \
+  "8" "$(wc -l <"$_ruff_fallback_log" | tr -d ' ')"
+_assert_contains "Ruff batch fallback: formats valid file before failure" \
+  "formatted" "$(cat "$_ruff_fallback_dir/before.py")"
+_assert_contains "Ruff batch fallback: formats valid file after failure" \
+  "formatted" "$(cat "$_ruff_fallback_dir/after.py")"
+_assert_eq "Ruff batch fallback: hides speculative diagnostic" \
+  "0" "$(grep -c 'speculative Ruff failure' <<<"$output")"
+_assert_eq "Ruff batch fallback: surfaces bad-file diagnostic once" \
+  "1" "$(grep -c 'bad Ruff input' <<<"$output")"
+
+_clang_fallback_bin=$(_mock_bin)
+_clang_fallback_log="$_td/clang-batch-fallback-calls"
+cat >"$_clang_fallback_bin/clang-format" <<'EOF'
+#!/usr/bin/env bash
+files=()
+for arg in "$@"; do
+  case "$arg" in
+    *.c) files+=("$arg") ;;
+  esac
+done
+printf 'call:%s\n' "${#files[@]}" >>"$CHECKRUN_BATCH_CALL_LOG"
+if [[ "${#files[@]}" -gt 1 ]]; then
+  echo "speculative clang failure" >&2
+  exit 2
+fi
+if [[ "${files[0]}" == *bad.c ]]; then
+  echo "bad clang input" >&2
+  exit 2
+fi
+printf '/* formatted */\n' >>"${files[0]}"
+EOF
+chmod +x "$_clang_fallback_bin/clang-format"
+_clang_fallback_dir=$(_tmpdir)
+printf 'int before;\n' >"$_clang_fallback_dir/before.c"
+printf 'bad\n' >"$_clang_fallback_dir/bad.c"
+printf 'int after;\n' >"$_clang_fallback_dir/after.c"
+set +e
+output=$(CHECKRUN_BATCH_CALL_LOG="$_clang_fallback_log" \
+  PATH="$_clang_fallback_bin:$PATH" "$AUTOFORMAT" \
+  "$_clang_fallback_dir/before.c" \
+  "$_clang_fallback_dir/bad.c" \
+  "$_clang_fallback_dir/after.c" 2>&1)
+rc=$?
+set -e
+_assert_exit "clang batch fallback: failure remains advisory" 0 "$rc"
+_assert_eq "clang batch fallback: retries each file" \
+  "4" "$(wc -l <"$_clang_fallback_log" | tr -d ' ')"
+_assert_contains "clang batch fallback: formats valid file before failure" \
+  "formatted" "$(cat "$_clang_fallback_dir/before.c")"
+_assert_contains "clang batch fallback: formats valid file after failure" \
+  "formatted" "$(cat "$_clang_fallback_dir/after.c")"
+_assert_eq "clang batch fallback: hides speculative diagnostic" \
+  "0" "$(grep -c 'speculative clang failure' <<<"$output")"
+_assert_eq "clang batch fallback: surfaces bad-file diagnostic once" \
+  "1" "$(grep -c 'bad clang input' <<<"$output")"
+
+_rust_fallback_bin=$(_mock_bin)
+_rust_fallback_log="$_td/rustfmt-batch-fallback-calls"
+cat >"$_rust_fallback_bin/rustfmt" <<'EOF'
+#!/usr/bin/env bash
+files=()
+for arg in "$@"; do
+  case "$arg" in
+    *.rs) files+=("$arg") ;;
+  esac
+done
+printf 'call:%s\n' "${#files[@]}" >>"$CHECKRUN_BATCH_CALL_LOG"
+if [[ "${#files[@]}" -gt 1 ]]; then
+  echo "speculative rustfmt failure" >&2
+  exit 1
+fi
+if [[ "${files[0]}" == *bad.rs ]]; then
+  echo "bad rustfmt input" >&2
+  exit 1
+fi
+printf '// formatted\n' >>"${files[0]}"
+EOF
+chmod +x "$_rust_fallback_bin/rustfmt"
+_rust_fallback_dir=$(_tmpdir)
+cat >"$_rust_fallback_dir/Cargo.toml" <<'EOF'
+[package]
+name = "fallback"
+version = "0.1.0"
+edition = "2021"
+EOF
+printf 'fn before() {}\n' >"$_rust_fallback_dir/before.rs"
+printf 'bad\n' >"$_rust_fallback_dir/bad.rs"
+printf 'fn after() {}\n' >"$_rust_fallback_dir/after.rs"
+set +e
+output=$(CHECKRUN_BATCH_CALL_LOG="$_rust_fallback_log" \
+  PATH="$_rust_fallback_bin:$PATH" "$AUTOFORMAT" \
+  "$_rust_fallback_dir/before.rs" \
+  "$_rust_fallback_dir/bad.rs" \
+  "$_rust_fallback_dir/after.rs" 2>&1)
+rc=$?
+set -e
+_assert_exit "rustfmt batch fallback: failure remains advisory" 0 "$rc"
+_assert_eq "rustfmt batch fallback: retries each file" \
+  "4" "$(wc -l <"$_rust_fallback_log" | tr -d ' ')"
+_assert_contains "rustfmt batch fallback: formats valid file before failure" \
+  "formatted" "$(cat "$_rust_fallback_dir/before.rs")"
+_assert_contains "rustfmt batch fallback: formats valid file after failure" \
+  "formatted" "$(cat "$_rust_fallback_dir/after.rs")"
+_assert_eq "rustfmt batch fallback: hides speculative diagnostic" \
+  "0" "$(grep -c 'speculative rustfmt failure' <<<"$output")"
+_assert_eq "rustfmt batch fallback: surfaces bad-file diagnostic once" \
+  "1" "$(grep -c 'bad rustfmt input' <<<"$output")"
 
 # ---------------------------------------------------------------------------
 # Tests: required tools
