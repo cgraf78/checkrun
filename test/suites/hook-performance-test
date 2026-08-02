@@ -18,6 +18,7 @@ fi
 _mock_home
 
 CHECKRUN_HOOK_PERF_RUNS=${CHECKRUN_HOOK_PERF_RUNS:-20}
+CHECKRUN_SUPPORTED_BATCH_RUNS=${CHECKRUN_SUPPORTED_BATCH_RUNS:-7}
 # Process-count assertions below diagnose the specific startup regression.
 # Keep wall-clock limits coarse enough to tolerate scheduler and filesystem
 # contention on shared runners while still rejecting multi-second steady-state
@@ -34,8 +35,8 @@ CHECKRUN_EMPTY_BATCH_MEDIAN_BUDGET_MS=1000
 CHECKRUN_EMPTY_BATCH_DARWIN_MEDIAN_BUDGET_MS=1500
 CHECKRUN_EMPTY_BATCH_P95_BUDGET_MS=3000
 CHECKRUN_EMPTY_BATCH_DARWIN_P95_BUDGET_MS=4500
-CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS=1200
-CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS=1800
+CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS=1600
+CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS=2400
 CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS=3500
 CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS=5000
 
@@ -158,7 +159,7 @@ for index in {0..19}; do
   unsupported_batch+=("$batch_file")
 done
 supported_batch=()
-for index in {0..59}; do
+for index in {0..299}; do
   batch_file="$td/supported-$index.py"
   printf 'value_%s = %s\n' "$index" "$index" >"$batch_file"
   supported_batch+=("$batch_file")
@@ -317,9 +318,9 @@ CHECKRUN_LINTER_LOG="$linter_log" \
   "$AUTOLINT" "${supported_batch[@]}"
 rc=$?
 _assert_exit "supported lint batch: clean files exit 0" 0 "$rc"
-_assert_eq "supported lint batch: Typos starts once for 60 files" 1 \
+_assert_eq "supported lint batch: Typos uses five bounded commands for 300 files" 5 \
   "$(grep -c '^typos$' "$linter_log")"
-_assert_eq "supported lint batch: Ruff starts once for 60 files" 1 \
+_assert_eq "supported lint batch: Ruff uses five bounded commands for 300 files" 5 \
   "$(grep -c '^ruff$' "$linter_log")"
 
 empty_plan_dir="$td/empty-plans"
@@ -551,6 +552,8 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   _assert_perf_result "20-file unsupported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
 
+  default_perf_runs=$CHECKRUN_HOOK_PERF_RUNS
+  CHECKRUN_HOOK_PERF_RUNS=$CHECKRUN_SUPPORTED_BATCH_RUNS
   perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
   rc=$?
   median_budget_ms=$(_perf_budget_ms \
@@ -559,8 +562,9 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   p95_budget_ms=$(_perf_budget_ms \
     "$CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS" \
     "$CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS")
-  _assert_perf_result "60-file supported autolint batch" "$perf_result" "$rc" \
+  _assert_perf_result "300-file supported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
+  CHECKRUN_HOOK_PERF_RUNS=$default_perf_runs
 fi
 
 _test_summary

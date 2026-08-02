@@ -73,6 +73,8 @@ _SHELL_DISPATCH = {
     "format": (_CHECKRUN_ROOT / "lib/checkrun/autoformat.sh", "_format_dispatch()"),
     "lint": (_CHECKRUN_ROOT / "lib/checkrun/autolint.sh", "_lint_dispatch()"),
 }
+_SchemaMatchers = list[tuple[dict[str, Any], list[str]]]
+_SchemaContext = tuple[Any, dict[str, Any] | None, _SchemaMatchers]
 
 
 class RegistryError(RuntimeError):
@@ -574,6 +576,7 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
     if name in filetypes["filename"]:
         return str(filetypes["filename"][name])
 
+    path_candidates = _path_pattern_candidates(path)
     for item in filetypes["patterns"]:
         if item.get("extensionlessOnly") is True and ext:
             continue
@@ -581,7 +584,7 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
         # config syntaxes are identified by a narrow path shape rather than a
         # unique basename. Reusing the same candidate forms as path-scoped tool
         # matching keeps inference, explain, plan, and dispatch aligned.
-        if _path_pattern_matches(path, [item["pattern"]]):
+        if _path_pattern_matches(path, [item["pattern"]], candidates=path_candidates):
             return str(item["filetype"])
 
     if ext and ext in filetypes["extension"]:
@@ -610,9 +613,7 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
     return None
 
 
-def _path_pattern_matches(path: Path, patterns: list[str]) -> bool:
-    if not patterns:
-        return True
+def _path_pattern_candidates(path: Path) -> set[str]:
     # Keep path-scoped tools identical between explain, plan, and execution.
     # Checking absolute, cwd-relative, and basename forms preserves old explain
     # behavior while letting shell callers pass either absolute or relative args.
@@ -621,6 +622,16 @@ def _path_pattern_matches(path: Path, patterns: list[str]) -> bool:
         candidates.add(path.relative_to(Path.cwd()).as_posix())
     except ValueError:
         pass
+    return candidates
+
+
+def _path_pattern_matches(
+    path: Path, patterns: list[str], *, candidates: set[str] | None = None
+) -> bool:
+    if not patterns:
+        return True
+    if candidates is None:
+        candidates = _path_pattern_candidates(path)
     return any(
         fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates for pattern in patterns
     )
@@ -806,7 +817,7 @@ def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
     return {"ignored": False}
 
 
-def _load_schema_policy() -> tuple[Any, dict[str, Any] | None]:
+def _load_schema_policy() -> _SchemaContext:
     # Schema association policy remains outside the tooling registry. The plan
     # reports matching associations for explainability, but the association file
     # itself is still owned by dotfiles/project policy.
@@ -822,18 +833,20 @@ def _load_schema_policy() -> tuple[Any, dict[str, Any] | None]:
         policy = schema_policy.load_policy(policy_path)
     except schema_policy.SchemaPolicyError as exc:
         raise RegistryError(str(exc)) from exc
-    return schema_policy, policy
+    prepared = [] if policy is None else schema_policy._prepare_matching_associations(policy)
+    return schema_policy, policy, prepared
 
 
 def _schema_associations(
-    path: Path, schema_context: tuple[Any, dict[str, Any] | None]
+    path: Path,
+    schema_context: _SchemaContext,
 ) -> list[dict[str, Any]]:
-    schema_policy, policy = schema_context
+    schema_policy, policy, prepared = schema_context
     if policy is None:
         return []
 
     result = []
-    for association in schema_policy.matching_associations(policy, path):
+    for association in schema_policy.matching_associations(policy, path, prepared=prepared):
         result.append(
             {
                 "name": association.get("name"),
@@ -937,7 +950,7 @@ def _plan_file(
     file_arg: str,
     phase: str | None = None,
     *,
-    schema_context: tuple[Any, dict[str, Any] | None],
+    schema_context: _SchemaContext,
 ) -> dict[str, Any]:
     # Planning inspects local files and config only; it never executes tools.
     # Shell entrypoints consume this as their policy answer and keep adapter
@@ -1085,7 +1098,7 @@ def capabilities(registry: dict[str, Any]) -> dict[str, Any]:
 def editor_metadata(registry: dict[str, Any]) -> dict[str, Any]:
     """Return portable, versioned metadata for editor configuration generation."""
 
-    schema_policy, policy = _load_schema_policy()
+    schema_policy, policy, _ = _load_schema_policy()
     schemas = (
         {"json": [], "yaml": {}, "toml": {}}
         if policy is None
@@ -1187,7 +1200,7 @@ def _shell_plan_items(
     """
 
     schema_context = _load_schema_policy()
-    schema_policy, _ = schema_context
+    schema_policy, _, _ = schema_context
     policy_path = schema_policy.policy_path() if phase == "lint" else None
     planned_files = [
         _plan_file(registry, file, phase, schema_context=schema_context) for file in files
