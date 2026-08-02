@@ -18,6 +18,7 @@ fi
 _mock_home
 
 CHECKRUN_HOOK_PERF_RUNS=${CHECKRUN_HOOK_PERF_RUNS:-20}
+CHECKRUN_SUPPORTED_BATCH_RUNS=${CHECKRUN_SUPPORTED_BATCH_RUNS:-20}
 # Process-count assertions below diagnose the specific startup regression.
 # Keep wall-clock limits coarse enough to tolerate scheduler and filesystem
 # contention on shared runners while still rejecting multi-second steady-state
@@ -34,6 +35,10 @@ CHECKRUN_EMPTY_BATCH_MEDIAN_BUDGET_MS=1000
 CHECKRUN_EMPTY_BATCH_DARWIN_MEDIAN_BUDGET_MS=1500
 CHECKRUN_EMPTY_BATCH_P95_BUDGET_MS=3000
 CHECKRUN_EMPTY_BATCH_DARWIN_P95_BUDGET_MS=4500
+CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS=1600
+CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS=2400
+CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS=3500
+CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS=5000
 
 _perf_budget_ms() {
   local budget_ms="$1" darwin_budget_ms="$2"
@@ -153,6 +158,12 @@ for index in {0..19}; do
   printf 'plain text %s\n' "$index" >"$batch_file"
   unsupported_batch+=("$batch_file")
 done
+supported_batch=()
+for index in {0..299}; do
+  batch_file="$td/supported-$index.py"
+  printf 'value_%s = %s\n' "$index" "$index" >"$batch_file"
+  supported_batch+=("$batch_file")
+done
 host_ps=$(command -v ps || true)
 
 hook_path=$(_mock_bin)
@@ -163,7 +174,17 @@ cat >"$hook_path/yq" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "$hook_path/yq"
+cat >"$hook_path/typos" <<'EOF'
+#!/usr/bin/env bash
+[[ -n "${CHECKRUN_LINTER_LOG:-}" ]] && printf 'typos\n' >>"$CHECKRUN_LINTER_LOG"
+exit 0
+EOF
+cat >"$hook_path/ruff" <<'EOF'
+#!/usr/bin/env bash
+[[ -n "${CHECKRUN_LINTER_LOG:-}" ]] && printf 'ruff\n' >>"$CHECKRUN_LINTER_LOG"
+exit 0
+EOF
+chmod +x "$hook_path/yq" "$hook_path/typos" "$hook_path/ruff"
 
 if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   timeout_count_file="$td/timeout-count"
@@ -287,6 +308,20 @@ _assert_not_contains "hook startup: lint shell does not resolve config separatel
   "checkrun_paths.py config" "$python_calls"
 _assert_contains "hook startup: lint registry planner owns the no-op decision" \
   "registry.py shell-plan" "$python_calls"
+
+linter_log="$td/linter.log"
+: >"$linter_log"
+CHECKRUN_LINTER_LOG="$linter_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  CHECKRUN_SCHEMA_LINT=/nonexistent \
+  PATH="$hook_path" \
+  "$AUTOLINT" "${supported_batch[@]}"
+rc=$?
+_assert_exit "supported lint batch: clean files exit 0" 0 "$rc"
+_assert_eq "supported lint batch: Typos uses five bounded commands for 300 files" 5 \
+  "$(grep -c '^typos$' "$linter_log")"
+_assert_eq "supported lint batch: Ruff uses five bounded commands for 300 files" 5 \
+  "$(grep -c '^ruff$' "$linter_log")"
 
 empty_plan_dir="$td/empty-plans"
 mkdir -p "$empty_plan_dir"
@@ -516,6 +551,20 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
     "$CHECKRUN_EMPTY_BATCH_DARWIN_P95_BUDGET_MS")
   _assert_perf_result "20-file unsupported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
+
+  default_perf_runs=$CHECKRUN_HOOK_PERF_RUNS
+  CHECKRUN_HOOK_PERF_RUNS=$CHECKRUN_SUPPORTED_BATCH_RUNS
+  perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
+  rc=$?
+  median_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS" \
+    "$CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS")
+  p95_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS" \
+    "$CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS")
+  _assert_perf_result "300-file supported autolint batch" "$perf_result" "$rc" \
+    "$median_budget_ms" "$p95_budget_ms"
+  CHECKRUN_HOOK_PERF_RUNS=$default_perf_runs
 fi
 
 _test_summary

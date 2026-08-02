@@ -239,11 +239,14 @@ echo "=== Multi-file concurrency ==="
 
 _parallel_dir=$(_tmpdir)
 _parallel_sync=$(_tmpdir)
-cat >"$_parallel_dir/a.sh" <<'EOF'
+mkdir -p "$_parallel_dir/a" "$_parallel_dir/b"
+printf 'disable=SC1090\n' >"$_parallel_dir/a/.shellcheckrc"
+printf 'disable=SC1091\n' >"$_parallel_dir/b/.shellcheckrc"
+cat >"$_parallel_dir/a/a.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "a"
 EOF
-cat >"$_parallel_dir/b.sh" <<'EOF'
+cat >"$_parallel_dir/b/b.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "b"
 EOF
@@ -280,7 +283,8 @@ chmod +x "$_parallel_mock/yq" "$_parallel_mock/shellcheck"
 
 set +e
 output=$(CHECKRUN_CONFIG_DIR=/nonexistent AUTOLINT_PARALLEL_SYNC="$_parallel_sync" \
-  PATH="$_parallel_mock:$PATH" "$AUTOLINT" "$_parallel_dir/a.sh" "$_parallel_dir/b.sh" 2>&1)
+  PATH="$_parallel_mock:$PATH" "$AUTOLINT" \
+  "$_parallel_dir/a/a.sh" "$_parallel_dir/b/b.sh" 2>&1)
 rc=$?
 set -e
 _assert_exit "parallel: second file starts before first completes" 0 "$rc"
@@ -365,6 +369,274 @@ _parallel_json_check=$(printf '%s\n' "$output" | jq -e -s '
 ' >/dev/null && echo ok || echo fail)
 _assert_eq "parallel json: workers inherit json mode and preserve order" \
   "ok" "$_parallel_json_check"
+
+echo "=== Clean equivalent plans use bounded linter batches ==="
+
+_clean_batch_dir=$(_tmpdir)
+mkdir -p "$_clean_batch_dir/python" "$_clean_batch_dir/shell" "$_clean_batch_dir/lua"
+for _i in 1 2; do
+  printf 'value_%s = %s\n' "$_i" "$_i" >"$_clean_batch_dir/python/file-$_i.py"
+  printf '#!/usr/bin/env bash\nprintf '\''%%s\\n'\'' %s\n' "$_i" >"$_clean_batch_dir/shell/envrc-$_i"
+  printf 'local value_%s = %s\nreturn value_%s\n' \
+    "$_i" "$_i" "$_i" >"$_clean_batch_dir/lua/file-$_i.lua"
+done
+
+_clean_batch_mock=$(_mock_bin)
+_clean_batch_log=$_clean_batch_dir/calls.log
+: >"$_clean_batch_log"
+for _tool in typos ruff shellcheck selene; do
+  cat >"$_clean_batch_mock/$_tool" <<'EOF'
+#!/usr/bin/env bash
+printf '%s:%s\n' "${0##*/}" "$*" >>"$AUTOLINT_CLEAN_BATCH_LOG"
+EOF
+  chmod +x "$_clean_batch_mock/$_tool"
+done
+
+set +e
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/python/file-1.py" \
+  "$_clean_batch_dir/python/file-2.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "clean batch: equivalent Python plans exit 0" 0 "$rc"
+_assert_eq "clean batch: Typos receives both Python files once" "1" \
+  "$(grep -c '^typos:' "$_clean_batch_log")"
+_assert_eq "clean batch: Ruff receives both Python files once" "1" \
+  "$(grep -c '^ruff:' "$_clean_batch_log")"
+_assert_contains "clean batch: Python batch preserves first path" \
+  "$_clean_batch_dir/python/file-1.py" "$(cat "$_clean_batch_log")"
+_assert_contains "clean batch: Python batch preserves second path" \
+  "$_clean_batch_dir/python/file-2.py" "$(cat "$_clean_batch_log")"
+
+_clean_warning_mock=$(_mock_bin)
+_clean_warning_log=$_clean_batch_dir/warning-calls.log
+: >"$_clean_warning_log"
+cat >"$_clean_warning_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_clean_warning_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+printf 'ruff\n' >>"$AUTOLINT_CLEAN_WARNING_LOG"
+case " $* " in
+  *" --quiet "*) exit 0 ;;
+esac
+echo "All checks passed!"
+echo "deprecated Ruff configuration" >&2
+exit 0
+EOF
+chmod +x "$_clean_warning_mock/typos" "$_clean_warning_mock/ruff"
+set +e
+output=$(AUTOLINT_CLEAN_WARNING_LOG="$_clean_warning_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_warning_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/python/file-1.py" \
+  "$_clean_batch_dir/python/file-2.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "clean batch: exit-0 backend warning keeps success" 0 "$rc"
+_assert_contains "clean batch: exit-0 backend warning remains visible" \
+  "deprecated Ruff configuration" "$output"
+_assert_not_contains "clean batch: routine clean stdout stays quiet" \
+  "All checks passed!" "$output"
+_assert_eq "clean batch: warning came from one speculative Ruff command" "1" \
+  "$(grep -c '^ruff$' "$_clean_warning_log")"
+
+: >"$_clean_batch_log"
+set +e
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/shell/envrc-1" \
+  "$_clean_batch_dir/shell/envrc-2" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "clean batch: equivalent shell plans exit 0" 0 "$rc"
+_assert_eq "clean batch: shell plans keep Typos per-file" "2" \
+  "$(grep -c '^typos:' "$_clean_batch_log")"
+_assert_eq "clean batch: ShellCheck retains its parallel per-file model" "2" \
+  "$(grep -c '^shellcheck:' "$_clean_batch_log")"
+_assert_contains "clean batch: ShellCheck keeps Bash language hint" \
+  "-s bash" "$(cat "$_clean_batch_log")"
+
+: >"$_clean_batch_log"
+set +e
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/lua/file-1.lua" \
+  "$_clean_batch_dir/lua/file-2.lua" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "clean batch: equivalent Lua plans exit 0" 0 "$rc"
+_assert_eq "clean batch: Typos receives both Lua files once" "1" \
+  "$(grep -c '^typos:' "$_clean_batch_log")"
+_assert_eq "clean batch: Selene receives both Lua files once" "1" \
+  "$(grep -c '^selene:' "$_clean_batch_log")"
+
+echo "=== JSON lint bypasses speculative clean batching ==="
+
+_batch_json_mock=$(_mock_bin)
+_batch_json_log=$_clean_batch_dir/json-calls.log
+: >"$_batch_json_log"
+cat >"$_batch_json_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+printf 'typos:%s\n' "$*" >>"$AUTOLINT_BATCH_JSON_LOG"
+EOF
+cat >"$_batch_json_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+printf 'ruff:%s\n' "$*" >>"$AUTOLINT_BATCH_JSON_LOG"
+file=
+for arg in "$@"; do
+  case "$arg" in
+    *.py) file=$arg ;;
+  esac
+done
+printf '{"code":"F401","message":"mock finding","location":{"row":1,"column":1},"end_location":{"row":1,"column":2},"filename":"%s"}\n' "$file"
+exit 1
+EOF
+chmod +x "$_batch_json_mock/typos" "$_batch_json_mock/ruff"
+
+set +e
+output=$(AUTOLINT_BATCH_JSON_LOG="$_batch_json_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_batch_json_mock:$PATH" \
+  "$AUTOLINT" --json "$_clean_batch_dir/python/file-1.py" \
+  "$_clean_batch_dir/python/file-2.py" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json batch guard: findings exit 1" 1 "$rc"
+_assert_eq "json batch guard: Ruff remains per-file" "2" \
+  "$(grep -c '^ruff:' "$_batch_json_log")"
+_batch_json_paths=$(printf '%s\n' "$output" | jq -r '.path')
+_assert_eq "json batch guard: diagnostics retain input order" \
+  "$(printf '%s\n' \
+    "$(_canonical_test_path "$_clean_batch_dir/python/file-1.py")" \
+    "$(_canonical_test_path "$_clean_batch_dir/python/file-2.py")")" \
+  "$_batch_json_paths"
+
+echo "=== Read-only jobs=1 plans the complete file set once ==="
+
+_jobs_one_python_log=$_clean_batch_dir/jobs-one-python.log
+_jobs_one_python_wrapper=$_clean_batch_dir/jobs-one-python
+_jobs_one_real_python=$(python3 -c 'import sys; print(sys.executable)')
+: >"$_jobs_one_python_log"
+cat >"$_jobs_one_python_wrapper" <<'EOF'
+#!/usr/bin/env bash
+printf 'python\n' >>"$AUTOLINT_JOBS_ONE_PYTHON_LOG"
+exec "$AUTOLINT_JOBS_ONE_REAL_PYTHON" "$@"
+EOF
+chmod +x "$_jobs_one_python_wrapper"
+
+mkdir -p "$_clean_batch_dir/config-a" "$_clean_batch_dir/config-b"
+printf '[lint]\nselect = ["E"]\n' >"$_clean_batch_dir/config-a/ruff.toml"
+printf '[lint]\nselect = ["F"]\n' >"$_clean_batch_dir/config-b/ruff.toml"
+printf 'value = 1\n' >"$_clean_batch_dir/config-a/file.py"
+printf 'value = 2\n' >"$_clean_batch_dir/config-b/file.py"
+: >"$_clean_batch_log"
+
+set +e
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  AUTOLINT_JOBS_ONE_PYTHON_LOG="$_jobs_one_python_log" \
+  AUTOLINT_JOBS_ONE_REAL_PYTHON="$_jobs_one_real_python" \
+  CHECKRUN_PYTHON="$_jobs_one_python_wrapper" \
+  CHECKRUN_AUTOLINT_JOBS=1 \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/config-a/file.py" \
+  "$_clean_batch_dir/config-b/file.py" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "jobs=1 planning: clean files exit 0" 0 "$rc"
+_assert_eq "jobs=1 planning: one registry process handles all files" "1" \
+  "$(wc -l <"$_jobs_one_python_log" | tr -d '[:space:]')"
+_assert_eq "jobs=1 planning: differing plans run sequentially per file" "2" \
+  "$(grep -c '^ruff:' "$_clean_batch_log")"
+
+echo "=== Clean batching preserves configuration boundaries and argument bounds ==="
+
+: >"$_clean_batch_log"
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/config-a/file.py" \
+  "$_clean_batch_dir/config-b/file.py" >/dev/null 2>&1
+_assert_eq "clean batch boundary: differing Ruff configs stay per-file" "2" \
+  "$(grep -c '^ruff:' "$_clean_batch_log")"
+
+_bounded_files=()
+for _i in {1..65}; do
+  _bounded_file="$_clean_batch_dir/python/bounded-$_i.py"
+  printf 'value_%s = %s\n' "$_i" "$_i" >"$_bounded_file"
+  _bounded_files+=("$_bounded_file")
+done
+: >"$_clean_batch_log"
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "${_bounded_files[@]}" >/dev/null 2>&1
+_assert_eq "clean batch bounds: Typos splits 65 files into two commands" "2" \
+  "$(grep -c '^typos:' "$_clean_batch_log")"
+_assert_eq "clean batch bounds: Ruff splits 65 files into two commands" "2" \
+  "$(grep -c '^ruff:' "$_clean_batch_log")"
+
+echo "=== Failed clean probe falls back to ordered per-file diagnostics ==="
+
+_batch_fallback_mock=$(_mock_bin)
+_batch_fallback_log=$_clean_batch_dir/fallback-calls.log
+: >"$_batch_fallback_log"
+cat >"$_batch_fallback_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+printf 'typos:<%s>\n' "$*" >>"$AUTOLINT_BATCH_FALLBACK_LOG"
+EOF
+cat >"$_batch_fallback_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+printf 'ruff:<%s>\n' "$*" >>"$AUTOLINT_BATCH_FALLBACK_LOG"
+file_count=0
+last_file=
+for arg in "$@"; do
+  case "$arg" in
+    *.py)
+      file_count=$((file_count + 1))
+      last_file=$arg
+      ;;
+  esac
+done
+if [[ "$file_count" -gt 1 ]]; then
+  echo "batch probe output must not leak"
+  echo "batch probe warning must not leak" >&2
+  exit 9
+fi
+case "${last_file##*/}" in
+  file-1.py)
+    echo "first-file diagnostic"
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$_batch_fallback_mock/typos" "$_batch_fallback_mock/ruff"
+
+set +e
+output=$(AUTOLINT_BATCH_FALLBACK_LOG="$_batch_fallback_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_batch_fallback_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/python/file-1.py" \
+  "$_clean_batch_dir/python/file-2.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "clean batch fallback: authoritative per-file finding exits 1" 1 "$rc"
+_assert_contains "clean batch fallback: per-file diagnostic is retained" \
+  "first-file diagnostic" "$output"
+_assert_not_contains "clean batch fallback: speculative output is discarded" \
+  "batch probe output must not leak" "$output"
+_assert_not_contains "clean batch fallback: speculative warning is discarded" \
+  "batch probe warning must not leak" "$output"
+_assert_eq "clean batch fallback: Typos runs once speculatively and once per file" \
+  "3" "$(grep -c '^typos:' "$_batch_fallback_log")"
+_assert_eq "clean batch fallback: Ruff runs once speculatively and once per file" \
+  "3" "$(grep -c '^ruff:' "$_batch_fallback_log")"
 
 # Schema validation is policy-driven and cross-cutting: fixture JSON
 # and YAML names should be checked before extension dispatch decides which

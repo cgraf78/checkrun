@@ -73,6 +73,8 @@ _SHELL_DISPATCH = {
     "format": (_CHECKRUN_ROOT / "lib/checkrun/autoformat.sh", "_format_dispatch()"),
     "lint": (_CHECKRUN_ROOT / "lib/checkrun/autolint.sh", "_lint_dispatch()"),
 }
+_SchemaMatchers = list[tuple[dict[str, Any], list[str]]]
+_SchemaContext = tuple[Any, dict[str, Any] | None, _SchemaMatchers | None]
 
 
 class RegistryError(RuntimeError):
@@ -574,6 +576,7 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
     if name in filetypes["filename"]:
         return str(filetypes["filename"][name])
 
+    path_candidates = _path_pattern_candidates(path)
     for item in filetypes["patterns"]:
         if item.get("extensionlessOnly") is True and ext:
             continue
@@ -581,7 +584,7 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
         # config syntaxes are identified by a narrow path shape rather than a
         # unique basename. Reusing the same candidate forms as path-scoped tool
         # matching keeps inference, explain, plan, and dispatch aligned.
-        if _path_pattern_matches(path, [item["pattern"]]):
+        if _path_pattern_matches(path, [item["pattern"]], candidates=path_candidates):
             return str(item["filetype"])
 
     if ext and ext in filetypes["extension"]:
@@ -610,9 +613,7 @@ def _infer_filetype(path: Path, registry: dict[str, Any]) -> str | None:
     return None
 
 
-def _path_pattern_matches(path: Path, patterns: list[str]) -> bool:
-    if not patterns:
-        return True
+def _path_pattern_candidates(path: Path) -> set[str]:
     # Keep path-scoped tools identical between explain, plan, and execution.
     # Checking absolute, cwd-relative, and basename forms preserves old explain
     # behavior while letting shell callers pass either absolute or relative args.
@@ -621,6 +622,16 @@ def _path_pattern_matches(path: Path, patterns: list[str]) -> bool:
         candidates.add(path.relative_to(Path.cwd()).as_posix())
     except ValueError:
         pass
+    return candidates
+
+
+def _path_pattern_matches(
+    path: Path, patterns: list[str], *, candidates: set[str] | None = None
+) -> bool:
+    if not patterns:
+        return True
+    if candidates is None:
+        candidates = _path_pattern_candidates(path)
     return any(
         fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates for pattern in patterns
     )
@@ -806,7 +817,7 @@ def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
     return {"ignored": False}
 
 
-def _load_schema_policy() -> tuple[Any, dict[str, Any] | None]:
+def _load_schema_policy(*, prepare_matches: bool = False) -> _SchemaContext:
     # Schema association policy remains outside the tooling registry. The plan
     # reports matching associations for explainability, but the association file
     # itself is still owned by dotfiles/project policy.
@@ -822,18 +833,24 @@ def _load_schema_policy() -> tuple[Any, dict[str, Any] | None]:
         policy = schema_policy.load_policy(policy_path)
     except schema_policy.SchemaPolicyError as exc:
         raise RegistryError(str(exc)) from exc
-    return schema_policy, policy
+    prepared = (
+        schema_policy._prepare_matching_associations(policy)
+        if policy is not None and prepare_matches
+        else None
+    )
+    return schema_policy, policy, prepared
 
 
 def _schema_associations(
-    path: Path, schema_context: tuple[Any, dict[str, Any] | None]
+    path: Path,
+    schema_context: _SchemaContext,
 ) -> list[dict[str, Any]]:
-    schema_policy, policy = schema_context
+    schema_policy, policy, prepared = schema_context
     if policy is None:
         return []
 
     result = []
-    for association in schema_policy.matching_associations(policy, path):
+    for association in schema_policy.matching_associations(policy, path, prepared=prepared):
         result.append(
             {
                 "name": association.get("name"),
@@ -937,7 +954,7 @@ def _plan_file(
     file_arg: str,
     phase: str | None = None,
     *,
-    schema_context: tuple[Any, dict[str, Any] | None],
+    schema_context: _SchemaContext,
 ) -> dict[str, Any]:
     # Planning inspects local files and config only; it never executes tools.
     # Shell entrypoints consume this as their policy answer and keep adapter
@@ -1034,7 +1051,7 @@ def plan(registry: dict[str, Any], files: list[str], phase: str | None = None) -
     if phase is not None and phase not in _PLAN_PHASES:
         expected = ", ".join(sorted(_PLAN_PHASES))
         raise RegistryError(f"unknown plan phase {phase!r}; expected one of {expected}")
-    schema_context = _load_schema_policy()
+    schema_context = _load_schema_policy(prepare_matches=True)
     return {
         "version": 1,
         "files": [
@@ -1085,7 +1102,7 @@ def capabilities(registry: dict[str, Any]) -> dict[str, Any]:
 def editor_metadata(registry: dict[str, Any]) -> dict[str, Any]:
     """Return portable, versioned metadata for editor configuration generation."""
 
-    schema_policy, policy = _load_schema_policy()
+    schema_policy, policy, _ = _load_schema_policy()
     schemas = (
         {"json": [], "yaml": {}, "toml": {}}
         if policy is None
@@ -1102,7 +1119,7 @@ def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, 
     """Return the public JSON payload used by `checkrun explain --json`."""
 
     items = []
-    schema_context = _load_schema_policy()
+    schema_context = _load_schema_policy(prepare_matches=True)
     for file in files:
         item = _plan_file(registry, file, schema_context=schema_context)
         fmt = item["format"]
@@ -1174,27 +1191,27 @@ def _print_human(items: list[dict[str, Any]]) -> None:
             print(f"  schemas: {schema_names}")
 
 
-def _shell_plan_records(
+def _shell_plan_items(
     registry: dict[str, Any], phase: str, files: list[str]
-) -> list[list[bytes]]:
-    """Return per-input-file NUL-record blobs for the shell dispatch protocol.
+) -> list[list[list[str]]]:
+    """Return structured per-input-file records for the shell protocol.
 
-    One blob per input file, in the same order as `files`. Each blob is the
-    serialized form of its executable plan steps (already-NUL-delimited);
-    an empty blob means "no steps planned for this file" (ignored / unsupported
-    / no matching selectors). The single-stream and per-file-output modes
-    below both use this builder so the on-disk byte format never drifts.
+    One item per input file, in the same order as `files`. Each record is one
+    executable plan step; an empty item means "no steps planned for this file"
+    (ignored / unsupported / no matching selectors). Keeping this structured
+    until the transport boundary lets the output-dir path compare plans without
+    parsing its own serialized bytes.
     """
 
-    schema_context = _load_schema_policy()
-    schema_policy, _ = schema_context
+    schema_context = _load_schema_policy(prepare_matches=True)
+    schema_policy, _, _ = schema_context
     policy_path = schema_policy.policy_path() if phase == "lint" else None
     planned_files = [
         _plan_file(registry, file, phase, schema_context=schema_context) for file in files
     ]
-    blobs: list[list[bytes]] = []
+    items: list[list[list[str]]] = []
     for item in planned_files:
-        chunks: list[bytes] = []
+        records: list[list[str]] = []
         phase_data = item[phase]
         if not phase_data["ignored"]:
             for step in phase_data["steps"]:
@@ -1207,23 +1224,40 @@ def _shell_plan_records(
                 ):
                     continue
                 config = step.get("config", {})
-                fields = [
-                    item["path"],
-                    item.get("filetype") or "",
-                    step["phase"],
-                    step["adapter"],
-                    config.get("source", ""),
-                    config.get("path", ""),
-                ]
-                # NUL-delimited because paths may legally contain spaces, tabs,
-                # or newlines. Shell callers read from a temp file rather than
-                # command substitution since Bash variables cannot safely carry
-                # NUL bytes.
-                for field in fields:
-                    chunks.append(str(field).encode("utf-8", "surrogateescape"))
-                    chunks.append(b"\0")
-        blobs.append(chunks)
-    return blobs
+                records.append(
+                    [
+                        str(item["path"]),
+                        str(item.get("filetype") or ""),
+                        str(step["phase"]),
+                        str(step["adapter"]),
+                        str(config.get("source", "")),
+                        str(config.get("path", "")),
+                    ]
+                )
+        items.append(records)
+    return items
+
+
+def _encode_shell_plan(records: list[list[str]]) -> list[bytes]:
+    """Encode structured records as the private NUL-delimited transport."""
+
+    chunks: list[bytes] = []
+    for fields in records:
+        # NUL-delimited because paths may legally contain spaces, tabs, or
+        # newlines. Shell callers read from a temp file rather than command
+        # substitution since Bash variables cannot safely carry NUL bytes.
+        for field in fields:
+            chunks.append(field.encode("utf-8", "surrogateescape"))
+            chunks.append(b"\0")
+    return chunks
+
+
+def _shell_plan_records(
+    registry: dict[str, Any], phase: str, files: list[str]
+) -> list[list[bytes]]:
+    """Return per-input-file NUL-record blobs for the shell protocol."""
+
+    return [_encode_shell_plan(records) for records in _shell_plan_items(registry, phase, files)]
 
 
 def _print_shell_plan(registry: dict[str, Any], phase: str, files: list[str]) -> None:
@@ -1244,11 +1278,24 @@ def _write_shell_plan_dir(
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for index, blob in enumerate(_shell_plan_records(registry, phase, files)):
+    plan_items = _shell_plan_items(registry, phase, files)
+    for index, records in enumerate(plan_items):
         target = out_dir / f"{index}.plan"
         with target.open("wb") as handle:
-            for chunk in blob:
+            for chunk in _encode_shell_plan(records):
                 handle.write(chunk)
+
+    # Read-only lint may speculatively batch a homogeneous set. The manifest
+    # omits the path field because the Bash caller already retains the ordered
+    # path array. Any difference in filetype, step order, adapter, or resolved
+    # config leaves no manifest and therefore keeps the established per-file
+    # execution path.
+    if phase == "lint" and len(plan_items) > 1 and all(plan_items):
+        batch_records = [record[1:] for record in plan_items[0]]
+        if all([record[1:] for record in records] == batch_records for records in plan_items[1:]):
+            with (out_dir / "batch.plan").open("wb") as handle:
+                for chunk in _encode_shell_plan(batch_records):
+                    handle.write(chunk)
 
 
 def main(argv: list[str] | None = None) -> int:

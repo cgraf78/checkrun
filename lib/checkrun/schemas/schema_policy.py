@@ -476,13 +476,12 @@ def _candidates(path: Path) -> set[str]:
     return names
 
 
-def _matches(path: Path, association: dict[str, Any]) -> bool:
-    names = _candidates(path)
-    for pattern in _expanded_patterns(association.get("matches", [])):
+def _matches_expanded(path_names: set[str], patterns: Iterable[str]) -> bool:
+    for pattern in patterns:
         # fnmatch treats "/" as an ordinary character. That is intentional:
         # the policy's generated `**/foo` patterns are meant to match copied
         # checkout paths without adding another glob implementation.
-        if any(fnmatch.fnmatchcase(name, pattern) for name in names):
+        if any(fnmatch.fnmatchcase(name, pattern) for name in path_names):
             return True
     return False
 
@@ -492,13 +491,29 @@ def _associations(policy: Any, *, enforce_only: bool = False) -> list[dict[str, 
     return [item for item in items if not enforce_only or item.get("enforce") is True]
 
 
-def matching_associations(policy: dict[str, Any], path: Path) -> list[dict[str, Any]]:
-    """Return enforceable schema associations that match `path`."""
+def _prepare_matching_associations(
+    policy: dict[str, Any],
+) -> list[tuple[dict[str, Any], list[str]]]:
+    """Validate and expand enforceable match patterns once per policy load."""
 
     return [
-        association
+        (association, _expanded_patterns(association.get("matches", [])))
         for association in _associations(policy, enforce_only=True)
-        if _matches(path, association)
+    ]
+
+
+def matching_associations(
+    policy: dict[str, Any],
+    path: Path,
+    *,
+    prepared: list[tuple[dict[str, Any], list[str]]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return enforceable schema associations that match `path`."""
+
+    matchers = prepared if prepared is not None else _prepare_matching_associations(policy)
+    path_names = _candidates(path)
+    return [
+        association for association, patterns in matchers if _matches_expanded(path_names, patterns)
     ]
 
 

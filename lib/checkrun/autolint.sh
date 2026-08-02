@@ -121,7 +121,7 @@ _lint_one_with_plan() {
     IFS= read -r -d '' adapter &&
     IFS= read -r -d '' config_source &&
     IFS= read -r -d '' config_path; do
-    dir=$(dirname "$path")
+    _checkrun_path_dir dir "$path"
     _lint_dispatch "$adapter" "$path" "$filetype" "$step_phase" "$config_source" "$config_path" "$dir"
     tool_rc=$?
     # A missing adapter is a Checkrun integrity failure, not a lint diagnostic.
@@ -139,9 +139,9 @@ _lint_one_with_plan() {
 
 _lint_one() {
   # Plan one file inline (one Python invocation per call) and dispatch. Used by
-  # the sequential paths (--fix mode and --jobs=1 fallback). The parallel paths
-  # use the batched _autolint_pre_plan helper plus _lint_one_with_plan so the
-  # Python planner runs once total, not once per file.
+  # --fix mode and read-only fallbacks without planner scratch. Normal read-only
+  # paths use _autolint_pre_plan plus _lint_one_with_plan so the Python planner
+  # runs once total, including when jobs=1.
   local file="$1"
   local rc tool_rc plan_file
 
@@ -219,6 +219,89 @@ _lint_dispatch() {
   esac
 }
 
+_autolint_run_clean_batch_step() {
+  local adapter="$1" _filetype="$2" _step_phase="$3"
+  local config_source="$4" config_path="$5" start
+  local -a files chunk
+  shift 5
+  files=("$@")
+
+  # Bound each backend invocation while still amortizing startup. The outer
+  # Sley/autolint transport retains its existing full argument list.
+  for ((start = 0; start < ${#files[@]}; start += 64)); do
+    chunk=("${files[@]:start:64}")
+    case "$adapter" in
+      ruff-lint)
+        _lint_ruff_clean_batch "$config_source" "$config_path" "${chunk[@]}" || return 1
+        ;;
+      selene)
+        _lint_selene_clean_batch "$config_source" "$config_path" "${chunk[@]}" || return 1
+        ;;
+      typos)
+        _lint_typos_clean_batch "$config_source" "$config_path" "${chunk[@]}" || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+_autolint_try_clean_batch() {
+  local plan_dir="$1"
+  local filetype step_phase adapter config_source config_path index batch_stderr
+  local -a files batch_filetypes batch_phases batch_adapters batch_sources batch_paths
+  shift
+  files=("$@")
+
+  [ "${#files[@]}" -gt 1 ] || return 1
+  [ -s "$plan_dir/batch.plan" ] || return 1
+  command -v yq >/dev/null 2>&1 || return 1
+
+  # Validate the complete manifest before running any backend. This keeps a
+  # future non-batchable adapter from causing partial speculative work before
+  # the established per-file path takes over.
+  while IFS= read -r -d '' filetype &&
+    IFS= read -r -d '' step_phase &&
+    IFS= read -r -d '' adapter &&
+    IFS= read -r -d '' config_source &&
+    IFS= read -r -d '' config_path; do
+    # ShellCheck is intentionally absent: giving it multiple inputs changes
+    # source-following diagnostics, so process batching is not equivalent to
+    # the established independent-file checks.
+    case "$adapter" in
+      ruff-lint | selene | typos) ;;
+      *) return 1 ;;
+    esac
+    batch_filetypes+=("$filetype")
+    batch_phases+=("$step_phase")
+    batch_adapters+=("$adapter")
+    batch_sources+=("$config_source")
+    batch_paths+=("$config_path")
+  done <"$plan_dir/batch.plan"
+
+  [ "${#batch_adapters[@]}" -gt 0 ] || return 1
+  batch_stderr="$plan_dir/batch.stderr"
+  : >"$batch_stderr" || return 1
+  for index in "${!batch_adapters[@]}"; do
+    # Routine clean stdout is intentionally quiet. Buffer exit-0 warnings until
+    # every adapter succeeds; a failed probe discards both streams and reruns
+    # the authoritative per-file path so diagnostic order and attribution stay
+    # unchanged.
+    _autolint_run_clean_batch_step \
+      "${batch_adapters[$index]}" \
+      "${batch_filetypes[$index]}" \
+      "${batch_phases[$index]}" \
+      "${batch_sources[$index]}" \
+      "${batch_paths[$index]}" \
+      "${files[@]}" >/dev/null 2>>"$batch_stderr" || {
+      rm -f "$batch_stderr"
+      return 1
+    }
+  done
+  [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
+  rm -f "$batch_stderr" || true
+  return 0
+}
+
 _autolint_default_jobs() {
   local cores
   if command -v getconf >/dev/null 2>&1; then
@@ -262,6 +345,18 @@ _autolint_merge_rc() {
   else
     printf '%s\n' "$incoming"
   fi
+}
+
+_autolint_run_plans_sequential() {
+  local plan_dir="$1" count="$2" rc=0 file_rc index
+
+  for ((index = 0; index < count; index++)); do
+    [ -s "$plan_dir/$index.plan" ] || continue
+    _lint_one_with_plan "$plan_dir/$index.plan"
+    file_rc=$?
+    rc=$(_autolint_merge_rc "$rc" "$file_rc")
+  done
+  return "$rc"
 }
 
 _autolint_run_file_batch() {
@@ -443,8 +538,7 @@ _autolint_main() {
       '' | *[!0-9]*) jobs=1 ;;
     esac
     [ "$jobs" -lt 1 ] && jobs=1
-    if [ "$jobs" -eq 1 ] ||
-      ! command -v mktemp >/dev/null 2>&1 ||
+    if ! command -v mktemp >/dev/null 2>&1 ||
       ! command -v cat >/dev/null 2>&1 ||
       ! command -v rm >/dev/null 2>&1; then
       # Tests and minimal hook environments sometimes constrain PATH to only the
@@ -462,7 +556,16 @@ _autolint_main() {
       # directly instead of being retried once per file.
       local plan_dir="" plan_rc=0
       plan_dir=$(_autolint_pre_plan "${lint_files[@]}") || plan_rc=$?
-      if [ "$plan_rc" -eq 0 ] && _autolint_supports_pool; then
+      if [ "$plan_rc" -eq 0 ] && [ "$json" -eq 0 ] &&
+        _autolint_try_clean_batch "$plan_dir" "${lint_files[@]}"; then
+        # Homogeneous clean work completed without per-file backend startup.
+        :
+      elif [ "$plan_rc" -eq 0 ] && [ "$jobs" -eq 1 ]; then
+        # Preserve strictly sequential backend execution while amortizing the
+        # registry interpreter across the complete read-only file set.
+        _autolint_run_plans_sequential "$plan_dir" "${#lint_files[@]}"
+        rc=$(_autolint_merge_rc "$rc" "$?")
+      elif [ "$plan_rc" -eq 0 ] && _autolint_supports_pool; then
         # Modern bash: keep ${jobs} workers in flight at all times.
         _autolint_run_files_pool "$jobs" "$plan_dir" "${lint_files[@]}"
         rc=$(_autolint_merge_rc "$rc" "$?")
