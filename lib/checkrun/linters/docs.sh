@@ -52,6 +52,16 @@ _lint_typos() {
   fi
 }
 
+_lint_typos_clean_batch() {
+  local _config_source="$1" config_path="$2"
+  local args=()
+  shift 2
+  command -v typos &>/dev/null || return 0
+
+  [ -n "$config_path" ] && args=(--config "$config_path")
+  typos ${args[@]+"${args[@]}"} "$@"
+}
+
 _lint_rumdl() {
   # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
   # $4 config_path. rumdl uses one --config regardless of source.

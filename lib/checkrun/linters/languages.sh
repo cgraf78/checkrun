@@ -227,6 +227,16 @@ _lint_ruff() {
   return "$rc"
 }
 
+_lint_ruff_clean_batch() {
+  local config_source="$1" config_path="$2"
+  local args=()
+  shift 2
+  command -v ruff &>/dev/null || return 0
+
+  [ "$config_source" = "fallback" ] && [ -n "$config_path" ] && args=(--config "$config_path")
+  ruff check --quiet ${args[@]+"${args[@]}"} "$@"
+}
+
 _lint_selene() {
   # Positional contract from _lint_dispatch: $1 file, $2 dir, $3 config_source,
   # $4 config_path. selene takes one --config regardless of source.
@@ -262,6 +272,16 @@ _lint_selene() {
   fi
 
   return "$rc"
+}
+
+_lint_selene_clean_batch() {
+  local _config_source="$1" config_path="$2"
+  local args=()
+  shift 2
+  command -v selene &>/dev/null || return 0
+
+  [ -n "$config_path" ] && args=(--config "$config_path")
+  selene ${args[@]+"${args[@]}"} "$@"
 }
 
 _lint_statix() {

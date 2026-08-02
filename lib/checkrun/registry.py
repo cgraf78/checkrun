@@ -1174,16 +1174,16 @@ def _print_human(items: list[dict[str, Any]]) -> None:
             print(f"  schemas: {schema_names}")
 
 
-def _shell_plan_records(
+def _shell_plan_items(
     registry: dict[str, Any], phase: str, files: list[str]
-) -> list[list[bytes]]:
-    """Return per-input-file NUL-record blobs for the shell dispatch protocol.
+) -> list[list[list[str]]]:
+    """Return structured per-input-file records for the shell protocol.
 
-    One blob per input file, in the same order as `files`. Each blob is the
-    serialized form of its executable plan steps (already-NUL-delimited);
-    an empty blob means "no steps planned for this file" (ignored / unsupported
-    / no matching selectors). The single-stream and per-file-output modes
-    below both use this builder so the on-disk byte format never drifts.
+    One item per input file, in the same order as `files`. Each record is one
+    executable plan step; an empty item means "no steps planned for this file"
+    (ignored / unsupported / no matching selectors). Keeping this structured
+    until the transport boundary lets the output-dir path compare plans without
+    parsing its own serialized bytes.
     """
 
     schema_context = _load_schema_policy()
@@ -1192,9 +1192,9 @@ def _shell_plan_records(
     planned_files = [
         _plan_file(registry, file, phase, schema_context=schema_context) for file in files
     ]
-    blobs: list[list[bytes]] = []
+    items: list[list[list[str]]] = []
     for item in planned_files:
-        chunks: list[bytes] = []
+        records: list[list[str]] = []
         phase_data = item[phase]
         if not phase_data["ignored"]:
             for step in phase_data["steps"]:
@@ -1207,23 +1207,40 @@ def _shell_plan_records(
                 ):
                     continue
                 config = step.get("config", {})
-                fields = [
-                    item["path"],
-                    item.get("filetype") or "",
-                    step["phase"],
-                    step["adapter"],
-                    config.get("source", ""),
-                    config.get("path", ""),
-                ]
-                # NUL-delimited because paths may legally contain spaces, tabs,
-                # or newlines. Shell callers read from a temp file rather than
-                # command substitution since Bash variables cannot safely carry
-                # NUL bytes.
-                for field in fields:
-                    chunks.append(str(field).encode("utf-8", "surrogateescape"))
-                    chunks.append(b"\0")
-        blobs.append(chunks)
-    return blobs
+                records.append(
+                    [
+                        str(item["path"]),
+                        str(item.get("filetype") or ""),
+                        str(step["phase"]),
+                        str(step["adapter"]),
+                        str(config.get("source", "")),
+                        str(config.get("path", "")),
+                    ]
+                )
+        items.append(records)
+    return items
+
+
+def _encode_shell_plan(records: list[list[str]]) -> list[bytes]:
+    """Encode structured records as the private NUL-delimited transport."""
+
+    chunks: list[bytes] = []
+    for fields in records:
+        # NUL-delimited because paths may legally contain spaces, tabs, or
+        # newlines. Shell callers read from a temp file rather than command
+        # substitution since Bash variables cannot safely carry NUL bytes.
+        for field in fields:
+            chunks.append(field.encode("utf-8", "surrogateescape"))
+            chunks.append(b"\0")
+    return chunks
+
+
+def _shell_plan_records(
+    registry: dict[str, Any], phase: str, files: list[str]
+) -> list[list[bytes]]:
+    """Return per-input-file NUL-record blobs for the shell protocol."""
+
+    return [_encode_shell_plan(records) for records in _shell_plan_items(registry, phase, files)]
 
 
 def _print_shell_plan(registry: dict[str, Any], phase: str, files: list[str]) -> None:
@@ -1244,11 +1261,24 @@ def _write_shell_plan_dir(
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for index, blob in enumerate(_shell_plan_records(registry, phase, files)):
+    plan_items = _shell_plan_items(registry, phase, files)
+    for index, records in enumerate(plan_items):
         target = out_dir / f"{index}.plan"
         with target.open("wb") as handle:
-            for chunk in blob:
+            for chunk in _encode_shell_plan(records):
                 handle.write(chunk)
+
+    # Read-only lint may speculatively batch a homogeneous set. The manifest
+    # omits the path field because the Bash caller already retains the ordered
+    # path array. Any difference in filetype, step order, adapter, or resolved
+    # config leaves no manifest and therefore keeps the established per-file
+    # execution path.
+    if phase == "lint" and len(plan_items) > 1 and all(plan_items):
+        batch_records = [record[1:] for record in plan_items[0]]
+        if all([record[1:] for record in records] == batch_records for records in plan_items[1:]):
+            with (out_dir / "batch.plan").open("wb") as handle:
+                for chunk in _encode_shell_plan(batch_records):
+                    handle.write(chunk)
 
 
 def main(argv: list[str] | None = None) -> int:
