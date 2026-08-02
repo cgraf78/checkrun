@@ -155,6 +155,14 @@ try:
         "schema-lint",
         "biome-lint",
     ]
+    lazy_schema_context = registry_mod._load_schema_policy()
+    assert lazy_schema_context[2] is None
+    assert [
+        association["name"]
+        for association in registry_mod._schema_associations(
+            matched_schema_target, lazy_schema_context
+        )
+    ] == ["Matched settings"]
     assert shell_plan_adapters(shell_policy) == [
         "typos",
         "schema-lint",

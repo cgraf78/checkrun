@@ -297,7 +297,8 @@ _autolint_try_clean_batch() {
     }
   done
   [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
-  rm -f "$batch_stderr"
+  rm -f "$batch_stderr" || true
+  return 0
 }
 
 _autolint_default_jobs() {
@@ -346,10 +347,9 @@ _autolint_merge_rc() {
 }
 
 _autolint_run_plans_sequential() {
-  local plan_dir="$1" rc=0 file_rc index
-  shift
+  local plan_dir="$1" count="$2" rc=0 file_rc index
 
-  for index in "$@"; do
+  for ((index = 0; index < count; index++)); do
     [ -s "$plan_dir/$index.plan" ] || continue
     _lint_one_with_plan "$plan_dir/$index.plan"
     file_rc=$?
@@ -562,11 +562,7 @@ _autolint_main() {
       elif [ "$plan_rc" -eq 0 ] && [ "$jobs" -eq 1 ]; then
         # Preserve strictly sequential backend execution while amortizing the
         # registry interpreter across the complete read-only file set.
-        local -a plan_indexes=()
-        for ((start = 0; start < ${#lint_files[@]}; start++)); do
-          plan_indexes+=("$start")
-        done
-        _autolint_run_plans_sequential "$plan_dir" "${plan_indexes[@]}"
+        _autolint_run_plans_sequential "$plan_dir" "${#lint_files[@]}"
         rc=$(_autolint_merge_rc "$rc" "$?")
       elif [ "$plan_rc" -eq 0 ] && _autolint_supports_pool; then
         # Modern bash: keep ${jobs} workers in flight at all times.

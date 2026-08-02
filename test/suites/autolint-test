@@ -411,12 +411,15 @@ _assert_contains "clean batch: Python batch preserves second path" \
   "$_clean_batch_dir/python/file-2.py" "$(cat "$_clean_batch_log")"
 
 _clean_warning_mock=$(_mock_bin)
+_clean_warning_log=$_clean_batch_dir/warning-calls.log
+: >"$_clean_warning_log"
 cat >"$_clean_warning_mock/typos" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
 cat >"$_clean_warning_mock/ruff" <<'EOF'
 #!/usr/bin/env bash
+printf 'ruff\n' >>"$AUTOLINT_CLEAN_WARNING_LOG"
 case " $* " in
   *" --quiet "*) exit 0 ;;
 esac
@@ -425,7 +428,8 @@ exit 0
 EOF
 chmod +x "$_clean_warning_mock/typos" "$_clean_warning_mock/ruff"
 set +e
-output=$(CHECKRUN_CONFIG_DIR=/nonexistent \
+output=$(AUTOLINT_CLEAN_WARNING_LOG="$_clean_warning_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
   PATH="$_clean_warning_mock:$PATH" \
   "$AUTOLINT" "$_clean_batch_dir/python/file-1.py" \
   "$_clean_batch_dir/python/file-2.py" 2>&1)
@@ -434,6 +438,8 @@ set -e
 _assert_exit "clean batch: exit-0 backend warning keeps success" 0 "$rc"
 _assert_contains "clean batch: exit-0 backend warning remains visible" \
   "deprecated Ruff configuration" "$output"
+_assert_eq "clean batch: warning came from one speculative Ruff command" "1" \
+  "$(grep -c '^ruff$' "$_clean_warning_log")"
 
 : >"$_clean_batch_log"
 set +e
@@ -519,6 +525,13 @@ exec "$AUTOLINT_JOBS_ONE_REAL_PYTHON" "$@"
 EOF
 chmod +x "$_jobs_one_python_wrapper"
 
+mkdir -p "$_clean_batch_dir/config-a" "$_clean_batch_dir/config-b"
+printf '[lint]\nselect = ["E"]\n' >"$_clean_batch_dir/config-a/ruff.toml"
+printf '[lint]\nselect = ["F"]\n' >"$_clean_batch_dir/config-b/ruff.toml"
+printf 'value = 1\n' >"$_clean_batch_dir/config-a/file.py"
+printf 'value = 2\n' >"$_clean_batch_dir/config-b/file.py"
+: >"$_clean_batch_log"
+
 set +e
 AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
   AUTOLINT_JOBS_ONE_PYTHON_LOG="$_jobs_one_python_log" \
@@ -527,21 +540,18 @@ AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
   CHECKRUN_AUTOLINT_JOBS=1 \
   CHECKRUN_CONFIG_DIR=/nonexistent \
   PATH="$_clean_batch_mock:$PATH" \
-  "$AUTOLINT" "$_clean_batch_dir/python/file-1.py" \
-  "$_clean_batch_dir/python/file-2.py" >/dev/null 2>&1
+  "$AUTOLINT" "$_clean_batch_dir/config-a/file.py" \
+  "$_clean_batch_dir/config-b/file.py" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "jobs=1 planning: clean files exit 0" 0 "$rc"
 _assert_eq "jobs=1 planning: one registry process handles all files" "1" \
   "$(wc -l <"$_jobs_one_python_log" | tr -d '[:space:]')"
+_assert_eq "jobs=1 planning: differing plans run sequentially per file" "2" \
+  "$(grep -c '^ruff:' "$_clean_batch_log")"
 
 echo "=== Clean batching preserves configuration boundaries and argument bounds ==="
 
-mkdir -p "$_clean_batch_dir/config-a" "$_clean_batch_dir/config-b"
-printf '[lint]\nselect = ["E"]\n' >"$_clean_batch_dir/config-a/ruff.toml"
-printf '[lint]\nselect = ["F"]\n' >"$_clean_batch_dir/config-b/ruff.toml"
-printf 'value = 1\n' >"$_clean_batch_dir/config-a/file.py"
-printf 'value = 2\n' >"$_clean_batch_dir/config-b/file.py"
 : >"$_clean_batch_log"
 AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
   CHECKRUN_CONFIG_DIR=/nonexistent \

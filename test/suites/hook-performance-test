@@ -18,7 +18,7 @@ fi
 _mock_home
 
 CHECKRUN_HOOK_PERF_RUNS=${CHECKRUN_HOOK_PERF_RUNS:-20}
-CHECKRUN_SUPPORTED_BATCH_RUNS=${CHECKRUN_SUPPORTED_BATCH_RUNS:-7}
+CHECKRUN_SUPPORTED_BATCH_RUNS=${CHECKRUN_SUPPORTED_BATCH_RUNS:-20}
 # Process-count assertions below diagnose the specific startup regression.
 # Keep wall-clock limits coarse enough to tolerate scheduler and filesystem
 # contention on shared runners while still rejecting multi-second steady-state

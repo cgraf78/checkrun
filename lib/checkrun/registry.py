@@ -74,7 +74,7 @@ _SHELL_DISPATCH = {
     "lint": (_CHECKRUN_ROOT / "lib/checkrun/autolint.sh", "_lint_dispatch()"),
 }
 _SchemaMatchers = list[tuple[dict[str, Any], list[str]]]
-_SchemaContext = tuple[Any, dict[str, Any] | None, _SchemaMatchers]
+_SchemaContext = tuple[Any, dict[str, Any] | None, _SchemaMatchers | None]
 
 
 class RegistryError(RuntimeError):
@@ -836,7 +836,7 @@ def _load_schema_policy(*, prepare_matches: bool = False) -> _SchemaContext:
     prepared = (
         schema_policy._prepare_matching_associations(policy)
         if policy is not None and prepare_matches
-        else []
+        else None
     )
     return schema_policy, policy, prepared
 
