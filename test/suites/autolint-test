@@ -423,6 +423,7 @@ printf 'ruff\n' >>"$AUTOLINT_CLEAN_WARNING_LOG"
 case " $* " in
   *" --quiet "*) exit 0 ;;
 esac
+echo "All checks passed!"
 echo "deprecated Ruff configuration" >&2
 exit 0
 EOF
@@ -438,6 +439,8 @@ set -e
 _assert_exit "clean batch: exit-0 backend warning keeps success" 0 "$rc"
 _assert_contains "clean batch: exit-0 backend warning remains visible" \
   "deprecated Ruff configuration" "$output"
+_assert_not_contains "clean batch: routine clean stdout stays quiet" \
+  "All checks passed!" "$output"
 _assert_eq "clean batch: warning came from one speculative Ruff command" "1" \
   "$(grep -c '^ruff$' "$_clean_warning_log")"
 

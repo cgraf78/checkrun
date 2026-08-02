@@ -282,9 +282,10 @@ _autolint_try_clean_batch() {
   batch_stderr="$plan_dir/batch.stderr"
   : >"$batch_stderr" || return 1
   for index in "${!batch_adapters[@]}"; do
-    # A failed read-only probe may have found diagnostics or hit a tool error.
-    # Discard its output and rerun the authoritative per-file path so diagnostic
-    # order, attribution, and exit-code precedence remain unchanged.
+    # Routine clean stdout is intentionally quiet. Buffer exit-0 warnings until
+    # every adapter succeeds; a failed probe discards both streams and reruns
+    # the authoritative per-file path so diagnostic order and attribution stay
+    # unchanged.
     _autolint_run_clean_batch_step \
       "${batch_adapters[$index]}" \
       "${batch_filetypes[$index]}" \
