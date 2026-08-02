@@ -234,7 +234,9 @@ _lint_ruff_clean_batch() {
   command -v ruff &>/dev/null || return 0
 
   [ "$config_source" = "fallback" ] && [ -n "$config_path" ] && args=(--config "$config_path")
-  ruff check --quiet ${args[@]+"${args[@]}"} "$@"
+  # Structured output is silent when clean without `--quiet`, which suppresses
+  # actionable exit-0 configuration warnings on some Ruff versions.
+  ruff check --output-format=json-lines ${args[@]+"${args[@]}"} "$@"
 }
 
 _lint_selene() {

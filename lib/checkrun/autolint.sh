@@ -139,9 +139,9 @@ _lint_one_with_plan() {
 
 _lint_one() {
   # Plan one file inline (one Python invocation per call) and dispatch. Used by
-  # the sequential paths (--fix mode and --jobs=1 fallback). The parallel paths
-  # use the batched _autolint_pre_plan helper plus _lint_one_with_plan so the
-  # Python planner runs once total, not once per file.
+  # --fix mode and read-only fallbacks without planner scratch. Normal read-only
+  # paths use _autolint_pre_plan plus _lint_one_with_plan so the Python planner
+  # runs once total, including when jobs=1.
   local file="$1"
   local rc tool_rc plan_file
 
@@ -226,8 +226,8 @@ _autolint_run_clean_batch_step() {
   shift 5
   files=("$@")
 
-  # Keep argument growth bounded well below platform ARG_MAX. Sixty-four files
-  # still amortize backend startup while keeping unusual long-path commits safe.
+  # Bound each backend invocation while still amortizing startup. The outer
+  # Sley/autolint transport retains its existing full argument list.
   for ((start = 0; start < ${#files[@]}; start += 64)); do
     chunk=("${files[@]:start:64}")
     case "$adapter" in
@@ -247,7 +247,7 @@ _autolint_run_clean_batch_step() {
 
 _autolint_try_clean_batch() {
   local plan_dir="$1"
-  local filetype step_phase adapter config_source config_path index
+  local filetype step_phase adapter config_source config_path index batch_stderr
   local -a files batch_filetypes batch_phases batch_adapters batch_sources batch_paths
   shift
   files=("$@")
@@ -264,6 +264,9 @@ _autolint_try_clean_batch() {
     IFS= read -r -d '' adapter &&
     IFS= read -r -d '' config_source &&
     IFS= read -r -d '' config_path; do
+    # ShellCheck is intentionally absent: giving it multiple inputs changes
+    # source-following diagnostics, so process batching is not equivalent to
+    # the established independent-file checks.
     case "$adapter" in
       ruff-lint | selene | typos) ;;
       *) return 1 ;;
@@ -276,6 +279,8 @@ _autolint_try_clean_batch() {
   done <"$plan_dir/batch.plan"
 
   [ "${#batch_adapters[@]}" -gt 0 ] || return 1
+  batch_stderr="$plan_dir/batch.stderr"
+  : >"$batch_stderr" || return 1
   for index in "${!batch_adapters[@]}"; do
     # A failed read-only probe may have found diagnostics or hit a tool error.
     # Discard its output and rerun the authoritative per-file path so diagnostic
@@ -286,8 +291,13 @@ _autolint_try_clean_batch() {
       "${batch_phases[$index]}" \
       "${batch_sources[$index]}" \
       "${batch_paths[$index]}" \
-      "${files[@]}" >/dev/null 2>&1 || return 1
+      "${files[@]}" >/dev/null 2>>"$batch_stderr" || {
+      rm -f "$batch_stderr"
+      return 1
+    }
   done
+  [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
+  rm -f "$batch_stderr"
 }
 
 _autolint_default_jobs() {

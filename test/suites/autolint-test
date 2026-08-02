@@ -410,6 +410,31 @@ _assert_contains "clean batch: Python batch preserves first path" \
 _assert_contains "clean batch: Python batch preserves second path" \
   "$_clean_batch_dir/python/file-2.py" "$(cat "$_clean_batch_log")"
 
+_clean_warning_mock=$(_mock_bin)
+cat >"$_clean_warning_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_clean_warning_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" --quiet "*) exit 0 ;;
+esac
+echo "deprecated Ruff configuration" >&2
+exit 0
+EOF
+chmod +x "$_clean_warning_mock/typos" "$_clean_warning_mock/ruff"
+set +e
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_warning_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/python/file-1.py" \
+  "$_clean_batch_dir/python/file-2.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "clean batch: exit-0 backend warning keeps success" 0 "$rc"
+_assert_contains "clean batch: exit-0 backend warning remains visible" \
+  "deprecated Ruff configuration" "$output"
+
 : >"$_clean_batch_log"
 set +e
 AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
@@ -441,6 +466,45 @@ _assert_eq "clean batch: Typos receives both Lua files once" "1" \
   "$(grep -c '^typos:' "$_clean_batch_log")"
 _assert_eq "clean batch: Selene receives both Lua files once" "1" \
   "$(grep -c '^selene:' "$_clean_batch_log")"
+
+echo "=== JSON lint bypasses speculative clean batching ==="
+
+_batch_json_mock=$(_mock_bin)
+_batch_json_log=$_clean_batch_dir/json-calls.log
+: >"$_batch_json_log"
+cat >"$_batch_json_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+printf 'typos:%s\n' "$*" >>"$AUTOLINT_BATCH_JSON_LOG"
+EOF
+cat >"$_batch_json_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+printf 'ruff:%s\n' "$*" >>"$AUTOLINT_BATCH_JSON_LOG"
+file=
+for arg in "$@"; do
+  case "$arg" in
+    *.py) file=$arg ;;
+  esac
+done
+printf '{"code":"F401","message":"mock finding","location":{"row":1,"column":1},"end_location":{"row":1,"column":2},"filename":"%s"}\n' "$file"
+exit 1
+EOF
+chmod +x "$_batch_json_mock/typos" "$_batch_json_mock/ruff"
+
+set +e
+output=$(AUTOLINT_BATCH_JSON_LOG="$_batch_json_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_batch_json_mock:$PATH" \
+  "$AUTOLINT" --json "$_clean_batch_dir/python/file-1.py" \
+  "$_clean_batch_dir/python/file-2.py" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "json batch guard: findings exit 1" 1 "$rc"
+_assert_eq "json batch guard: Ruff remains per-file" "2" \
+  "$(grep -c '^ruff:' "$_batch_json_log")"
+_batch_json_paths=$(printf '%s\n' "$output" | jq -r '.path')
+_assert_eq "json batch guard: diagnostics retain input order" \
+  "$(printf '%s\n' "$_clean_batch_dir/python/file-1.py" \
+    "$_clean_batch_dir/python/file-2.py")" "$_batch_json_paths"
 
 echo "=== Read-only jobs=1 plans the complete file set once ==="
 
@@ -527,6 +591,7 @@ for arg in "$@"; do
 done
 if [[ "$file_count" -gt 1 ]]; then
   echo "batch probe output must not leak"
+  echo "batch probe warning must not leak" >&2
   exit 9
 fi
 case "${last_file##*/}" in
@@ -551,6 +616,8 @@ _assert_contains "clean batch fallback: per-file diagnostic is retained" \
   "first-file diagnostic" "$output"
 _assert_not_contains "clean batch fallback: speculative output is discarded" \
   "batch probe output must not leak" "$output"
+_assert_not_contains "clean batch fallback: speculative warning is discarded" \
+  "batch probe warning must not leak" "$output"
 _assert_eq "clean batch fallback: Typos runs once speculatively and once per file" \
   "3" "$(grep -c '^typos:' "$_batch_fallback_log")"
 _assert_eq "clean batch fallback: Ruff runs once speculatively and once per file" \
