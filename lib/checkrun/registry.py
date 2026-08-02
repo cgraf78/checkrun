@@ -817,7 +817,7 @@ def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
     return {"ignored": False}
 
 
-def _load_schema_policy() -> _SchemaContext:
+def _load_schema_policy(*, prepare_matches: bool = False) -> _SchemaContext:
     # Schema association policy remains outside the tooling registry. The plan
     # reports matching associations for explainability, but the association file
     # itself is still owned by dotfiles/project policy.
@@ -833,7 +833,11 @@ def _load_schema_policy() -> _SchemaContext:
         policy = schema_policy.load_policy(policy_path)
     except schema_policy.SchemaPolicyError as exc:
         raise RegistryError(str(exc)) from exc
-    prepared = [] if policy is None else schema_policy._prepare_matching_associations(policy)
+    prepared = (
+        schema_policy._prepare_matching_associations(policy)
+        if policy is not None and prepare_matches
+        else []
+    )
     return schema_policy, policy, prepared
 
 
@@ -1047,7 +1051,7 @@ def plan(registry: dict[str, Any], files: list[str], phase: str | None = None) -
     if phase is not None and phase not in _PLAN_PHASES:
         expected = ", ".join(sorted(_PLAN_PHASES))
         raise RegistryError(f"unknown plan phase {phase!r}; expected one of {expected}")
-    schema_context = _load_schema_policy()
+    schema_context = _load_schema_policy(prepare_matches=True)
     return {
         "version": 1,
         "files": [
@@ -1115,7 +1119,7 @@ def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, 
     """Return the public JSON payload used by `checkrun explain --json`."""
 
     items = []
-    schema_context = _load_schema_policy()
+    schema_context = _load_schema_policy(prepare_matches=True)
     for file in files:
         item = _plan_file(registry, file, schema_context=schema_context)
         fmt = item["format"]
@@ -1199,7 +1203,7 @@ def _shell_plan_items(
     parsing its own serialized bytes.
     """
 
-    schema_context = _load_schema_policy()
+    schema_context = _load_schema_policy(prepare_matches=True)
     schema_policy, _, _ = schema_context
     policy_path = schema_policy.policy_path() if phase == "lint" else None
     planned_files = [
