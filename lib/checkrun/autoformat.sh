@@ -109,7 +109,7 @@ _format_sh() {
 }
 
 _format_sh_batch() {
-  local lang="$1" config_source="$2" config_path="$3" file
+  local lang="$1" config_source="$2" config_path="$3" file dir
   local args=() v_indent="" v_sci=""
   shift 3
   command -v shfmt &>/dev/null || return 0
@@ -130,7 +130,8 @@ _format_sh_batch() {
     return 0
   fi
   for file in "$@"; do
-    _format_sh "$file" "$(dirname "$file")" "$lang" "$config_source" "$config_path" || true
+    _checkrun_path_dir dir "$file"
+    _format_sh "$file" "$dir" "$lang" "$config_source" "$config_path" || true
   done
 }
 
@@ -187,6 +188,25 @@ _format_ruff() {
   _run_fmt ruff check --quiet --fix --select=I ${args[@]+"${args[@]}"} "$file"
 }
 
+_format_ruff_batch() {
+  local config_source="$1" config_path="$2" file dir
+  local args=()
+  shift 2
+  command -v ruff &>/dev/null || return 0
+
+  [ "$config_source" = "fallback" ] && [ -n "$config_path" ] && args=(--config "$config_path")
+  if _try_fmt_batch ruff format --quiet ${args[@]+"${args[@]}"} "$@" &&
+    _try_fmt_batch ruff check --quiet --fix --select=I \
+      ${args[@]+"${args[@]}"} "$@"; then
+    return 0
+  fi
+
+  for file in "$@"; do
+    _checkrun_path_dir dir "$file"
+    _format_ruff "$file" "$dir" "$config_source" "$config_path" || true
+  done
+}
+
 _format_goimports() {
   # Positional contract from _format_dispatch is (file, dir, config_source,
   # config_path). goimports has no config knob — the rest are named-ignored so
@@ -221,6 +241,25 @@ _format_clang() {
   _run_fmt clang-format -i ${args[@]+"${args[@]}"} "$file"
 }
 
+_format_clang_batch() {
+  local config_source="$1" config_path="$2" file dir
+  local args=()
+  shift 2
+  command -v clang-format &>/dev/null || return 0
+
+  if [ "$config_source" = "fallback" ] && [ -n "$config_path" ]; then
+    args=(-style="file:$config_path")
+  fi
+  if _try_fmt_batch clang-format -i ${args[@]+"${args[@]}"} "$@"; then
+    return 0
+  fi
+
+  for file in "$@"; do
+    _checkrun_path_dir dir "$file"
+    _format_clang "$file" "$dir" "$config_source" "$config_path" || true
+  done
+}
+
 _format_stylua() {
   local file="$1" dir="$2" config_source="${3:-}" config_path="${4:-}" args=()
   command -v stylua &>/dev/null || return 0
@@ -234,7 +273,7 @@ _format_stylua() {
 }
 
 _format_stylua_batch() {
-  local config_source="$1" config_path="$2" file
+  local config_source="$1" config_path="$2" file dir
   local args=()
   shift 2
   command -v stylua &>/dev/null || return 0
@@ -247,7 +286,8 @@ _format_stylua_batch() {
   fi
 
   for file in "$@"; do
-    _format_stylua "$file" "$(dirname "$file")" "$config_source" "$config_path" || true
+    _checkrun_path_dir dir "$file"
+    _format_stylua "$file" "$dir" "$config_source" "$config_path" || true
   done
 }
 
@@ -264,6 +304,31 @@ _format_rustfmt() {
     args+=(--config-path "$config_path")
   fi
   _run_fmt rustfmt ${args[@]+"${args[@]}"} "$file"
+}
+
+_format_rustfmt_batch() {
+  local config_source="$1" config_path="$2" file dir
+  local args=() cargo_edition
+  shift 2
+  command -v rustfmt &>/dev/null || return 0
+
+  # Precondition: the planner's batch_scope groups rustfmt files by directory,
+  # so the first file's Cargo edition applies to every path in this invocation.
+  file="$1"
+  _checkrun_path_dir dir "$file"
+  cargo_edition=$(_find_cargo_edition "$dir" 2>/dev/null || true)
+  [ -n "$cargo_edition" ] && args+=(--edition "$cargo_edition")
+  if [ "$config_source" = "fallback" ] && [ -n "$config_path" ]; then
+    args+=(--config-path "$config_path")
+  fi
+  if _try_fmt_batch rustfmt ${args[@]+"${args[@]}"} "$@"; then
+    return 0
+  fi
+
+  for file in "$@"; do
+    _checkrun_path_dir dir "$file"
+    _format_rustfmt "$file" "$dir" "$config_source" "$config_path" || true
+  done
 }
 
 _format_taplo() {
@@ -357,7 +422,7 @@ _format_rumdl() {
 _format_dispatch() {
   local adapter="$1" file="$2" filetype="$3" config_source="$4" config_path="$5"
   local dir
-  dir=$(dirname "$file")
+  _checkrun_path_dir dir "$file"
 
   # Adapter ids are the stable boundary between the registry and shell. This
   # case statement intentionally dispatches by adapter id only; filetype,
@@ -469,6 +534,9 @@ _format_batch_group() {
   fi
 
   case "$adapter" in
+    clang-format) _format_clang_batch "$config_source" "$config_path" "$@" ;;
+    ruff-format) _format_ruff_batch "$config_source" "$config_path" "$@" ;;
+    rustfmt) _format_rustfmt_batch "$config_source" "$config_path" "$@" ;;
     shfmt) _format_sh_batch "" "$config_source" "$config_path" "$@" ;;
     shfmt-zsh) _format_sh_batch zsh "$config_source" "$config_path" "$@" ;;
     stylua) _format_stylua_batch "$config_source" "$config_path" "$@" ;;
@@ -486,7 +554,8 @@ _autoformat_run_preplanned() {
   local plan_dir="$1" plan_count="$2" idx=0 rc=0 dispatch_rc
   local path filetype adapter config_source config_path record_count
   local record_path record_filetype _record_phase record_adapter record_source record_config
-  local batch_adapter="" batch_filetype="" batch_source="" batch_path=""
+  local batch_adapter="" batch_filetype="" batch_source="" batch_path="" batch_scope=""
+  local candidate_scope=""
   local batch_files=()
 
   while [ "$idx" -lt "$plan_count" ]; do
@@ -511,11 +580,17 @@ _autoformat_run_preplanned() {
       fi
     done <"$plan_dir/$idx.plan"
 
-    if [[ "$adapter" =~ ^(shfmt|shfmt-zsh|stylua)$ ]] && [ "$record_count" -eq 1 ]; then
+    candidate_scope=""
+    if [ "$adapter" = "rustfmt" ]; then
+      _checkrun_path_dir candidate_scope "$path"
+    fi
+    if [[ "$adapter" =~ ^(clang-format|ruff-format|rustfmt|shfmt|shfmt-zsh|stylua)$ ]] &&
+      [ "$record_count" -eq 1 ]; then
       if [ "${#batch_files[@]}" -gt 0 ] && {
         [ "$adapter" != "$batch_adapter" ] ||
           [ "$config_source" != "$batch_source" ] ||
           [ "$config_path" != "$batch_path" ] ||
+          [ "$candidate_scope" != "$batch_scope" ] ||
           [ "${#batch_files[@]}" -ge 64 ]
       }; then
         _format_batch_group "$batch_adapter" "$batch_filetype" \
@@ -527,6 +602,7 @@ _autoformat_run_preplanned() {
         batch_filetype="$filetype"
         batch_source="$config_source"
         batch_path="$config_path"
+        batch_scope="$candidate_scope"
       fi
       batch_files+=("$path")
     else
@@ -594,8 +670,10 @@ _autoformat_main() {
 
   # Pre-plan all files in one Python invocation, then dispatch each file from
   # its pre-built plan. Most adapters remain sequential because some operate on
-  # shared project caches. Consecutive, equivalent shfmt and Stylua plans use
-  # bounded multi-file invocations; every other ordering boundary is retained.
+  # shared project caches. Consecutive equivalent shfmt, Stylua, Ruff, and
+  # clang-format plans use bounded multi-file invocations; rustfmt additionally
+  # requires a shared source directory so one Cargo edition applies to the
+  # whole batch. Every other ordering boundary is retained.
   # If the batch scratch directory cannot be created, fall back to per-file
   # planning. A registry failure is authoritative and must not be retried just
   # to repeat its diagnostic. We can pass "$@" directly because any -h/--help
