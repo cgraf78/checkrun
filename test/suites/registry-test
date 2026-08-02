@@ -160,7 +160,7 @@ try:
     assert [
         association["name"]
         for association in registry_mod._schema_associations(
-            matched_schema_target, lazy_schema_context
+            matched_schema_target.resolve(), lazy_schema_context
         )
     ] == ["Matched settings"]
     assert shell_plan_adapters(shell_policy) == [
