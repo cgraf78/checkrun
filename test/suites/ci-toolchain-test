@@ -127,6 +127,9 @@ if "test-command: test/checkrun-test" not in shell_job:
     raise AssertionError("main shell job must run the complete repository suite")
 
 publish_job = job_block(update_workflow, "publish")
+mise_refs = re.findall(r"uses: jdx/mise-action@([0-9a-f]{40})", update_workflow)
+if len(mise_refs) != 1:
+    raise AssertionError("Mise refresh must use one immutable action revision")
 publish_lines = publish_job.splitlines()
 checkout_starts = [
     index
