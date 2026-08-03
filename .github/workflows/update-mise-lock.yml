@@ -76,6 +76,12 @@ jobs:
       LOCK_CONTENT: ${{ needs.refresh.outputs.lock }}
       UPDATE_BRANCH: automation/mise-lock-refresh
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repo
+          ref: ${{ needs.refresh.outputs.base_sha }}
+
       - name: Publish update branch
         shell: bash
         run: |
@@ -88,9 +94,7 @@ jobs:
             exit 1
           fi
 
-          gh repo clone "$GITHUB_REPOSITORY" repo -- --branch "$BASE_BRANCH"
           cd repo
-          git checkout "$BASE_SHA"
           printf '%s' "$LOCK_CONTENT" | base64 --decode >.github/mise/mise.lock
 
           remote_ref="refs/heads/$UPDATE_BRANCH"
