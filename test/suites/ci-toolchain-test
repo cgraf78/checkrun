@@ -10,7 +10,8 @@ python3 "$repo_root/.github/scripts/verify_mise_lock.py" \
 
 python3 - \
   "$repo_root/.github/scripts/verify_mise_lock.py" \
-  "$repo_root/.github/workflows/test.yml" <<'PY'
+  "$repo_root/.github/workflows/test.yml" \
+  "$repo_root/.github/workflows/update-mise-lock.yml" <<'PY'
 from __future__ import annotations
 
 import importlib.util
@@ -22,6 +23,8 @@ from pathlib import Path
 script = Path(sys.argv[1])
 workflow_path = Path(sys.argv[2])
 workflow = workflow_path.read_text(encoding="utf-8")
+update_workflow_path = Path(sys.argv[3])
+update_workflow = update_workflow_path.read_text(encoding="utf-8")
 spec = importlib.util.spec_from_file_location("verify_mise_lock", script)
 if spec is None or spec.loader is None:
     raise RuntimeError(f"cannot load {script}")
@@ -71,9 +74,9 @@ duplicate["tools"]["aqua:owner/tool"].append(deepcopy(entry))
 assert_error("aqua:owner/tool: expected exactly one locked version", config, duplicate)
 
 
-def job_block(name: str) -> str:
+def job_block(source: str, name: str) -> str:
     """Return one top-level job block from the repository workflow."""
-    lines = workflow.splitlines()
+    lines = source.splitlines()
     marker = f"  {name}:"
     try:
         start = lines.index(marker)
@@ -88,7 +91,7 @@ def job_block(name: str) -> str:
     return "\n".join(lines[start:end])
 
 
-shell_job = job_block("shell")
+shell_job = job_block(workflow, "shell")
 workflow_refs = re.findall(
     r"uses: cgraf78/actions/\.github/workflows/shell-ci\.yml@([0-9a-f]{40})",
     workflow,
@@ -103,6 +106,35 @@ if "shellcheck-inventory-path: test/shellcheck-files.txt" not in shell_job:
     raise AssertionError("main shell job must include the shared ShellCheck gate")
 if "test-command: test/checkrun-test" not in shell_job:
     raise AssertionError("main shell job must run the complete repository suite")
+
+publish_job = job_block(update_workflow, "publish")
+publish_lines = publish_job.splitlines()
+checkout_starts = [
+    index
+    for index, line in enumerate(publish_lines)
+    if re.fullmatch(r"      - uses: actions/checkout@[0-9a-f]{40}(?: # .+)?", line)
+]
+if len(checkout_starts) != 1:
+    raise AssertionError("Mise publish job must use one immutable checkout revision")
+checkout_start = checkout_starts[0]
+checkout_end = next(
+    (
+        index
+        for index in range(checkout_start + 1, len(publish_lines))
+        if publish_lines[index].startswith("      - ")
+    ),
+    len(publish_lines),
+)
+checkout_step = "\n".join(publish_lines[checkout_start:checkout_end])
+for setting in [
+    "          ref: ${{ needs.refresh.outputs.base_sha }}",
+    "          path: repo",
+    "          persist-credentials: false",
+]:
+    if setting not in checkout_step:
+        raise AssertionError(f"Mise publish checkout must include {setting.strip()}")
+if "gh repo clone" in publish_job:
+    raise AssertionError("Mise publish job must not use the unretired gh clone path")
 PY
 
 printf 'ci-toolchain-test: ok\n'
