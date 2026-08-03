@@ -66,9 +66,8 @@ jobs:
     if: needs.refresh.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions: # zizmor: ignore[excessive-permissions]
-      actions: write # Dispatch the full test matrix for the bot branch.
-      contents: write # Replace the dedicated update branch.
-      pull-requests: write # Create or refresh the toolchain PR.
+      contents: write # Push the automation branch and request auto-merge.
+      pull-requests: write # Create or update the dedicated refresh PR.
     env:
       BASE_BRANCH: ${{ github.event.repository.default_branch }}
       BASE_SHA: ${{ needs.refresh.outputs.base_sha }}
@@ -76,9 +75,24 @@ jobs:
       LOCK_CONTENT: ${{ needs.refresh.outputs.lock }}
       UPDATE_BRANCH: automation/mise-lock-refresh
     steps:
+      - name: Require the repository-scoped deploy key
+        shell: bash
+        env:
+          DEPLOY_KEY: ${{ secrets.CHECKRUN_MISE_REFRESH_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEPLOY_KEY" ]]; then
+            echo "CHECKRUN_MISE_REFRESH_DEPLOY_KEY is not configured" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          # The repository-only key makes the post-PR push a real synchronize
+          # event, attaching protected pull_request checks to the final commit.
+          ssh-key: ${{ secrets.CHECKRUN_MISE_REFRESH_DEPLOY_KEY }}
+          token: unused-by-ssh-checkout
+          persist-credentials: true # zizmor: ignore[artipacked]
           path: repo
           ref: ${{ needs.refresh.outputs.base_sha }}
 
@@ -104,21 +118,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$UPDATE_BRANCH"
           git add .github/mise/mise.lock
-          git commit -F - <<'EOF'
-          Refresh Checkrun's `mise` toolchain
+          git commit -m "Stage refreshed Checkrun mise lock"
 
-          Summary
-
-          Regenerate the committed CI tool lock so Checkrun can evaluate current
-          formatter and linter releases without making ordinary CI mutable.
-
-          Testing
-
-          - `.github/scripts/verify_mise_lock.py`
-          - full cross-platform matrix dispatched after publishing the branch
-          EOF
-
-          gh auth setup-git
           if [[ -n "$remote_sha" ]]; then
             git push origin "HEAD:$remote_ref" \
               "--force-with-lease=$remote_ref:$remote_sha"
@@ -126,11 +127,12 @@ jobs:
             git push origin "HEAD:$remote_ref"
           fi
 
-      - name: Open pull request and dispatch tests
+      - name: Open pull request and enable auto-merge
         shell: bash
         run: |-
           set -euo pipefail
           cd repo
+          remote_ref="refs/heads/$UPDATE_BRANCH"
 
           body="$RUNNER_TEMP/mise-lock-pr.md"
           cat >"$body" <<'EOF'
@@ -142,25 +144,74 @@ jobs:
 
           - re-resolve all fuzzy tool selectors from `checkrun-ci.toml`
           - regenerate Linux and macOS lock entries from one manifest
-          - run the full shared CI matrix before review
+          - auto-merge only after the normal protected Checkrun matrix passes
 
           Testing
 
           - `.github/scripts/verify_mise_lock.py`
-          - full cross-platform matrix dispatched by this workflow
+          - full protected Checkrun CI matrix on the final automation commit
           EOF
 
-          number="$(gh pr list --head "$UPDATE_BRANCH" --state open \
-            --json number --jq '.[0].number // empty')"
-          if [[ -z "$number" ]]; then
-            gh pr create --base "$BASE_BRANCH" --head "$UPDATE_BRANCH" \
-              --title "Refresh Checkrun's \`mise\` toolchain" --body-file "$body"
-          else
-            gh pr edit "$number" --title "Refresh Checkrun's \`mise\` toolchain" \
-              --body-file "$body"
+          owner=${GITHUB_REPOSITORY%%/*}
+          head="$owner:$UPDATE_BRANCH"
+          prs=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f state=open -f "head=$head" -f per_page=2)
+          count=$(jq 'length' <<<"$prs")
+          if ((count > 1)); then
+            echo "multiple open Mise refresh PRs for $head" >&2
+            exit 1
           fi
 
-          # The pull_request run created by GITHUB_TOKEN waits for approval.
-          # Dispatch the full scheduled/manual matrix so the bot PR still gets
-          # unattended cross-platform coverage.
-          gh workflow run test.yml --ref "$UPDATE_BRANCH"
+          if ((count == 0)); then
+            gh pr create --base "$BASE_BRANCH" --head "$UPDATE_BRANCH" \
+              --title "Refresh Checkrun's \`mise\` toolchain" --body-file "$body"
+            prs=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+              -f state=open -f "head=$head" -f per_page=2)
+            count=$(jq 'length' <<<"$prs")
+          fi
+          if ((count != 1)); then
+            echo "expected exactly one open Mise refresh PR for $head" >&2
+            exit 1
+          fi
+
+          number=$(jq -r '.[0].number' <<<"$prs")
+          base=$(jq -r '.[0].base.ref' <<<"$prs")
+          head_repo=$(jq -r '.[0].head.repo.full_name' <<<"$prs")
+          head_ref=$(jq -r '.[0].head.ref' <<<"$prs")
+          if [[ "$base" != "$BASE_BRANCH" ]]; then
+            echo "unexpected base on Mise refresh PR #$number: $base" >&2
+            exit 1
+          fi
+          if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
+            echo "unexpected head repository on Mise refresh PR #$number: $head_repo" >&2
+            exit 1
+          fi
+          if [[ "$head_ref" != "$UPDATE_BRANCH" ]]; then
+            echo "unexpected head branch on Mise refresh PR #$number: $head_ref" >&2
+            exit 1
+          fi
+          gh pr edit "$number" --title "Refresh Checkrun's \`mise\` toolchain" \
+            --body-file "$body"
+
+          # GITHUB_TOKEN-created PR events do not start another workflow. Amend
+          # the staged commit after the PR exists and push it with the scoped
+          # deploy key retained by checkout. That synchronize event starts the
+          # protected pull_request matrix on the final tree.
+          published_sha=$(git rev-parse HEAD)
+          git commit --amend -F - <<'EOF'
+          Refresh Checkrun's `mise` toolchain
+
+          Summary
+
+          Regenerate the committed CI tool lock so Checkrun can evaluate current
+          formatter and linter releases without making ordinary CI mutable.
+
+          Testing
+
+          - `.github/scripts/verify_mise_lock.py`
+          - full protected Checkrun CI matrix
+          EOF
+          git push origin "HEAD:$remote_ref" \
+            "--force-with-lease=$remote_ref:$published_sha"
+
+          gh pr merge "$number" --auto --squash

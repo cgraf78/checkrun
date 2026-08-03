@@ -91,6 +91,25 @@ def job_block(source: str, name: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def step_block(source: str, name: str) -> str:
+    """Return one named step block from a workflow job."""
+    lines = source.splitlines()
+    marker = f"      - name: {name}"
+    try:
+        start = lines.index(marker)
+    except ValueError as error:
+        raise AssertionError(f"missing workflow step: {name}") from error
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].startswith("      - ")
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
 shell_job = job_block(workflow, "shell")
 workflow_refs = re.findall(
     r"uses: cgraf78/actions/\.github/workflows/shell-ci\.yml@([0-9a-f]{40})",
@@ -126,15 +145,61 @@ checkout_end = next(
     len(publish_lines),
 )
 checkout_step = "\n".join(publish_lines[checkout_start:checkout_end])
+preflight_step = step_block(publish_job, "Require the repository-scoped deploy key")
+preflight_start = publish_lines.index(
+    "      - name: Require the repository-scoped deploy key"
+)
+if preflight_start >= checkout_start:
+    raise AssertionError("Mise deploy-key preflight must run before checkout")
+if "CHECKRUN_MISE_REFRESH_DEPLOY_KEY is not configured" not in preflight_step:
+    raise AssertionError("Mise deploy-key preflight must fail when its secret is absent")
 for setting in [
     "          ref: ${{ needs.refresh.outputs.base_sha }}",
     "          path: repo",
-    "          persist-credentials: false",
+    "          ssh-key: ${{ secrets.CHECKRUN_MISE_REFRESH_DEPLOY_KEY }}",
+    "          token: unused-by-ssh-checkout",
+    "          persist-credentials: true",
 ]:
     if setting not in checkout_step:
         raise AssertionError(f"Mise publish checkout must include {setting.strip()}")
 if "gh repo clone" in publish_job:
     raise AssertionError("Mise publish job must not use the unretired gh clone path")
+pr_step = step_block(publish_job, "Open pull request and enable auto-merge")
+for required in [
+    'remote_ref="refs/heads/$UPDATE_BRANCH"',
+    "owner=${GITHUB_REPOSITORY%%/*}",
+    'head="$owner:$UPDATE_BRANCH"',
+    'base=$(jq -r \'.[0].base.ref\' <<<"$prs")',
+    'head_repo=$(jq -r \'.[0].head.repo.full_name\' <<<"$prs")',
+    'head_ref=$(jq -r \'.[0].head.ref\' <<<"$prs")',
+    'if [[ "$base" != "$BASE_BRANCH" ]]; then',
+    'if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then',
+    'if [[ "$head_ref" != "$UPDATE_BRANCH" ]]; then',
+    "unexpected base on Mise refresh PR",
+    "unexpected head repository on Mise refresh PR",
+    "unexpected head branch on Mise refresh PR",
+    "published_sha=$(git rev-parse HEAD)",
+    'git push origin "HEAD:$remote_ref" \\\n            "--force-with-lease=$remote_ref:$published_sha"',
+    'gh pr merge "$number" --auto --squash',
+]:
+    if required not in pr_step:
+        raise AssertionError(f"Mise PR step must include {required}")
+ordered_operations = [
+    'gh pr create --base "$BASE_BRANCH"',
+    "git commit --amend",
+    'git push origin "HEAD:$remote_ref"',
+    'gh pr merge "$number" --auto --squash',
+]
+positions = [pr_step.index(operation) for operation in ordered_operations]
+if positions != sorted(positions):
+    raise AssertionError("Mise PR synchronize and auto-merge operations are misordered")
+for obsolete in [
+    "actions: write",
+    "gh workflow run test.yml",
+    "full cross-platform matrix dispatched by this workflow",
+]:
+    if obsolete in publish_job:
+        raise AssertionError(f"Mise publish job retains obsolete path: {obsolete}")
 PY
 
 printf 'ci-toolchain-test: ok\n'
