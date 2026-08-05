@@ -26,13 +26,32 @@ cat >"$_tool_bin/typos" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
+cat >"$_tool_bin/awk" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/awk-calls"
+exec "$AUTOLINT_CANCEL_REAL_AWK" "$@"
+SH
 cat >"$_tool_bin/ps" <<'SH'
 #!/usr/bin/env bash
+if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = pid=,pgid= ] && [ "$3" = -p ]; then
+  printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/pgid-snapshot-calls"
+  leader=${4#*,}
+  case "${AUTOLINT_CANCEL_PGID_SNAPSHOT:-normal}" in
+    shared)
+      printf '%s %s\n' "$AUTOLINT_CANCEL_PARENT_PID" "$AUTOLINT_CANCEL_PARENT_PID"
+      printf '%s %s\n' "$leader" "$AUTOLINT_CANCEL_PARENT_PID"
+      exit 0
+      ;;
+    malformed)
+      printf '%s %s\n' "$AUTOLINT_CANCEL_PARENT_PID" "$AUTOLINT_CANCEL_PARENT_PID"
+      printf '%s invalid\n' "$leader"
+      exit 0
+      ;;
+  esac
+  exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
+fi
 if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = pgid= ] && [ "$3" = -p ]; then
-  printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/pgid-calls"
-  if [ "${AUTOLINT_CANCEL_SHARED_PGID:-0}" -eq 1 ]; then
-    exec "$AUTOLINT_CANCEL_REAL_PS" -o pgid= -p "$AUTOLINT_CANCEL_PARENT_PID"
-  fi
+  printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/legacy-pgid-calls"
   exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
 fi
 printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/ps-calls"
@@ -129,7 +148,7 @@ with (root / "backend-completion-order").open("a", encoding="ascii") as stream:
 (root / f"backend-{index}.done").touch(exist_ok=False)
 raise SystemExit(int(os.environ.get(f"AUTOLINT_CANCEL_EXIT_{index}", "0")))
 PY
-chmod +x "$_tool_bin/yq" "$_tool_bin/typos" "$_tool_bin/ps" \
+chmod +x "$_tool_bin/yq" "$_tool_bin/typos" "$_tool_bin/awk" "$_tool_bin/ps" \
   "$_tool_bin/slow-planner" "$_tool_bin/fallback-worker" \
   "$_tool_bin/shellcheck"
 
@@ -283,6 +302,30 @@ case "$mode" in
       return "$rc"
     }
     ;;
+  pre-wait-signal)
+    _autolint_wait_signal_sent=0
+    wait() {
+      if [ "${BASH_SUBSHELL:-0}" -eq 0 ] &&
+        [ "$_autolint_wait_signal_sent" -eq 0 ]; then
+        _autolint_wait_signal_sent=1
+        : >"$root/pre-wait-signal"
+        kill -TERM "$AUTOLINT_CANCEL_PARENT_PID"
+      fi
+      builtin wait "$@"
+    }
+    ;;
+  restore-signal)
+    _autolint_restore_signal_traps() {
+      local saved_hup="$1" saved_int="$2" saved_term="$3"
+      if [ ! -e "$root/restore-signal" ]; then
+        : >"$root/restore-signal"
+        kill -TERM "$AUTOLINT_CANCEL_PARENT_PID"
+      fi
+      eval "${saved_hup:-trap - HUP}"
+      eval "${saved_int:-trap - INT}"
+      eval "${saved_term:-trap - TERM}"
+    }
+    ;;
   planner-signal)
     _autolint_pre_plan() { slow-planner; }
     ;;
@@ -427,6 +470,8 @@ case = {
     "capability-fallback": ("capability-fallback", 2, 2, 0),
     "capability-fallback-signal": ("capability-fallback-signal", 2, 2, 143),
     "monitor": ("monitor", 2, 2, 0),
+    "pre-wait-signal": ("pre-wait-signal", 2, 2, 143),
+    "restore-signal": ("restore-signal", 2, 2, 143),
     "planner-signal": ("planner-signal", 2, 2, 143),
     "success": ("normal", 2, 2, 0),
     "failure": ("normal", 2, 2, 7),
@@ -435,6 +480,7 @@ case = {
     "fallback": ("validation-fallback", 2, 2, 0),
     "validation-fallback-signal": ("validation-fallback-signal", 2, 2, 143),
     "shared-pgid": ("shared-pgid", 2, 2, 0),
+    "malformed-pgid": ("normal", 2, 2, 0),
     "one": ("normal", 1, 2, 0),
     "jobs-one": ("normal", 2, 1, 0),
     "direct-one-signal": ("direct-one-signal", 1, 2, 143),
@@ -446,6 +492,7 @@ case = {
 mode, count, jobs, expected_status = case
 env = os.environ.copy()
 env["PATH"] = tool_bin + os.pathsep + env["PATH"]
+env["AUTOLINT_CANCEL_REAL_AWK"] = shutil.which("awk")
 env["AUTOLINT_CANCEL_REAL_PS"] = shutil.which("ps")
 env["AUTOLINT_CANCEL_REAL_MKTEMP"] = shutil.which("mktemp")
 env["AUTOLINT_CANCEL_REAL_MKDIR"] = shutil.which("mkdir")
@@ -461,7 +508,9 @@ if scenario in ("inspect-failure", "repeat"):
 if scenario == "inspect-failure":
     env["AUTOLINT_CANCEL_PS_FAIL"] = "1"
 if scenario == "shared-pgid":
-    env["AUTOLINT_CANCEL_SHARED_PGID"] = "1"
+    env["AUTOLINT_CANCEL_PGID_SNAPSHOT"] = "shared"
+if scenario == "malformed-pgid":
+    env["AUTOLINT_CANCEL_PGID_SNAPSHOT"] = "malformed"
 
 process = subprocess.Popen(
     [shell, driver, impl, str(root), mode, str(count), str(jobs)],
@@ -520,7 +569,7 @@ signal_started = None
 try:
     if scenario in (
         "allocation-fallback", "capability-fallback", "fallback", "jobs-one",
-        "shared-pgid",
+        "malformed-pgid", "shared-pgid",
     ):
         wait_for(lambda: (root / "backend-0.ready").is_file(), "first backend")
         if (root / "backend-1.ready").exists():
@@ -541,6 +590,9 @@ try:
         wait_for(lambda: (root / "planner.ready").is_file(), "registry planner")
         signal_started = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "pre-wait-signal":
+        wait_for(lambda: (root / "pre-wait-signal").is_file(), "pre-wait signal")
+        signal_started = time.monotonic()
     elif scenario == "direct-one-signal":
         wait_for(lambda: (root / "planner.ready").is_file(), "direct registry planner")
         signal_started = time.monotonic()
@@ -605,7 +657,8 @@ try:
         stdout, stderr = process.communicate(timeout=2)
     else:
         try:
-            stdout, stderr = process.communicate(timeout=8)
+            timeout = 1.5 if scenario == "pre-wait-signal" else 8
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("autolint did not finish after its observable event") from error
 
@@ -626,7 +679,7 @@ try:
 
     if not direct_signal and scenario not in (
         "allocation-fallback-signal", "allocation-signal", "monitor", "planner-signal",
-        "direct-one-signal", "direct-jobs-one-signal", "signal", "repeat",
+        "direct-one-signal", "direct-jobs-one-signal", "pre-wait-signal", "signal", "repeat",
         "inspect-failure"
     ):
         expected_output = [f"backend:{index}" for index in range(count)]
@@ -696,29 +749,48 @@ try:
     ps_calls = (root / "ps-calls").read_text(encoding="ascii").splitlines() \
         if (root / "ps-calls").exists() else []
     expected_ps_calls = 1 if scenario in (
-        "inspect-failure", "planner-signal", "signal", "repeat"
+        "inspect-failure", "planner-signal", "pre-wait-signal", "repeat", "signal"
     ) else 0
     if len(ps_calls) != expected_ps_calls:
+        observed_states = {
+            path.name: process_state(int(path.read_text(encoding="ascii")))
+            for path in root.glob("backend-*.pid")
+        }
         raise RuntimeError(
-            f"process-table scans {len(ps_calls)}, expected {expected_ps_calls}"
+            f"process-table scans {len(ps_calls)}, expected {expected_ps_calls}; "
+            f"backend states {observed_states!r}"
         )
-    pgid_calls = (root / "pgid-calls").read_text(encoding="ascii").splitlines() \
-        if (root / "pgid-calls").exists() else []
-    if scenario == "shared-pgid":
-        # The real caller PGID is already different from the gated `$!`, so
-        # validation rejects the leader before it needs a second lookup.
-        expected_pgid_calls = 1
-    elif scenario in (
+    pgid_snapshot_calls = (root / "pgid-snapshot-calls").read_text(
+        encoding="ascii"
+    ).splitlines() if (root / "pgid-snapshot-calls").exists() else []
+    if scenario in (
         "cleanup-signal", "cleanup-group-signal", "cleanup-failure",
         "cleanup-failure-errexit", "cleanup-retry-signal", "monitor", "planner-signal", "success",
-        "failure", "precedence", "wave", "signal", "repeat", "inspect-failure",
+        "failure", "precedence", "restore-signal", "wave", "signal", "repeat", "inspect-failure",
+        "pre-wait-signal",
+        "malformed-pgid", "shared-pgid",
     ):
-        expected_pgid_calls = 2
+        expected_pgid_snapshot_calls = 1
     else:
-        expected_pgid_calls = 0
-    if len(pgid_calls) != expected_pgid_calls:
+        expected_pgid_snapshot_calls = 0
+    if len(pgid_snapshot_calls) != expected_pgid_snapshot_calls:
         raise RuntimeError(
-            f"targeted PGID lookups {len(pgid_calls)}, expected {expected_pgid_calls}"
+            "targeted PGID snapshots "
+            f"{len(pgid_snapshot_calls)}, expected {expected_pgid_snapshot_calls}"
+        )
+    legacy_pgid_calls = (root / "legacy-pgid-calls").read_text(
+        encoding="ascii"
+    ).splitlines() if (root / "legacy-pgid-calls").exists() else []
+    if legacy_pgid_calls:
+        raise RuntimeError(f"legacy PGID lookups remain: {legacy_pgid_calls!r}")
+    awk_calls = (root / "awk-calls").read_text(encoding="ascii").splitlines() \
+        if (root / "awk-calls").exists() else []
+    # Cancellation's one full-group liveness scan still uses awk. PGID
+    # validation itself must add no awk process beyond that established scan.
+    expected_awk_calls = 0 if scenario == "inspect-failure" else expected_ps_calls
+    if len(awk_calls) != expected_awk_calls:
+        raise RuntimeError(
+            f"awk calls {len(awk_calls)}, expected {expected_awk_calls}"
         )
 
     for index in range(count):
@@ -827,6 +899,9 @@ _run_case "set -e caller restores state before cleanup failure returns" \
 _run_case "missing cancellation tool falls back sequentially" capability-fallback
 _run_case "monitor-on caller gets no job notification" monitor
 _run_case "parent-only TERM cancels the registry planner promptly" planner-signal
+_run_case "TERM immediately before leader wait cancels promptly" pre-wait-signal
+_run_case "TERM during trap restoration remains the operation result" \
+  restore-signal
 _run_case "success restores Sley-style caller state and ordered output" success
 _run_case "ordinary failure preserves status and ordered output" failure
 _run_case "reverse completion preserves ordered output and strongest status" \
@@ -837,6 +912,8 @@ _run_case "validation fallback restores direct TERM behavior" \
   validation-fallback-signal
 _run_case "shared process group fails validation and falls back sequentially" \
   shared-pgid
+_run_case "malformed process group snapshot falls back sequentially" \
+  malformed-pgid
 _run_case "one-file hot path stays direct" one
 _run_case "jobs=1 hot path stays direct" jobs-one
 _run_case "parent-only TERM stays prompt during one-file planning" direct-one-signal
