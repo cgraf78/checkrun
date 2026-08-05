@@ -800,6 +800,12 @@ _autolint_run_parallel_supervised() {
   if ! mkdir "$gate" 2>/dev/null; then
     _autolint_cancel_private_group "$leader" "$group" "$done_file"
     _autolint_restore_monitor "$had_monitor"
+    # Group cleanup shields signals internally. This is a normal capability
+    # fallback, not a latched cancellation, so re-arm the parent's handlers
+    # before handing control back to exact scratch cleanup.
+    trap '_autolint_record_signal 129' HUP
+    trap '_autolint_record_signal 130' INT
+    trap '_autolint_record_signal 143' TERM
     return 0
   fi
   _autolint_parallel_validated=1
@@ -886,7 +892,8 @@ _autolint_main() {
       # planner-through-linter pipeline. One-file and jobs=1 calls retain their
       # direct signal behavior without installing managed cancellation traps.
       local plan_dir="" allocation_rc=0 run_rc=0 file_rc=0 cleanup_rc=0
-      local managed_parallel=0
+      local cleanup_signals_frozen=0
+      local managed_parallel=0 direct_fallback=0
       local saved_hup saved_int saved_term
       local _autolint_signal_status=0 _autolint_cancel_status=0
       local _autolint_parallel_validated=0
@@ -915,16 +922,11 @@ _autolint_main() {
             elif [ "$_autolint_parallel_validated" -eq 1 ]; then
               rc=$(_autolint_merge_rc "$rc" "$run_rc")
             else
-              # Restricted hosts without complete cancellation prerequisites
-              # retain a direct sequential pipeline and exact scratch cleanup.
-              # They do not claim the parent-only descendant guarantee.
-              if _autolint_run_read_only_pipeline \
-                "$plan_dir" "$jobs" 0 "${lint_files[@]}"; then
-                run_rc=0
-              else
-                run_rc=$?
-              fi
-              rc=$(_autolint_merge_rc "$rc" "$run_rc")
+              # Restricted hosts retain the historical direct sequential path,
+              # but only after this managed scope removes its plan root and
+              # restores the caller's signal semantics. Do not run foreground
+              # fallback work under latch traps that cannot own descendants.
+              direct_fallback=1
             fi
           fi
         else
@@ -942,17 +944,35 @@ _autolint_main() {
         else
           cleanup_rc=$?
         fi
-        if [ "$managed_parallel" -eq 1 ]; then
-          # A terminal-group signal can stop the foreground rm before Bash runs
-          # our deferred trap. Freeze dispositions only after that trap can
-          # latch, then retry the same private path under ignored signals.
+        if [ "$managed_parallel" -eq 1 ] &&
+          [ "$_autolint_signal_status" -ne 0 ]; then
+          # Once the first signal is latched, shield the exact cleanup retry
+          # from later terminal-group delivery. With no latched signal, keep
+          # the handlers active so cancellation during an ordinary retry is
+          # recorded rather than silently ignored.
           trap '' HUP INT TERM
+          cleanup_signals_frozen=1
         fi
         if [ -e "$plan_dir" ]; then
           if rm -rf "$plan_dir"; then
             cleanup_rc=0
           else
             cleanup_rc=$?
+          fi
+        fi
+        if [ "$managed_parallel" -eq 1 ] &&
+          [ "$_autolint_signal_status" -ne 0 ] &&
+          [ "$cleanup_signals_frozen" -eq 0 ]; then
+          # The retry itself observed the first signal. Freeze only now, then
+          # make one final protected attempt at the same invocation-owned path.
+          trap '' HUP INT TERM
+          cleanup_signals_frozen=1
+          if [ -e "$plan_dir" ]; then
+            if rm -rf "$plan_dir"; then
+              cleanup_rc=0
+            else
+              cleanup_rc=$?
+            fi
           fi
         fi
         if [ -e "$plan_dir" ]; then
@@ -970,32 +990,36 @@ _autolint_main() {
         if [ "$managed_parallel" -eq 1 ]; then
           _autolint_restore_signal_traps "$saved_hup" "$saved_int" "$saved_term"
         fi
-      else
-        if [ "$managed_parallel" -eq 0 ] ||
-          [ "$_autolint_signal_status" -eq 0 ]; then
-          # Scratch allocation failed. Preserve the existing per-file fallback,
-          # retaining the managed scope's latch until no later file can launch.
+        if [ "$direct_fallback" -eq 1 ] && [ "$rc" -eq 0 ]; then
           for file in "${lint_files[@]}"; do
-            if [ "$managed_parallel" -eq 1 ] &&
-              [ "$_autolint_signal_status" -ne 0 ]; then
-              break
-            fi
             if _lint_one "$file"; then
               file_rc=0
             else
               file_rc=$?
             fi
-            if [ "$managed_parallel" -eq 1 ] &&
-              [ "$_autolint_signal_status" -ne 0 ]; then
-              break
-            fi
             rc=$(_autolint_merge_rc "$rc" "$file_rc")
           done
         fi
+      else
         if [ "$managed_parallel" -eq 1 ]; then
-          trap '' HUP INT TERM
-          [ "$_autolint_signal_status" -eq 0 ] || rc=$_autolint_signal_status
+          if [ "$_autolint_signal_status" -ne 0 ]; then
+            trap '' HUP INT TERM
+            rc=$_autolint_signal_status
+          fi
           _autolint_restore_signal_traps "$saved_hup" "$saved_int" "$saved_term"
+        fi
+        if [ "$rc" -eq 0 ]; then
+          # No scratch was allocated. Restore direct caller semantics before
+          # the historical per-file fallback for the same reason as the
+          # validation/capability path above.
+          for file in "${lint_files[@]}"; do
+            if _lint_one "$file"; then
+              file_rc=0
+            else
+              file_rc=$?
+            fi
+            rc=$(_autolint_merge_rc "$rc" "$file_rc")
+          done
         fi
       fi
     fi

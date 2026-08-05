@@ -178,11 +178,13 @@ case "$mode" in
       fi
       "$AUTOLINT_CANCEL_REAL_MKTEMP" "$@"
     }
-    _autolint_fallback_index=0
-    _lint_one() {
-      local index=$_autolint_fallback_index
-      _autolint_fallback_index=$((_autolint_fallback_index + 1))
-      fallback-worker "$index"
+    ;;
+  capability-fallback-signal)
+    command() {
+      if [ "${1:-}" = -v ] && [ "${2:-}" = ps ]; then
+        return 1
+      fi
+      builtin command "$@"
     }
     ;;
   allocation-signal)
@@ -230,6 +232,26 @@ case "$mode" in
       "$AUTOLINT_CANCEL_REAL_RM" "$@"
     }
     ;;
+  cleanup-retry-signal)
+    _autolint_cleanup_attempt=0
+    rm() {
+      if [ "${1:-}" = -rf ]; then
+        _autolint_cleanup_attempt=$((_autolint_cleanup_attempt + 1))
+        printf '%s\n' "$_autolint_cleanup_attempt" >>"$root/cleanup-attempts"
+        if [ "$_autolint_cleanup_attempt" -eq 1 ]; then
+          return 73
+        fi
+        if [ "$_autolint_cleanup_attempt" -eq 2 ]; then
+          : >"$root/cleanup-retry-ready"
+          while [ "${_autolint_signal_status:-0}" -eq 0 ]; do
+            sleep 0.01
+          done
+          return "$_autolint_signal_status"
+        fi
+      fi
+      "$AUTOLINT_CANCEL_REAL_RM" "$@"
+    }
+    ;;
   cleanup-failure | cleanup-failure-errexit)
     _autolint_cleanup_attempt=0
     rm() {
@@ -267,13 +289,33 @@ case "$mode" in
   direct-one-signal)
     _autolint_pre_plan() { slow-planner; }
     ;;
-  validation-fallback)
+  validation-fallback | validation-fallback-signal)
     _autolint_validate_private_group() { return 1; }
     ;;
   shared-pgid)
     ;;
   wave)
     _autolint_supports_pool() { return 1; }
+    ;;
+esac
+
+case "$mode" in
+  allocation-fallback-signal | capability-fallback-signal | validation-fallback-signal)
+    _autolint_direct_fallback_probe() {
+      local scratch=()
+      shopt -s nullglob
+      scratch=("$root/tmp"/autolint-plans.*)
+      shopt -u nullglob
+      if [ "${#scratch[@]}" -eq 0 ]; then
+        : >"$root/fallback-scratch-clean"
+      else
+        : >"$root/fallback-scratch-present"
+      fi
+      : >"$root/direct-fallback.ready"
+      sleep 30
+    }
+    _autolint_pre_plan() { _autolint_direct_fallback_probe; }
+    _lint_one() { _autolint_direct_fallback_probe; }
     ;;
 esac
 
@@ -289,7 +331,8 @@ if [ "$mode" = cleanup-failure-errexit ]; then
 fi
 
 case "$mode" in
-  direct-one-signal | direct-jobs-one-signal)
+  allocation-fallback-signal | capability-fallback-signal | \
+    validation-fallback-signal | direct-one-signal | direct-jobs-one-signal)
     trap - HUP INT TERM
     ;;
   *)
@@ -378,9 +421,11 @@ case = {
     "allocation-signal": ("allocation-signal", 2, 2, 143),
     "cleanup-signal": ("cleanup-signal", 2, 2, 143),
     "cleanup-group-signal": ("cleanup-group-signal", 2, 2, 143),
+    "cleanup-retry-signal": ("cleanup-retry-signal", 2, 2, 143),
     "cleanup-failure": ("cleanup-failure", 2, 2, 125),
     "cleanup-failure-errexit": ("cleanup-failure-errexit", 2, 2, 125),
     "capability-fallback": ("capability-fallback", 2, 2, 0),
+    "capability-fallback-signal": ("capability-fallback-signal", 2, 2, 143),
     "monitor": ("monitor", 2, 2, 0),
     "planner-signal": ("planner-signal", 2, 2, 143),
     "success": ("normal", 2, 2, 0),
@@ -388,6 +433,7 @@ case = {
     "precedence": ("normal", 3, 3, 125),
     "wave": ("wave", 2, 2, 0),
     "fallback": ("validation-fallback", 2, 2, 0),
+    "validation-fallback-signal": ("validation-fallback-signal", 2, 2, 143),
     "shared-pgid": ("shared-pgid", 2, 2, 0),
     "one": ("normal", 1, 2, 0),
     "jobs-one": ("normal", 2, 1, 0),
@@ -482,8 +528,12 @@ try:
         release(0)
         wait_for(lambda: (root / "backend-1.ready").is_file(), "second backend")
         release(1)
-    elif scenario == "allocation-fallback-signal":
-        wait_for(lambda: (root / "fallback-0.ready").is_file(), "fallback worker")
+    elif scenario in (
+        "allocation-fallback-signal",
+        "capability-fallback-signal",
+        "validation-fallback-signal",
+    ):
+        wait_for(lambda: (root / "direct-fallback.ready").is_file(), "direct fallback")
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "allocation-signal":
         pass
@@ -528,8 +578,18 @@ try:
             if scenario == "cleanup-group-signal":
                 wait_for(lambda: (root / "cleanup-ready").is_file(), "cleanup gate")
                 os.killpg(process.pid, signal.SIGTERM)
+            elif scenario == "cleanup-retry-signal":
+                wait_for(lambda: (root / "cleanup-retry-ready").is_file(), "cleanup retry")
+                signal_started = time.monotonic()
+                os.kill(process.pid, signal.SIGTERM)
 
-    direct_signal = scenario in ("direct-one-signal", "direct-jobs-one-signal")
+    direct_signal = scenario in (
+        "allocation-fallback-signal",
+        "capability-fallback-signal",
+        "validation-fallback-signal",
+        "direct-one-signal",
+        "direct-jobs-one-signal",
+    )
     if direct_signal:
         # A direct-path child retains the stdout/stderr pipe after its parent
         # dies. Measure the driver itself first, then clean up that test-owned
@@ -564,7 +624,7 @@ try:
     if signal_started is not None and time.monotonic() - signal_started > 0.8:
         raise RuntimeError("parent-only cancellation waited for foreground work")
 
-    if scenario not in (
+    if not direct_signal and scenario not in (
         "allocation-fallback-signal", "allocation-signal", "monitor", "planner-signal",
         "direct-one-signal", "direct-jobs-one-signal", "signal", "repeat",
         "inspect-failure"
@@ -590,6 +650,15 @@ try:
                 raise RuntimeError(f"caller shell {name} state was not restored")
     if (root / "unexpected-supervisor").exists():
         raise RuntimeError("hot path invoked the parallel supervisor")
+    if scenario in (
+        "allocation-fallback-signal",
+        "capability-fallback-signal",
+        "validation-fallback-signal",
+    ):
+        if (root / "fallback-scratch-present").exists():
+            raise RuntimeError("managed plan scratch reached the direct fallback")
+        if not (root / "fallback-scratch-clean").exists():
+            raise RuntimeError("direct fallback did not verify clean scratch handoff")
     if scenario == "cleanup-group-signal":
         cleanup_attempts = (root / "cleanup-attempts").read_text(
             encoding="ascii"
@@ -599,6 +668,12 @@ try:
         cleanup_status = int((root / "cleanup-first-status").read_text(encoding="ascii"))
         if cleanup_status != 143:
             raise RuntimeError(f"interrupted cleanup status {cleanup_status}, expected 143")
+    if scenario == "cleanup-retry-signal":
+        cleanup_attempts = (root / "cleanup-attempts").read_text(
+            encoding="ascii"
+        ).splitlines()
+        if cleanup_attempts != ["1", "2", "3"]:
+            raise RuntimeError(f"cleanup attempts {cleanup_attempts!r}, expected three")
     if scenario == "precedence":
         completion_order = (root / "backend-completion-order").read_text(
             encoding="ascii"
@@ -635,7 +710,7 @@ try:
         expected_pgid_calls = 1
     elif scenario in (
         "cleanup-signal", "cleanup-group-signal", "cleanup-failure",
-        "cleanup-failure-errexit", "monitor", "planner-signal", "success",
+        "cleanup-failure-errexit", "cleanup-retry-signal", "monitor", "planner-signal", "success",
         "failure", "precedence", "wave", "signal", "repeat", "inspect-failure",
     ):
         expected_pgid_calls = 2
@@ -679,8 +754,6 @@ try:
         raise RuntimeError("owned backend did not observe cooperative TERM")
     if scenario == "planner-signal" and not (root / "planner.term").is_file():
         raise RuntimeError("owned registry planner did not observe TERM")
-    if scenario == "allocation-fallback-signal" and (root / "fallback-1.ready").exists():
-        raise RuntimeError("allocation fallback launched work after cancellation")
     if not alive(unrelated.pid):
         raise RuntimeError("unrelated process was signalled")
 except BaseException as error:
@@ -741,9 +814,13 @@ _run_case "allocation failure restores traps and falls back sequentially" \
   allocation-fallback
 _run_case "allocation fallback latches TERM and launches no later work" \
   allocation-fallback-signal
+_run_case "capability fallback restores direct TERM behavior" \
+  capability-fallback-signal
 _run_case "allocation-time signal returns after exact cleanup" allocation-signal
 _run_case "cleanup-time signal remains the operation result" cleanup-signal
 _run_case "terminal-group TERM retries an interrupted cleanup" cleanup-group-signal
+_run_case "TERM during cleanup retry is latched and cleanup completes" \
+  cleanup-retry-signal
 _run_case "permanent cleanup failure is reported" cleanup-failure
 _run_case "set -e caller restores state before cleanup failure returns" \
   cleanup-failure-errexit
@@ -756,6 +833,8 @@ _run_case "reverse completion preserves ordered output and strongest status" \
   precedence
 _run_case "wave runner retains status and ordered output" wave
 _run_case "validation failure falls back sequentially" fallback
+_run_case "validation fallback restores direct TERM behavior" \
+  validation-fallback-signal
 _run_case "shared process group fails validation and falls back sequentially" \
   shared-pgid
 _run_case "one-file hot path stays direct" one

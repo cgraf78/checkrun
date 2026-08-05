@@ -167,7 +167,7 @@ done
 host_ps=$(command -v ps || true)
 
 hook_path=$(_mock_bin)
-for tool in bash cat dirname getconf mkdir mktemp python3 rm sleep; do
+for tool in awk bash cat dirname getconf mkdir mktemp ps python3 rm sleep; do
   ln -s "$(command -v "$tool")" "$hook_path/$tool"
 done
 cat >"$hook_path/yq" <<'EOF'
