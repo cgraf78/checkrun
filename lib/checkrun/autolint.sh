@@ -613,10 +613,13 @@ _autolint_current_shell_pid() {
     # In a sourced Bash 3.2 subshell, `$$` remains the outer shell's PID even
     # though this shell owns `$!`, the job table, and the monitor-mode change.
     # A short-lived child's PPID is the portable way to identify this actual
-    # shell process. If `sh` is unavailable, decline supervised parallelism;
-    # using the wrong PID would invalidate every later PGID safety check.
+    # shell process. `exec` is essential here: Bash 3.2 can otherwise retain
+    # the command-substitution shell while it waits for `sh`, making that
+    # intermediate process the reported PPID instead of this sourcing shell.
+    # If `sh` is unavailable, decline supervised parallelism; using the wrong
+    # PID would invalidate every later PGID safety check.
     command -v sh >/dev/null 2>&1 || return 1
-    output=$(sh -c 'printf "%s\n" "$PPID"') || return 1
+    output=$(exec sh -c 'printf "%s\n" "$PPID"') || return 1
     IFS=' ' read -r pid extra <<<"$output"
     [ -z "$extra" ] || return 1
   fi
