@@ -33,9 +33,17 @@ exec "$AUTOLINT_CANCEL_REAL_AWK" "$@"
 SH
 cat >"$_tool_bin/ps" <<'SH'
 #!/usr/bin/env bash
+pgid_list=""
 if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = pid=,pgid= ] && [ "$3" = -p ]; then
+  printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/combined-pgid-format-calls"
+  pgid_list=$4
+elif [ "$#" -eq 6 ] && [ "$1" = -o ] && [ "$2" = pid= ] &&
+  [ "$3" = -o ] && [ "$4" = pgid= ] && [ "$5" = -p ]; then
   printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/pgid-snapshot-calls"
-  leader=${4#*,}
+  pgid_list=$6
+fi
+if [ -n "$pgid_list" ]; then
+  leader=${pgid_list#*,}
   case "${AUTOLINT_CANCEL_PGID_SNAPSHOT:-normal}" in
     shared)
       printf '%s %s\n' "$AUTOLINT_CANCEL_PARENT_PID" "$AUTOLINT_CANCEL_PARENT_PID"
@@ -55,6 +63,12 @@ if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = pgid= ] && [ "$3" = -p ]; then
   exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
 fi
 printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/ps-calls"
+if [ "$#" -eq 2 ] && [ "$1" = -eo ] && [ "$2" = pgid=,stat= ]; then
+  for marker in "$AUTOLINT_CANCEL_ROOT"/tmp/autolint-plans.*/.supervisor/exited; do
+    [ -e "$marker" ] || continue
+    printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/exited-before-scan"
+  done
+fi
 [ "${AUTOLINT_CANCEL_PS_FAIL:-0}" -eq 0 ] || exit 1
 exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
 SH
@@ -336,6 +350,10 @@ case "$mode" in
     _autolint_validate_private_group() { return 1; }
     ;;
   shared-pgid)
+    _autolint_read_proc_group() { return 1; }
+    ;;
+  malformed-pgid)
+    _autolint_read_proc_group() { return 1; }
     ;;
   wave)
     _autolint_supports_pool() { return 1; }
@@ -389,6 +407,7 @@ trap -p INT >"$root/trap-int.before"
 trap -p TERM >"$root/trap-term.before"
 printf '%s\n' "$-" >"$root/options.before"
 set +o >"$root/set-o.before"
+REPLY=caller-value
 
 _record_driver_state() {
   local status="$1" pid_file pid state
@@ -408,6 +427,7 @@ _record_driver_state() {
   trap -p TERM >"$root/trap-term.after"
   printf '%s\n' "$-" >"$root/options.after"
   set +o >"$root/set-o.after"
+  printf '%s\n' "$REPLY" >"$root/reply.after"
 }
 
 if [ "$mode" = cleanup-failure-errexit ]; then
@@ -480,7 +500,7 @@ case = {
     "fallback": ("validation-fallback", 2, 2, 0),
     "validation-fallback-signal": ("validation-fallback-signal", 2, 2, 143),
     "shared-pgid": ("shared-pgid", 2, 2, 0),
-    "malformed-pgid": ("normal", 2, 2, 0),
+    "malformed-pgid": ("malformed-pgid", 2, 2, 0),
     "one": ("normal", 1, 2, 0),
     "jobs-one": ("normal", 2, 1, 0),
     "direct-one-signal": ("direct-one-signal", 1, 2, 143),
@@ -701,6 +721,8 @@ try:
         for name in ("options", "set-o"):
             if (root / f"{name}.before").read_bytes() != (root / f"{name}.after").read_bytes():
                 raise RuntimeError(f"caller shell {name} state was not restored")
+        if (root / "reply.after").read_text(encoding="ascii").strip() != "caller-value":
+            raise RuntimeError("autolint leaked its internal REPLY into the sourcing caller")
     if (root / "unexpected-supervisor").exists():
         raise RuntimeError("hot path invoked the parallel supervisor")
     if scenario in (
@@ -763,12 +785,16 @@ try:
     pgid_snapshot_calls = (root / "pgid-snapshot-calls").read_text(
         encoding="ascii"
     ).splitlines() if (root / "pgid-snapshot-calls").exists() else []
-    if scenario in (
+    supervised = scenario in (
         "cleanup-signal", "cleanup-group-signal", "cleanup-failure",
         "cleanup-failure-errexit", "cleanup-retry-signal", "monitor", "planner-signal", "success",
         "failure", "precedence", "restore-signal", "wave", "signal", "repeat", "inspect-failure",
         "pre-wait-signal",
         "malformed-pgid", "shared-pgid",
+    )
+    procfs_available = Path("/proc/self/stat").is_file()
+    if supervised and (
+        scenario in ("malformed-pgid", "shared-pgid") or not procfs_available
     ):
         expected_pgid_snapshot_calls = 1
     else:
@@ -778,6 +804,13 @@ try:
             "targeted PGID snapshots "
             f"{len(pgid_snapshot_calls)}, expected {expected_pgid_snapshot_calls}"
         )
+    combined_pgid_calls = (root / "combined-pgid-format-calls").read_text(
+        encoding="ascii"
+    ).splitlines() if (root / "combined-pgid-format-calls").exists() else []
+    if combined_pgid_calls:
+        raise RuntimeError("PGID validation used the ambiguous combined BSD ps format")
+    if scenario == "signal" and not (root / "exited-before-scan").exists():
+        raise RuntimeError("cooperative cancellation reached its group scan without quiescing")
     legacy_pgid_calls = (root / "legacy-pgid-calls").read_text(
         encoding="ascii"
     ).splitlines() if (root / "legacy-pgid-calls").exists() else []

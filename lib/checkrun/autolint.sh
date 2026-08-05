@@ -367,6 +367,12 @@ _autolint_run_plans_sequential() {
 
 _autolint_reap_pids() {
   local pid
+  if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+    # The first signal has already reached the entire validated group. Keep
+    # later terminal-group signals from interrupting these exact waits so the
+    # supervisor's exit marker means every direct worker has been reaped.
+    trap '' HUP INT TERM
+  fi
   for pid in "$@"; do
     [ -n "$pid" ] || continue
     wait "$pid" 2>/dev/null || true
@@ -587,32 +593,61 @@ _autolint_validate_private_group() {
   done <"$jobs_file"
   [ "$job_found" -eq 1 ] || return 1
 
-  # One targeted snapshot is both cheaper and safer than composing two
-  # command substitutions: parse the complete caller/leader relationship from
-  # invocation-owned scratch, rejecting partial, duplicate, or extra rows.
-  LC_ALL=C ps -o pid=,pgid= -p "$caller_pid,$leader" \
-    >"$group_file" 2>/dev/null || return 1
-  while IFS=' ' read -r pid group extra; do
-    [ -n "$pid" ] || continue
-    [ -z "$extra" ] || return 1
-    case "$pid:$group" in
-      *[!0-9:]* | :* | *:) return 1 ;;
-    esac
-    if [ "$pid" = "$leader" ]; then
-      leader_rows=$((leader_rows + 1))
-      leader_group=$group
-    elif [ "$pid" = "$caller_pid" ]; then
-      caller_rows=$((caller_rows + 1))
-      caller_group=$group
-    else
-      return 1
-    fi
-  done <"$group_file"
+  if _autolint_read_proc_group leader_group "$leader" &&
+    _autolint_read_proc_group caller_group "$caller_pid"; then
+    leader_rows=1
+    caller_rows=1
+  else
+    leader_group=""
+    caller_group=""
+    # Linux procfs avoids a process-table fork on every multi-file hook. Other
+    # platforms retain one targeted snapshot, using repeated -o fields because
+    # BSD ps treats text after '=' as a header rather than another field.
+    LC_ALL=C ps -o pid= -o pgid= -p "$caller_pid,$leader" \
+      >"$group_file" 2>/dev/null || return 1
+    while IFS=' ' read -r pid group extra; do
+      [ -n "$pid" ] || continue
+      [ -z "$extra" ] || return 1
+      case "$pid:$group" in
+        *[!0-9:]* | :* | *:) return 1 ;;
+      esac
+      if [ "$pid" = "$leader" ]; then
+        leader_rows=$((leader_rows + 1))
+        leader_group=$group
+      elif [ "$pid" = "$caller_pid" ]; then
+        caller_rows=$((caller_rows + 1))
+        caller_group=$group
+      else
+        return 1
+      fi
+    done <"$group_file"
+  fi
   [ "$leader_rows" -eq 1 ] || return 1
   [ "$caller_rows" -eq 1 ] || return 1
   [ "$leader_group" = "$leader" ] || return 1
   [ "$leader_group" != "$caller_group" ] || return 1
   REPLY=$leader_group
+}
+
+_autolint_read_proc_group() {
+  local output_name="$1" pid="$2" stat rest state parent group extra
+  case "$pid" in
+    '' | 0 | *[!0-9]*) return 1 ;;
+  esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  IFS= read -r stat <"/proc/$pid/stat" || return 1
+  case "$stat" in
+    "$pid ("*") "*) ;;
+    *) return 1 ;;
+  esac
+  rest=${stat##*) }
+  [ "$rest" != "$stat" ] || return 1
+  IFS=' ' read -r state parent group extra <<<"$rest"
+  [ "${#state}" -eq 1 ] || return 1
+  case "$parent:$group" in
+    *[!0-9:]* | :* | *:) return 1 ;;
+  esac
+  printf -v "$output_name" '%s' "$group"
 }
 
 _autolint_group_has_live_processes() {
@@ -646,7 +681,8 @@ _autolint_stop_unvalidated_leader() {
 }
 
 _autolint_cancel_private_group() {
-  local leader="$1" group="$2" done_file="$3" attempt group_state live=1
+  local leader="$1" group="$2" done_file="$3" exited_file="$4"
+  local attempt group_state live=1
 
   trap '' HUP INT TERM
   if [ -e "$done_file" ]; then
@@ -654,11 +690,12 @@ _autolint_cancel_private_group() {
     return 0
   fi
   kill -TERM "-$group" 2>/dev/null || true
-  # The supervisor writes its completion marker only after its exact workers
-  # quiesce. Poll that cheap condition first; inspect the complete group once
-  # afterward so an ignored TERM cannot hide behind a finished supervisor.
+  # On cancellation, the supervisor suppresses its normal done marker but still
+  # publishes exited after shielding and reaping every exact worker. Poll that
+  # cheap condition first; inspect the complete group once afterward so an
+  # ignored TERM or surviving descendant cannot hide behind the direct workers.
   for ((attempt = 0; attempt < 20; attempt++)); do
-    [ -e "$done_file" ] && break
+    [ -e "$exited_file" ] && break
     sleep 0.01
   done
   if [ -e "$done_file" ]; then
@@ -691,7 +728,7 @@ _autolint_count_nonempty_plans() {
 _autolint_run_read_only_pipeline() {
   local plan_dir="$1" jobs="$2" allow_parallel="$3"
   shift 3
-  local plan_rc=0 nonempty=0 run_rc=0
+  local plan_rc=0 nonempty=0 run_rc=0 REPLY=""
   local -a files=("$@")
 
   [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
@@ -770,10 +807,11 @@ _autolint_restore_monitor() {
 _autolint_run_parallel_supervised() {
   local jobs="$1" plan_dir="$2"
   shift 2
-  local control_dir="$plan_dir/.supervisor" gate done_file jobs_file group_file
+  local control_dir="$plan_dir/.supervisor" gate done_file exited_file jobs_file group_file
   local parent_pid=${BASHPID:-$$} leader="" group="" rc=0 tool
   local had_monitor=0
   local _autolint_active_group="" _autolint_active_done_file=""
+  local REPLY=""
 
   _autolint_parallel_validated=0
   [ "${_autolint_signal_status:-0}" -eq 0 ] || return "$_autolint_signal_status"
@@ -783,6 +821,7 @@ _autolint_run_parallel_supervised() {
   mkdir "$control_dir" 2>/dev/null || return 0
   gate="$control_dir/gate"
   done_file="$control_dir/done"
+  exited_file="$control_dir/exited"
   jobs_file="$control_dir/jobs"
   group_file="$control_dir/groups"
 
@@ -794,11 +833,10 @@ _autolint_run_parallel_supervised() {
     set +m
     trap - EXIT
     _autolint_cancel_status=0
-    # A wait interrupted by a trapped signal is not proof that the exact
-    # worker exited. Publish completion only when this supervisor itself never
-    # observed cancellation; cancelled paths retain the parent's authoritative
-    # group liveness scan and escalation.
-    trap 'if [ "${_autolint_cancel_status:-0}" -eq 0 ]; then : >"$done_file" 2>/dev/null || true; fi' EXIT
+    # done retains its stronger normal-completion meaning. exited is also
+    # published after cancellation because exact worker reaping shields later
+    # signals; the parent still performs one authoritative group liveness scan.
+    trap ': >"$exited_file" 2>/dev/null || true; if [ "${_autolint_cancel_status:-0}" -eq 0 ]; then : >"$done_file" 2>/dev/null || true; fi' EXIT
     _autolint_parallel_supervisor \
       "$gate" "$parent_pid" "$jobs" "$plan_dir" "$@"
   ) </dev/null &
@@ -822,7 +860,7 @@ _autolint_run_parallel_supervised() {
   fi
   group=$REPLY
   if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
-    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_cancel_private_group "$leader" "$group" "$done_file" "$exited_file"
     _autolint_restore_monitor "$had_monitor"
     return "$_autolint_signal_status"
   fi
@@ -834,7 +872,7 @@ _autolint_run_parallel_supervised() {
   # Directory creation is the nonblocking gate release. Unlike opening a FIFO
   # writer, it cannot hang if the validated child exits at this boundary.
   if ! mkdir "$gate" 2>/dev/null; then
-    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_cancel_private_group "$leader" "$group" "$done_file" "$exited_file"
     _autolint_restore_monitor "$had_monitor"
     # Group cleanup shields signals internally. This is a normal capability
     # fallback, not a latched cancellation, so re-arm the parent's handlers
@@ -849,7 +887,7 @@ _autolint_run_parallel_supervised() {
   _autolint_active_done_file=$done_file
 
   if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
-    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_cancel_private_group "$leader" "$group" "$done_file" "$exited_file"
     _autolint_restore_monitor "$had_monitor"
     return "$_autolint_signal_status"
   fi
@@ -863,7 +901,7 @@ _autolint_run_parallel_supervised() {
   _autolint_active_done_file=""
   if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
     # A trap interrupts Bash's wait without reaping the direct child.
-    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_cancel_private_group "$leader" "$group" "$done_file" "$exited_file"
     _autolint_restore_monitor "$had_monitor"
     return "$_autolint_signal_status"
   fi
