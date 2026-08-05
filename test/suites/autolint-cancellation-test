@@ -309,6 +309,9 @@ case "$mode" in
     }
     ;;
   gate-failure)
+    # Exercise the same targeted-ps validation path used on hosts without
+    # procfs; the injected gate failure occurs only after that validation.
+    _autolint_read_proc_group() { return 1; }
     mkdir() {
       local arg
       for arg in "$@"; do
@@ -334,6 +337,7 @@ case "$mode" in
     }
     ;;
   gate-visible-failure | gate-visible-failure-signal)
+    _autolint_read_proc_group() { return 1; }
     _autolint_pre_plan() {
       printf 'x\n' >"$1/0.plan"
       printf 'x\n' >"$1/1.plan"
@@ -387,7 +391,13 @@ case "$mode" in
       rc=$?
       for arg in "$@"; do
         case "$arg" in
-          */.supervisor) chmod 500 "$arg" ;;
+          */.supervisor)
+            # Permission bits are not a deterministic write-failure injection:
+            # root inside a container can bypass a mode-500 directory. A
+            # directory at the marker pathname rejects redirection on every
+            # supported host while leaving the control root removable.
+            "$AUTOLINT_CANCEL_REAL_MKDIR" "$arg/leader" || return $?
+            ;;
         esac
       done
       return "$rc"
@@ -787,9 +797,17 @@ def process_state(pid):
     return result.stdout.strip()
 
 
-def alive(pid):
-    state = process_state(pid)
+def process_state_is_live(state):
+    # Backends are grandchildren of the Bash supervisor. If a group kill ends
+    # a worker and its backend together, the dead backend can be adopted by the
+    # container's PID 1; how quickly that init reaps Z/X entries is outside
+    # Checkrun's control. Those states cannot execute work, so lifecycle checks
+    # reject live descendants without depending on host-specific init policy.
     return bool(state) and not state.startswith(("Z", "X"))
+
+
+def alive(pid):
+    return process_state_is_live(process_state(pid))
 
 
 def wait_for(predicate, description, seconds=6):
@@ -967,11 +985,18 @@ try:
     if (root / "prior-trap-ran").exists():
         raise RuntimeError("autolint invoked a preexisting caller trap")
     if not direct_signal:
-        before_exit = (root / "processes.before-exit").read_text(
+        observed_before_exit = (root / "processes.before-exit").read_text(
             encoding="ascii"
         ).splitlines()
-        if before_exit:
-            raise RuntimeError(f"owned process visible before driver exit: {before_exit!r}")
+        live_before_exit = []
+        for record in observed_before_exit:
+            _, state = record.split("\t", 1)
+            if process_state_is_live(state):
+                live_before_exit.append(record)
+        if live_before_exit:
+            raise RuntimeError(
+                f"owned process visible before driver exit: {live_before_exit!r}"
+            )
         for name in ("hup", "int", "term"):
             if (root / f"trap-{name}.before").read_bytes() != (root / f"trap-{name}.after").read_bytes():
                 raise RuntimeError(f"caller {name.upper()} trap was not restored")
@@ -1066,15 +1091,22 @@ try:
     ).splitlines() if (root / "pgid-snapshot-calls").exists() else []
     supervised = scenario in (
         "cleanup-signal", "cleanup-group-signal", "cleanup-failure",
-        "cleanup-failure-errexit", "cleanup-retry-signal", "monitor", "planner-signal", "success",
+        "cleanup-failure-errexit", "cleanup-retry-signal", "gate-failure",
+        "gate-visible-failure", "gate-visible-failure-signal", "monitor", "planner-signal", "success",
         "failure", "precedence", "restore-signal", "wave", "signal", "repeat",
         "pre-wait-signal",
         "malformed-pgid", "shared-pgid", "ps-pgid-success",
     )
     procfs_available = Path("/proc/self/stat").is_file()
     if supervised and (
-        scenario in ("malformed-pgid", "shared-pgid", "ps-pgid-success") or not procfs_available
+        scenario in (
+            "gate-failure", "gate-visible-failure", "gate-visible-failure-signal",
+            "malformed-pgid", "shared-pgid", "ps-pgid-success",
+        ) or not procfs_available
     ):
+        # Gate-failure injection happens after private-group validation. Those
+        # fixtures deliberately force the portable path above, so one snapshot
+        # is required even on a Linux developer host with procfs available.
         expected_pgid_snapshot_calls = 1
     else:
         expected_pgid_snapshot_calls = 0
@@ -1112,15 +1144,14 @@ try:
     while True:
         remaining = [(pid, process_state(pid)) for pid in owned_pids]
         remaining = [(pid, state) for pid, state in remaining if state]
-        if not remaining or time.monotonic() >= deadline:
+        live_remaining = [
+            (pid, state) for pid, state in remaining if process_state_is_live(state)
+        ]
+        if not live_remaining or time.monotonic() >= deadline:
             break
         time.sleep(0.02)
-    live_remaining = [(pid, state) for pid, state in remaining if not state.startswith(("Z", "X"))]
-    zombie_remaining = [(pid, state) for pid, state in remaining if state.startswith(("Z", "X"))]
     if live_remaining and not direct_signal:
         raise RuntimeError(f"owned process survived: {live_remaining!r}")
-    if zombie_remaining and not direct_signal:
-        raise RuntimeError(f"owned zombie was not reaped: {zombie_remaining!r}")
     if scenario in ("signal", "repeat") and not all(
         (root / f"backend-{index}.term").is_file() for index in range(count)
     ):
@@ -1269,38 +1300,22 @@ else
 fi
 
 # `$$` remains the PID of the outer Bash inside a subshell, while the current
-# shell is the process that owns `$!`, `jobs`, and the job-control mode changed
-# by the supervisor. Derive the real PID from a short-lived child's PPID so the
-# regression also runs under macOS system Bash 3.2, which has no BASHPID.
-_current_pid_probe="$_fixture_root/current-pid-probe"
+# shell is the process that owns `$!` and `jobs`. Test PID discovery directly:
+# Bash 3.2 can legitimately decline monitor-mode setup in a sourced subshell,
+# which is a safe sequential fallback and must not hide whether this helper
+# itself identified the correct process.
 set +e
 # shellcheck disable=SC2016 # This program, including its nested sh probe, is evaluated by the selected Bash.
 "$BASH" -c '
   . "$1"
-  result=$2
   (
-    actual=$(sh -c '\''printf "%s\n" "$PPID"'\'')
     unset BASHPID 2>/dev/null || :
-    plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-pid-probe.XXXXXX") || exit 1
-    json=0
-    _autolint_signal_status=0
-    _autolint_cancel_status=0
-    _autolint_parallel_validated=0
-    _autolint_validate_private_group() {
-      printf "%s\n%s\n" "$actual" "$2" >"$result"
-      return 1
-    }
-    _autolint_run_parallel_supervised 2 "$plan_dir" first.sh second.sh
-    rc=$?
-    rm -rf "$plan_dir"
-    [ "$rc" -eq 0 ] || exit "$rc"
-    {
-      IFS= read -r expected
-      IFS= read -r observed
-    } <"$result"
-    [ "$expected" = "$observed" ]
+    REPLY=""
+    _autolint_current_shell_pid || exit 1
+    observed=$REPLY
+    sh -c '\''[ "$PPID" = "$1" ]'\'' _ "$observed"
   )
-' _ "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh" "$_current_pid_probe"
+' _ "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh"
 _current_pid_rc=$?
 set -e
 _assert_exit "sourced subshell identifies its actual job-control PID" \
