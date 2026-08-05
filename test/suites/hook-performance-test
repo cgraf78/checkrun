@@ -165,8 +165,6 @@ for index in {0..299}; do
   supported_batch+=("$batch_file")
 done
 host_ps=$(command -v ps || true)
-procfs_available=0
-[[ -r "/proc/${BASHPID:-$$}/stat" ]] && procfs_available=1
 
 hook_path=$(_mock_bin)
 hook_tools=(awk bash cat dirname getconf mkdir mktemp python3 rm sleep)
@@ -181,14 +179,44 @@ EOF
 cat >"$hook_path/typos" <<'EOF'
 #!/usr/bin/env bash
 [[ -n "${CHECKRUN_LINTER_LOG:-}" ]] && printf 'typos\n' >>"$CHECKRUN_LINTER_LOG"
+if [[ -n "${CHECKRUN_LINTER_PATH_LOG:-}" ]]; then
+  for arg in "$@"; do
+    case "$arg" in
+      *.py) printf 'typos\t%s\n' "$arg" >>"$CHECKRUN_LINTER_PATH_LOG" ;;
+    esac
+  done
+fi
 exit 0
 EOF
 cat >"$hook_path/ruff" <<'EOF'
 #!/usr/bin/env bash
 [[ -n "${CHECKRUN_LINTER_LOG:-}" ]] && printf 'ruff\n' >>"$CHECKRUN_LINTER_LOG"
+if [[ -n "${CHECKRUN_LINTER_PATH_LOG:-}" ]]; then
+  for arg in "$@"; do
+    case "$arg" in
+      *.py) printf 'ruff\t%s\n' "$arg" >>"$CHECKRUN_LINTER_PATH_LOG" ;;
+    esac
+  done
+fi
 exit 0
 EOF
 chmod +x "$hook_path/yq" "$hook_path/typos" "$hook_path/ruff"
+
+# Force the restricted-host path even on Linux CI, where /proc would otherwise
+# make the cancellation supervisor available. Keeping this as an executable
+# wrapper lets the wall-clock sampler exercise the real planner and adapters
+# while substituting only the two process-group inspection capabilities.
+portable_autolint="$td/portable-autolint"
+cat >"$portable_autolint" <<'EOF'
+#!/usr/bin/env bash
+set -u
+. "$CHECKRUN_AUTOLINT_IMPL"
+_autolint_read_proc_group() { return 1; }
+ps() { return 127; }
+_autolint_main "$@"
+EOF
+chmod +x "$portable_autolint"
+export CHECKRUN_AUTOLINT_IMPL="$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh"
 
 if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   timeout_count_file="$td/timeout-count"
@@ -322,17 +350,111 @@ CHECKRUN_LINTER_LOG="$linter_log" \
   "$AUTOLINT" "${supported_batch[@]}"
 rc=$?
 _assert_exit "supported lint batch: clean files exit 0" 0 "$rc"
-if [[ -n "$host_ps" || "$procfs_available" -eq 1 ]]; then
-  _assert_eq "supported lint batch: Typos uses five bounded commands for 300 files" 5 \
-    "$(grep -c '^typos$' "$linter_log")"
-  _assert_eq "supported lint batch: Ruff uses five bounded commands for 300 files" 5 \
-    "$(grep -c '^ruff$' "$linter_log")"
-else
-  _assert_eq "supported lint batch: Typos uses the portable sequential fallback" 300 \
-    "$(grep -c '^typos$' "$linter_log")"
-  _assert_eq "supported lint batch: Ruff uses the portable sequential fallback" 300 \
-    "$(grep -c '^ruff$' "$linter_log")"
-fi
+_assert_eq "supported lint batch: Typos uses five bounded commands for 300 files" 5 \
+  "$(grep -c '^typos$' "$linter_log")"
+_assert_eq "supported lint batch: Ruff uses five bounded commands for 300 files" 5 \
+  "$(grep -c '^ruff$' "$linter_log")"
+
+# A host without both procfs and ps cannot prove that the job-control leader
+# owns a private process group. That removes safe parallel cancellation, not
+# the planner's ability to batch read-only work in the foreground. Stub the
+# expensive pieces so this 300-file shape assertion catches an accidental
+# return to one planner/interpreter per file without making the test itself
+# pay that pathological cost.
+portable_shape_log="$td/portable-fallback-shape.log"
+: >"$portable_shape_log"
+CHECKRUN_PORTABLE_SHAPE_LOG="$portable_shape_log" \
+  CHECKRUN_AUTOLINT_JOBS=8 \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$hook_path" \
+  bash -c '
+    . "$1"
+    shift
+    _autolint_read_proc_group() { return 1; }
+    ps() { return 127; }
+    _autolint_pre_plan() {
+      printf "plan:%s\n" "$(($# - 1))" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
+    }
+    _autolint_try_clean_batch() {
+      printf "batch:%s\n" "$(($# - 1))" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
+      return 0
+    }
+    _lint_one() {
+      printf "per-file\n" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
+    }
+    _autolint_main "$@"
+  ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" "${supported_batch[@]}"
+rc=$?
+_assert_exit "portable lint batch: capability fallback exits 0" 0 "$rc"
+_assert_eq "portable lint batch: plans all 300 files once" 1 \
+  "$(grep -c '^plan:300$' "$portable_shape_log" || true)"
+_assert_eq "portable lint batch: forwards all 300 files to clean batching" 1 \
+  "$(grep -c '^batch:300$' "$portable_shape_log" || true)"
+_assert_eq "portable lint batch: does not restart planning per file" 0 \
+  "$(grep -c '^per-file$' "$portable_shape_log" || true)"
+
+# Non-batchable plans cannot use background workers on this path. With no
+# validated PGID, a parent-only signal would otherwise kill the foreground
+# shell and leave backend grandchildren running. Pin the safe runner selection
+# structurally; readiness timing is not a proof that a second worker was never
+# launched.
+: >"$portable_shape_log"
+CHECKRUN_PORTABLE_SHAPE_LOG="$portable_shape_log" \
+  CHECKRUN_AUTOLINT_JOBS=8 \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$hook_path" \
+  bash -c '
+    . "$1"
+    shift
+    _autolint_read_proc_group() { return 1; }
+    ps() { return 127; }
+    _autolint_pre_plan() { :; }
+    _autolint_try_clean_batch() { return 1; }
+    _autolint_count_nonempty_plans() { REPLY=300; }
+    _autolint_supports_pool() { return 0; }
+    _autolint_run_files_pool() {
+      printf "pool\n" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
+    }
+    _autolint_run_file_batch() {
+      printf "wave\n" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
+    }
+    _autolint_run_plans_sequential() {
+      printf "sequential\n" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
+    }
+    _autolint_main "$@"
+  ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" "${supported_batch[@]}"
+rc=$?
+_assert_exit "portable non-batch fallback: exits 0" 0 "$rc"
+_assert_eq "portable non-batch fallback: selects foreground sequential runner" 1 \
+  "$(grep -c '^sequential$' "$portable_shape_log" || true)"
+_assert_eq "portable non-batch fallback: never selects worker pool" 0 \
+  "$(grep -c '^pool$' "$portable_shape_log" || true)"
+_assert_eq "portable non-batch fallback: never selects worker wave" 0 \
+  "$(grep -c '^wave$' "$portable_shape_log" || true)"
+
+# Exercise the real portable planner and adapters once outside the timer. The
+# invocation count alone cannot prove that each chunk retained every pathname,
+# so record and de-duplicate the actual .py arguments seen by both tools.
+portable_linter_log="$td/portable-linter.log"
+portable_path_log="$td/portable-paths.log"
+: >"$portable_linter_log"
+: >"$portable_path_log"
+CHECKRUN_LINTER_LOG="$portable_linter_log" \
+  CHECKRUN_LINTER_PATH_LOG="$portable_path_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  CHECKRUN_SCHEMA_LINT=/nonexistent \
+  PATH="$hook_path" \
+  "$portable_autolint" "${supported_batch[@]}"
+rc=$?
+_assert_exit "portable real batch: clean files exit 0" 0 "$rc"
+_assert_eq "portable real batch: Typos keeps five bounded commands" 5 \
+  "$(grep -c '^typos$' "$portable_linter_log")"
+_assert_eq "portable real batch: Ruff keeps five bounded commands" 5 \
+  "$(grep -c '^ruff$' "$portable_linter_log")"
+_assert_eq "portable real batch: Typos receives 300 distinct paths" 300 \
+  "$(awk -F '\t' '$1 == "typos" { print $2 }' "$portable_path_log" | sort -u | wc -l | tr -d '[:space:]')"
+_assert_eq "portable real batch: Ruff receives 300 distinct paths" 300 \
+  "$(awk -F '\t' '$1 == "ruff" { print $2 }' "$portable_path_log" | sort -u | wc -l | tr -d '[:space:]')"
 
 empty_plan_dir="$td/empty-plans"
 mkdir -p "$empty_plan_dir"
@@ -446,8 +568,23 @@ _probe_mixed_plan_runner() {
         3.plan) return 2 ;;
       esac
     }
+    if [[ "$runner" == pool-forgotten ]]; then
+      # Bash is allowed to discard saved child statuses after enough later
+      # children have completed. Model that boundary without launching
+      # CHILD_MAX processes: wait -n still provides pool backpressure, while a
+      # later exact wait reports the same 127 the real shell returns once its
+      # saved entry is gone.
+      wait() {
+        if [[ "${1:-}" == -n ]]; then
+          builtin wait "$@"
+          return $?
+        fi
+        builtin wait "$@" >/dev/null 2>&1 || :
+        return 127
+      }
+    fi
     case "$runner" in
-      pool) _autolint_run_files_pool 2 "$plan_dir" "$@" ;;
+      pool | pool-forgotten) _autolint_run_files_pool 2 "$plan_dir" "$@" ;;
       barrier) _autolint_run_file_batch "$plan_dir" 0 "$@" ;;
     esac
   ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
@@ -462,6 +599,7 @@ _probe_mixed_plan_runner() {
 
 if [[ "$pool_supported" == 1 ]]; then
   _probe_mixed_plan_runner pool
+  _probe_mixed_plan_runner pool-forgotten
 fi
 _probe_mixed_plan_runner barrier
 
@@ -532,9 +670,9 @@ if [[ "$pool_supported" == 1 ]]; then
   _assert_exit "nonempty-plan batch: pool runner exits 0" 0 "$rc"
   _assert_eq "nonempty-plan batch: pool starts every worker" \
     "$large_plan_count" "$large_worker_count"
-  _assert_eq "nonempty-plan batch: pool allocates no per-worker files" \
+  _assert_eq "nonempty-plan batch: pool invokes no per-worker allocators" \
     0 "$large_allocation_count"
-  _assert_eq "nonempty-plan batch: pool performs no per-worker cleanup" \
+  _assert_eq "nonempty-plan batch: pool invokes no per-worker cleanup commands" \
     0 "$large_cleanup_count"
 else
   echo "  - skipping nonempty pool-runner assertions (wait -n unavailable)"
@@ -563,23 +701,29 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   _assert_perf_result "20-file unsupported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
 
-  if [[ -n "$host_ps" || "$procfs_available" -eq 1 ]]; then
-    default_perf_runs=$CHECKRUN_HOOK_PERF_RUNS
-    CHECKRUN_HOOK_PERF_RUNS=$CHECKRUN_SUPPORTED_BATCH_RUNS
-    perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
-    rc=$?
-    median_budget_ms=$(_perf_budget_ms \
-      "$CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS" \
-      "$CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS")
-    p95_budget_ms=$(_perf_budget_ms \
-      "$CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS" \
-      "$CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS")
-    _assert_perf_result "300-file supported autolint batch" "$perf_result" "$rc" \
-      "$median_budget_ms" "$p95_budget_ms"
-    CHECKRUN_HOOK_PERF_RUNS=$default_perf_runs
-  else
-    echo "  - skipping supervised 300-file performance assertion (no procfs or ps)"
-  fi
+  # The sequential capability fallback still has to amortize planning and
+  # clean-adapter startup, so a minimal host is not grounds to skip this gate.
+  default_perf_runs=$CHECKRUN_HOOK_PERF_RUNS
+  CHECKRUN_HOOK_PERF_RUNS=$CHECKRUN_SUPPORTED_BATCH_RUNS
+  median_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS" \
+    "$CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS")
+  p95_budget_ms=$(_perf_budget_ms \
+    "$CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS" \
+    "$CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS")
+
+  # Keep the default supervised path under the same large-commit budget. The
+  # portable probe supplements this developer path; it must not replace it.
+  perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
+  rc=$?
+  _assert_perf_result "300-file supported autolint batch" "$perf_result" "$rc" \
+    "$median_budget_ms" "$p95_budget_ms"
+
+  perf_result=$(_measure_hook_perf "$portable_autolint" "${supported_batch[@]}")
+  rc=$?
+  _assert_perf_result "portable 300-file supported autolint batch" "$perf_result" "$rc" \
+    "$median_budget_ms" "$p95_budget_ms"
+  CHECKRUN_HOOK_PERF_RUNS=$default_perf_runs
 fi
 
 _test_summary

@@ -69,6 +69,11 @@ if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = pgid= ] && [ "$3" = -p ]; then
   printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/legacy-pgid-calls"
   exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
 fi
+if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = ppid= ] && [ "$3" = -p ]; then
+  # The cancellation anchor verifies its exact parent-child relationship on
+  # ps-only hosts. This targeted identity read is not a liveness-table scan.
+  exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
+fi
 printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/ps-calls"
 exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
 SH
@@ -95,20 +100,6 @@ def terminate(_signum, _frame):
 signal.signal(signal.SIGTERM, terminate)
 (root / "planner.ready").touch(exist_ok=False)
 time.sleep(1.5)
-PY
-cat >"$_tool_bin/fallback-worker" <<'PY'
-#!/usr/bin/env python3
-import os
-from pathlib import Path
-import sys
-import time
-
-
-root = Path(os.environ["AUTOLINT_CANCEL_ROOT"])
-index = sys.argv[1]
-(root / f"fallback-{index}.pid").write_text(str(os.getpid()), encoding="ascii")
-(root / f"fallback-{index}.ready").touch(exist_ok=False)
-time.sleep(0.35)
 PY
 cat >"$_tool_bin/shellcheck" <<'PY'
 #!/usr/bin/env python3
@@ -163,8 +154,7 @@ with (root / "backend-completion-order").open("a", encoding="ascii") as stream:
 raise SystemExit(int(os.environ.get(f"AUTOLINT_CANCEL_EXIT_{index}", "0")))
 PY
 chmod +x "$_tool_bin/yq" "$_tool_bin/typos" "$_tool_bin/ps" \
-  "$_tool_bin/slow-planner" "$_tool_bin/fallback-worker" \
-  "$_tool_bin/shellcheck"
+  "$_tool_bin/slow-planner" "$_tool_bin/shellcheck"
 
 _driver="$_fixture_root/driver"
 cat >"$_driver" <<'SH'
@@ -300,6 +290,111 @@ case "$mode" in
       "$AUTOLINT_CANCEL_REAL_RM" "$@"
     }
     ;;
+  validation-cleanup-failure)
+    _autolint_failed_cleanup_dir=""
+    _autolint_cleanup_attempt=0
+    _autolint_validate_private_group() { return 1; }
+    rm() {
+      if [ "${1:-}" = -rf ]; then
+        if [ -z "$_autolint_failed_cleanup_dir" ]; then
+          _autolint_failed_cleanup_dir=${2:-}
+        fi
+        if [ "${2:-}" = "$_autolint_failed_cleanup_dir" ]; then
+          _autolint_cleanup_attempt=$((_autolint_cleanup_attempt + 1))
+          printf '%s\n' "$_autolint_cleanup_attempt" >>"$root/cleanup-attempts"
+          return 73
+        fi
+      fi
+      "$AUTOLINT_CANCEL_REAL_RM" "$@"
+    }
+    ;;
+  gate-failure)
+    mkdir() {
+      local arg
+      for arg in "$@"; do
+        case "$arg" in
+          */.supervisor/gate)
+            : >"$root/gate-release-attempted"
+            return 73
+            ;;
+        esac
+      done
+      "$AUTOLINT_CANCEL_REAL_MKDIR" "$@"
+    }
+    kill() {
+      case "${1:-}:${2:-}" in
+        -TERM:-* | -KILL:-*)
+          : >"$root/gate-group-signal"
+          ;;
+        -TERM:[1-9]*)
+          : >"$root/gate-direct-stop"
+          ;;
+      esac
+      builtin kill "$@"
+    }
+    ;;
+  gate-visible-failure | gate-visible-failure-signal)
+    _autolint_pre_plan() {
+      printf 'x\n' >"$1/0.plan"
+      printf 'x\n' >"$1/1.plan"
+    }
+    _autolint_try_clean_batch() { return 1; }
+    _lint_one_with_plan() {
+      printf '%s\n' "${BASHPID:-$$}" >"$root/gate-visible-worker.pid"
+      : >"$root/gate-visible-worker.ready"
+      if [ "$mode" = gate-visible-failure-signal ]; then
+        trap '' TERM
+      fi
+      sleep 30
+    }
+    mkdir() {
+      local arg rc worker group
+      "$AUTOLINT_CANCEL_REAL_MKDIR" "$@"
+      rc=$?
+      for arg in "$@"; do
+        case "$arg" in
+          */.supervisor/gate)
+            while [ ! -e "$root/gate-visible-worker.ready" ]; do
+              sleep 0.01
+            done
+            IFS= read -r worker <"$root/gate-visible-worker.pid"
+            group=$(LC_ALL=C "$AUTOLINT_CANCEL_REAL_PS" -o pgid= -p "$worker")
+            group=${group//[[:space:]]/}
+            printf '%s\n' "$group" >"$root/supervisor.pid"
+            : >"$root/gate-visible-release-attempted"
+            return 73
+            ;;
+        esac
+      done
+      return "$rc"
+    }
+    kill() {
+      case "${1:-}:${2:-}" in
+        -TERM:-*)
+          : >"$root/gate-visible-group-signal"
+          [ "$mode" != gate-visible-failure-signal ] || \
+            : >"$root/gate-visible-cancel-started"
+          ;;
+        -KILL:-*) : >"$root/gate-visible-group-signal" ;;
+      esac
+      builtin kill "$@"
+    }
+    ;;
+  leader-marker-failure)
+    mkdir() {
+      local arg rc
+      "$AUTOLINT_CANCEL_REAL_MKDIR" "$@"
+      rc=$?
+      for arg in "$@"; do
+        case "$arg" in
+          */.supervisor) chmod 500 "$arg" ;;
+        esac
+      done
+      return "$rc"
+    }
+    ;;
+  anchor-mismatch)
+    ;;
   monitor)
     set -m
     _autolint_pre_plan() {
@@ -321,15 +416,20 @@ case "$mode" in
     }
     ;;
   pre-wait-signal)
-    _autolint_wait_signal_sent=0
-    wait() {
+    _autolint_poll_signal_sent=0
+    _autolint_read_status_file() {
       if [ "${BASH_SUBSHELL:-0}" -eq 0 ] &&
-        [ "$_autolint_wait_signal_sent" -eq 0 ]; then
-        _autolint_wait_signal_sent=1
+        [ "$_autolint_poll_signal_sent" -eq 0 ] &&
+        [[ "$1" == */.supervisor/exited ]]; then
+        # Inject immediately after the parent's latch check, at its first owned
+        # event probe. This retains the former pre-wait race coverage now that
+        # the implementation deliberately avoids a blocking wait on a live
+        # cancellation anchor.
+        _autolint_poll_signal_sent=1
         : >"$root/pre-wait-signal"
         kill -TERM "$AUTOLINT_CANCEL_PARENT_PID"
       fi
-      builtin wait "$@"
+      return 1
     }
     ;;
   restore-signal)
@@ -359,6 +459,9 @@ case "$mode" in
   malformed-pgid)
     _autolint_read_proc_group() { return 1; }
     ;;
+  ps-pgid-success)
+    _autolint_read_proc_group() { return 1; }
+    ;;
   repeat)
     kill() {
       local group
@@ -377,13 +480,35 @@ case "$mode" in
 esac
 
 case "$mode" in
+  capability-fallback | validation-fallback | validation-cleanup-failure | \
+    shared-pgid | malformed-pgid | gate-failure)
+    # Restricted-host fallback must stay foreground-only. Parent-only signals
+    # cannot safely reach grandchildren without a validated private PGID, so a
+    # pool or wave here would trade latency for orphaned backend processes.
+    _autolint_run_files_pool() {
+      : >"$root/unsafe-fallback-pool"
+      return 99
+    }
+    _autolint_run_file_batch() {
+      : >"$root/unsafe-fallback-wave"
+      return 99
+    }
+    ;;
+esac
+
+case "$mode" in
   allocation-fallback-signal | capability-fallback-signal | validation-fallback-signal)
     _autolint_direct_fallback_probe() {
       local scratch=()
       shopt -s nullglob
       scratch=("$root/tmp"/autolint-plans.*)
       shopt -u nullglob
-      if [ "${#scratch[@]}" -eq 0 ]; then
+      # The portable fallback owns a fresh plan root so it can retain batching.
+      # The managed candidate is the one that must be gone; its .supervisor
+      # control directory distinguishes the two lifetimes without relying on a
+      # reusable pathname or allocation order.
+      if [ "${#scratch[@]}" -eq 0 ] ||
+        { [ "${#scratch[@]}" -eq 1 ] && [ ! -e "${scratch[0]}/.supervisor" ]; }; then
         : >"$root/fallback-scratch-clean"
       else
         : >"$root/fallback-scratch-present"
@@ -396,7 +521,9 @@ case "$mode" in
     ;;
 esac
 
-if [[ "$count" -lt 2 || "$jobs" -lt 2 ]]; then
+if { [[ "$count" -lt 2 || "$jobs" -lt 2 ]]; } &&
+  [ "$mode" != gate-visible-failure ] &&
+  [ "$mode" != gate-visible-failure-signal ]; then
   _autolint_run_parallel_supervised() {
     : >"$root/unexpected-supervisor"
     return 99
@@ -429,8 +556,9 @@ _record_driver_state() {
   local status="$1" pid_file pid state
   printf '%s\n' "$status" >"$root/operation-status"
   : >"$root/processes.before-exit"
-  for pid_file in "$root"/supervisor.pid "$root"/worker-*.pid \
-    "$root"/backend-*.pid "$root"/planner.pid "$root"/fallback-*.pid; do
+  for pid_file in "$root"/anchor.pid "$root"/supervisor.pid \
+    "$root"/gate-visible-worker.pid "$root"/worker-*.pid \
+    "$root"/backend-*.pid "$root"/planner.pid; do
     [ -f "$pid_file" ] || continue
     IFS= read -r pid <"$pid_file" || continue
     [ "$pid" != "$AUTOLINT_CANCEL_PARENT_PID" ] || continue
@@ -467,6 +595,89 @@ if [ "$mode" = monitor ]; then
   _autolint_run_parallel_supervised 2 "$monitor_plan_dir" first.sh second.sh
   operation_status=$?
   rm -rf "$monitor_plan_dir"
+elif [ "$mode" = gate-visible-failure ] ||
+  [ "$mode" = gate-visible-failure-signal ]; then
+  visible_plan_dir=$(mktemp -d "$TMPDIR/gate-visible-plans.XXXXXX")
+  visible_saved_hup=$(trap -p HUP)
+  visible_saved_int=$(trap -p INT)
+  visible_saved_term=$(trap -p TERM)
+  json=0
+  _autolint_signal_status=0
+  _autolint_cancel_status=0
+  _autolint_parallel_validated=0
+  trap '_autolint_record_signal 129' HUP
+  trap '_autolint_record_signal 130' INT
+  trap '_autolint_record_signal 143' TERM
+  _autolint_run_parallel_supervised \
+    2 "$visible_plan_dir" first.sh second.sh
+  operation_status=$?
+  [ "$_autolint_signal_status" -eq 0 ] || operation_status=$_autolint_signal_status
+  _autolint_restore_signal_traps \
+    "$visible_saved_hup" "$visible_saved_int" "$visible_saved_term"
+  rm -rf "$visible_plan_dir"
+elif [ "$mode" = anchor-hold ]; then
+  anchor_dir=$(mktemp -d "$TMPDIR/anchor-plans.XXXXXX")
+  anchor_gate="$anchor_dir/gate"
+  anchor_done="$anchor_dir/done"
+  anchor_exited="$anchor_dir/exited"
+  anchor_leader="$anchor_dir/leader"
+  mkdir "$anchor_gate"
+  anchor_saved_hup=$(trap -p HUP)
+  anchor_saved_int=$(trap -p INT)
+  anchor_saved_term=$(trap -p TERM)
+  trap ':' HUP INT TERM
+  (
+    while [ ! -e "$root/anchor-launch" ]; do
+      sleep 0.01
+    done
+    _autolint_cancel_status=143
+    _autolint_finish_parallel_supervisor \
+      "$AUTOLINT_CANCEL_PARENT_PID" "$anchor_gate" "$anchor_done" \
+      "$anchor_exited" "$anchor_leader"
+  ) &
+  anchor_pid=$!
+  printf '%s\n' "$anchor_pid" >"$anchor_leader"
+  printf '%s\n' "$anchor_pid" >"$root/anchor.pid"
+  : >"$root/anchor-started"
+  : >"$root/anchor-launch"
+  wait "$anchor_pid" 2>/dev/null || true
+  _autolint_restore_signal_traps \
+    "$anchor_saved_hup" "$anchor_saved_int" "$anchor_saved_term"
+  operation_status=0
+  rm -rf "$anchor_dir"
+elif [ "$mode" = anchor-mismatch ]; then
+  mismatch_dir=$(mktemp -d "$TMPDIR/anchor-mismatch.XXXXXX")
+  mismatch_gate="$mismatch_dir/gate"
+  mismatch_done="$mismatch_dir/done"
+  mismatch_exited="$mismatch_dir/exited"
+  mismatch_leader="$mismatch_dir/leader"
+  mkdir "$mismatch_gate"
+  (
+    _autolint_read_process_parent() {
+      REPLY=1
+      return 0
+    }
+    kill() {
+      case "${1:-}:${2:-}" in
+        -HUP:"$AUTOLINT_CANCEL_PARENT_PID" | \
+          -INT:"$AUTOLINT_CANCEL_PARENT_PID" | \
+          -TERM:"$AUTOLINT_CANCEL_PARENT_PID")
+          : >"$root/anchor-signalled-mismatched-parent"
+          return 0
+          ;;
+      esac
+      builtin kill "$@"
+    }
+    _autolint_cancel_status=143
+    _autolint_finish_parallel_supervisor \
+      "$AUTOLINT_CANCEL_PARENT_PID" "$mismatch_gate" "$mismatch_done" \
+      "$mismatch_exited" "$mismatch_leader"
+  ) &
+  mismatch_pid=$!
+  printf '%s\n' "$mismatch_pid" >"$mismatch_leader"
+  wait "$mismatch_pid"
+  operation_status=$?
+  rm -rf "$mismatch_dir"
 else
   _autolint_main "${files[@]+"${files[@]}"}"
   operation_status=$?
@@ -503,6 +714,13 @@ case = {
     "cleanup-retry-signal": ("cleanup-retry-signal", 2, 2, 143),
     "cleanup-failure": ("cleanup-failure", 2, 2, 125),
     "cleanup-failure-errexit": ("cleanup-failure-errexit", 2, 2, 125),
+    "validation-cleanup-failure": ("validation-cleanup-failure", 2, 2, 125),
+    "gate-failure": ("gate-failure", 2, 2, 0),
+    "gate-visible-failure": ("gate-visible-failure", 0, 2, 0),
+    "gate-visible-failure-signal": ("gate-visible-failure-signal", 0, 2, 143),
+    "anchor-hold": ("anchor-hold", 0, 2, 0),
+    "anchor-mismatch": ("anchor-mismatch", 0, 2, 0),
+    "leader-marker-failure": ("leader-marker-failure", 2, 2, 0),
     "capability-fallback": ("capability-fallback", 2, 2, 0),
     "capability-fallback-signal": ("capability-fallback-signal", 2, 2, 143),
     "monitor": ("monitor", 2, 2, 0),
@@ -517,6 +735,7 @@ case = {
     "validation-fallback-signal": ("validation-fallback-signal", 2, 2, 143),
     "shared-pgid": ("shared-pgid", 2, 2, 0),
     "malformed-pgid": ("malformed-pgid", 2, 2, 0),
+    "ps-pgid-success": ("ps-pgid-success", 2, 2, 0),
     "one": ("normal", 1, 2, 0),
     "jobs-one": ("normal", 2, 1, 0),
     "direct-one-signal": ("direct-one-signal", 1, 2, 143),
@@ -601,6 +820,7 @@ signal_started = None
 try:
     if scenario in (
         "allocation-fallback", "capability-fallback", "fallback", "jobs-one",
+        "gate-failure", "leader-marker-failure", "validation-cleanup-failure",
         "malformed-pgid", "shared-pgid",
     ):
         wait_for(lambda: (root / "backend-0.ready").is_file(), "first backend")
@@ -618,6 +838,30 @@ try:
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "allocation-signal":
         pass
+    elif scenario == "gate-visible-failure":
+        wait_for(
+            lambda: (root / "gate-visible-release-attempted").is_file(),
+            "visible gate failure",
+        )
+    elif scenario == "gate-visible-failure-signal":
+        wait_for(
+            lambda: (root / "gate-visible-cancel-started").is_file(),
+            "visible gate cancellation grace",
+        )
+        os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "anchor-hold":
+        wait_for(lambda: (root / "anchor-started").is_file(), "anchor startup")
+        anchor_pid = int((root / "anchor.pid").read_text(encoding="ascii"))
+        # Stop the parent externally rather than depending on the child to
+        # re-signal its numeric PID. The invariant under test is that identity
+        # survives arbitrary parent scheduling delay, not that the unsafe
+        # child-to-parent wakeup mechanism exists.
+        os.kill(process.pid, signal.SIGSTOP)
+        time.sleep(2.3)
+        if not alive(anchor_pid):
+            raise RuntimeError("private-group anchor expired while its parent was stopped")
+        os.kill(anchor_pid, signal.SIGKILL)
+        os.kill(process.pid, signal.SIGCONT)
     elif scenario == "planner-signal":
         wait_for(lambda: (root / "planner.ready").is_file(), "registry planner")
         signal_started = time.monotonic()
@@ -710,7 +954,9 @@ try:
         raise RuntimeError("parent-only cancellation waited for foreground work")
 
     if not direct_signal and scenario not in (
-        "allocation-fallback-signal", "allocation-signal", "monitor", "planner-signal",
+        "allocation-fallback-signal", "allocation-signal", "anchor-hold",
+        "anchor-mismatch", "gate-visible-failure", "gate-visible-failure-signal",
+        "monitor", "planner-signal",
         "direct-one-signal", "direct-jobs-one-signal", "pre-wait-signal", "signal", "repeat",
     ):
         expected_output = [f"backend:{index}" for index in range(count)]
@@ -766,7 +1012,7 @@ try:
         ).splitlines()
         if completion_order != ["2", "1", "0"]:
             raise RuntimeError(f"backend completion order {completion_order!r}")
-    if scenario in ("cleanup-failure", "cleanup-failure-errexit"):
+    if scenario in ("cleanup-failure", "cleanup-failure-errexit", "validation-cleanup-failure"):
         cleanup_attempts = (root / "cleanup-attempts").read_text(
             encoding="ascii"
         ).splitlines()
@@ -781,6 +1027,28 @@ try:
         raise RuntimeError("owned scratch remains")
     if scenario == "repeat" and not (root / "group-kill-anchored").is_file():
         raise RuntimeError("private-group escalation ran without its leader anchor")
+    if scenario == "gate-failure":
+        if not (root / "gate-release-attempted").is_file():
+            raise RuntimeError("gate failure fixture never reached gate release")
+        if not (root / "gate-direct-stop").is_file():
+            raise RuntimeError("failed gate did not stop the exact gated leader")
+        if (root / "gate-group-signal").exists():
+            raise RuntimeError("failed gate signalled a group that never ran work")
+    if scenario in ("gate-visible-failure", "gate-visible-failure-signal"):
+        if not (root / "gate-visible-group-signal").is_file():
+            raise RuntimeError("visible failed gate did not cancel its validated group")
+    if scenario == "anchor-mismatch" and (
+        root / "anchor-signalled-mismatched-parent"
+    ).exists():
+        raise RuntimeError("anchor signalled a PID after definitive parent mismatch")
+    if scenario in (
+        "capability-fallback", "fallback", "validation-cleanup-failure",
+        "shared-pgid", "malformed-pgid", "gate-failure",
+    ):
+        if (root / "unsafe-fallback-pool").exists():
+            raise RuntimeError("restricted fallback selected the worker pool")
+        if (root / "unsafe-fallback-wave").exists():
+            raise RuntimeError("restricted fallback selected the worker wave")
     ps_calls = (root / "ps-calls").read_text(encoding="ascii").splitlines() \
         if (root / "ps-calls").exists() else []
     expected_ps_calls = 0
@@ -799,13 +1067,13 @@ try:
     supervised = scenario in (
         "cleanup-signal", "cleanup-group-signal", "cleanup-failure",
         "cleanup-failure-errexit", "cleanup-retry-signal", "monitor", "planner-signal", "success",
-        "failure", "precedence", "restore-signal", "wave", "signal", "repeat", "inspect-failure",
+        "failure", "precedence", "restore-signal", "wave", "signal", "repeat",
         "pre-wait-signal",
-        "malformed-pgid", "shared-pgid",
+        "malformed-pgid", "shared-pgid", "ps-pgid-success",
     )
     procfs_available = Path("/proc/self/stat").is_file()
     if supervised and (
-        scenario in ("malformed-pgid", "shared-pgid") or not procfs_available
+        scenario in ("malformed-pgid", "shared-pgid", "ps-pgid-success") or not procfs_available
     ):
         expected_pgid_snapshot_calls = 1
     else:
@@ -833,9 +1101,10 @@ try:
         if worker_path.exists():
             worker_pids.append(int(worker_path.read_text(encoding="ascii")))
     owned_pids = backend_pids + worker_pids
-    owned_pids.extend(
-        int(path.read_text(encoding="ascii")) for path in root.glob("fallback-*.pid")
-    )
+    for extra_pid_name in ("anchor.pid", "gate-visible-worker.pid"):
+        extra_pid_path = root / extra_pid_name
+        if extra_pid_path.exists():
+            owned_pids.append(int(extra_pid_path.read_text(encoding="ascii")))
     if (root / "planner.pid").exists():
         owned_pids.append(int((root / "planner.pid").read_text(encoding="ascii")))
     deadline = time.monotonic() + 1
@@ -875,13 +1144,22 @@ finally:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-    for pid_file in root.glob("fallback-*.pid"):
-        pid = int(pid_file.read_text(encoding="ascii"))
-        if alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+    supervisor_file = root / "supervisor.pid"
+    if scenario == "gate-visible-failure" and supervisor_file.exists():
+        supervisor_group = int(supervisor_file.read_text(encoding="ascii"))
+        try:
+            os.killpg(supervisor_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    for extra_pid_name in ("anchor.pid", "gate-visible-worker.pid"):
+        extra_pid_path = root / extra_pid_name
+        if extra_pid_path.exists():
+            pid = int(extra_pid_path.read_text(encoding="ascii"))
+            if alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
     planner_pid_file = root / "planner.pid"
     if planner_pid_file.exists():
         planner_pid = int(planner_pid_file.read_text(encoding="ascii"))
@@ -928,7 +1206,18 @@ _run_case "TERM during cleanup retry is latched and cleanup completes" \
 _run_case "permanent cleanup failure is reported" cleanup-failure
 _run_case "set -e caller restores state before cleanup failure returns" \
   cleanup-failure-errexit
+_run_case "cleanup failure does not skip validation fallback lint" \
+  validation-cleanup-failure
 _run_case "missing cancellation tool falls back sequentially" capability-fallback
+_run_case "failed gate release stops and reaps only the gated leader" gate-failure
+_run_case "visible gate after mkdir failure cancels the validated group" \
+  gate-visible-failure
+_run_case "first TERM during visible-gate cleanup remains latched" \
+  gate-visible-failure-signal
+_run_case "stopped parent retains the exact private-group anchor" anchor-hold
+_run_case "anchor never signals a definitively mismatched parent" anchor-mismatch
+_run_case "leader marker failure restores monitor-off caller state" \
+  leader-marker-failure
 _run_case "monitor-on caller gets no job notification" monitor
 _run_case "parent-only TERM cancels the registry planner promptly" planner-signal
 _run_case "TERM immediately before leader wait cancels promptly" pre-wait-signal
@@ -946,6 +1235,8 @@ _run_case "shared process group fails validation and falls back sequentially" \
   shared-pgid
 _run_case "malformed process group snapshot falls back sequentially" \
   malformed-pgid
+_run_case "targeted ps process-group snapshot validates successfully" \
+  ps-pgid-success
 _run_case "one-file hot path stays direct" one
 _run_case "jobs=1 hot path stays direct" jobs-one
 _run_case "parent-only TERM stays prompt during one-file planning" direct-one-signal
@@ -976,6 +1267,44 @@ if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3)));
 else
   _assert_exit "wait-n probe rejects unsupported Bash" 1 "$_wait_n_rc"
 fi
+
+# `$$` remains the PID of the outer Bash inside a subshell, while the current
+# shell is the process that owns `$!`, `jobs`, and the job-control mode changed
+# by the supervisor. Derive the real PID from a short-lived child's PPID so the
+# regression also runs under macOS system Bash 3.2, which has no BASHPID.
+_current_pid_probe="$_fixture_root/current-pid-probe"
+set +e
+# shellcheck disable=SC2016 # This program, including its nested sh probe, is evaluated by the selected Bash.
+"$BASH" -c '
+  . "$1"
+  result=$2
+  (
+    actual=$(sh -c '\''printf "%s\n" "$PPID"'\'')
+    unset BASHPID 2>/dev/null || :
+    plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-pid-probe.XXXXXX") || exit 1
+    json=0
+    _autolint_signal_status=0
+    _autolint_cancel_status=0
+    _autolint_parallel_validated=0
+    _autolint_validate_private_group() {
+      printf "%s\n%s\n" "$actual" "$2" >"$result"
+      return 1
+    }
+    _autolint_run_parallel_supervised 2 "$plan_dir" first.sh second.sh
+    rc=$?
+    rm -rf "$plan_dir"
+    [ "$rc" -eq 0 ] || exit "$rc"
+    {
+      IFS= read -r expected
+      IFS= read -r observed
+    } <"$result"
+    [ "$expected" = "$observed" ]
+  )
+' _ "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh" "$_current_pid_probe"
+_current_pid_rc=$?
+set -e
+_assert_exit "sourced subshell identifies its actual job-control PID" \
+  0 "$_current_pid_rc"
 
 if [[ "$(uname -s)" == Darwin ]] && ((BASH_VERSINFO[0] > 3)) &&
   /bin/bash -c '((BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] == 2))'; then
