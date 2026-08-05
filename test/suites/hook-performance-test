@@ -167,7 +167,9 @@ done
 host_ps=$(command -v ps || true)
 
 hook_path=$(_mock_bin)
-for tool in awk bash cat dirname getconf mkdir mktemp ps python3 rm sleep; do
+hook_tools=(awk bash cat dirname getconf mkdir mktemp python3 rm sleep)
+[[ -z "$host_ps" ]] || hook_tools+=(ps)
+for tool in "${hook_tools[@]}"; do
   ln -s "$(command -v "$tool")" "$hook_path/$tool"
 done
 cat >"$hook_path/yq" <<'EOF'
@@ -318,10 +320,17 @@ CHECKRUN_LINTER_LOG="$linter_log" \
   "$AUTOLINT" "${supported_batch[@]}"
 rc=$?
 _assert_exit "supported lint batch: clean files exit 0" 0 "$rc"
-_assert_eq "supported lint batch: Typos uses five bounded commands for 300 files" 5 \
-  "$(grep -c '^typos$' "$linter_log")"
-_assert_eq "supported lint batch: Ruff uses five bounded commands for 300 files" 5 \
-  "$(grep -c '^ruff$' "$linter_log")"
+if [[ -n "$host_ps" ]]; then
+  _assert_eq "supported lint batch: Typos uses five bounded commands for 300 files" 5 \
+    "$(grep -c '^typos$' "$linter_log")"
+  _assert_eq "supported lint batch: Ruff uses five bounded commands for 300 files" 5 \
+    "$(grep -c '^ruff$' "$linter_log")"
+else
+  _assert_eq "supported lint batch: Typos uses the portable sequential fallback" 300 \
+    "$(grep -c '^typos$' "$linter_log")"
+  _assert_eq "supported lint batch: Ruff uses the portable sequential fallback" 300 \
+    "$(grep -c '^ruff$' "$linter_log")"
+fi
 
 empty_plan_dir="$td/empty-plans"
 mkdir -p "$empty_plan_dir"
@@ -552,19 +561,23 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   _assert_perf_result "20-file unsupported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
 
-  default_perf_runs=$CHECKRUN_HOOK_PERF_RUNS
-  CHECKRUN_HOOK_PERF_RUNS=$CHECKRUN_SUPPORTED_BATCH_RUNS
-  perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
-  rc=$?
-  median_budget_ms=$(_perf_budget_ms \
-    "$CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS" \
-    "$CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS")
-  p95_budget_ms=$(_perf_budget_ms \
-    "$CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS" \
-    "$CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS")
-  _assert_perf_result "300-file supported autolint batch" "$perf_result" "$rc" \
-    "$median_budget_ms" "$p95_budget_ms"
-  CHECKRUN_HOOK_PERF_RUNS=$default_perf_runs
+  if [[ -n "$host_ps" ]]; then
+    default_perf_runs=$CHECKRUN_HOOK_PERF_RUNS
+    CHECKRUN_HOOK_PERF_RUNS=$CHECKRUN_SUPPORTED_BATCH_RUNS
+    perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
+    rc=$?
+    median_budget_ms=$(_perf_budget_ms \
+      "$CHECKRUN_SUPPORTED_BATCH_MEDIAN_BUDGET_MS" \
+      "$CHECKRUN_SUPPORTED_BATCH_DARWIN_MEDIAN_BUDGET_MS")
+    p95_budget_ms=$(_perf_budget_ms \
+      "$CHECKRUN_SUPPORTED_BATCH_P95_BUDGET_MS" \
+      "$CHECKRUN_SUPPORTED_BATCH_DARWIN_P95_BUDGET_MS")
+    _assert_perf_result "300-file supported autolint batch" "$perf_result" "$rc" \
+      "$median_budget_ms" "$p95_budget_ms"
+    CHECKRUN_HOOK_PERF_RUNS=$default_perf_runs
+  else
+    echo "  - skipping supervised 300-file performance assertion (ps unavailable)"
+  fi
 fi
 
 _test_summary
