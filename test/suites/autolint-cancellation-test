@@ -474,12 +474,24 @@ case "$mode" in
     ;;
   repeat)
     kill() {
-      local group
+      local group attempt
       if [ "${1:-}" = -KILL ] && [[ "${2:-}" == -[1-9]* ]]; then
         group=${2#-}
         if builtin kill -0 "$group" 2>/dev/null; then
           : >"$root/group-kill-anchored"
         fi
+        # The repeat scenario must inject its second signal after production has
+        # frozen terminal-signal traps but before exact cleanup restores the
+        # caller's traps. Fast hosts can otherwise finish KILL plus wait before
+        # the Python driver runs again, turning the test into a post-operation
+        # signal that correctly invokes the caller's restored HUP trap. Publish
+        # this exact escalation boundary and hold it until the driver sends HUP.
+        # Keep the wait bounded so a broken driver cannot strand this fixture.
+        : >"$root/repeat-cleanup-frozen"
+        for ((attempt = 0; attempt < 500; attempt++)); do
+          [ -e "$root/repeat-second-signal-sent" ] && break
+          sleep 0.01
+        done
       fi
       builtin kill "$@"
     }
@@ -912,7 +924,18 @@ try:
                     lambda: all((root / f"backend-{index}.term").is_file() for index in range(count)),
                     "cooperative TERM observation",
                 )
-                os.kill(process.pid, signal.SIGHUP)
+                wait_for(
+                    lambda: (root / "repeat-cleanup-frozen").is_file(),
+                    "protected repeat cleanup",
+                )
+                # Worker TERM markers only prove that cancellation started;
+                # they do not prove that the parent still has its managed traps.
+                # The shell-side gate above identifies that protected interval,
+                # so release it only after the second signal has been delivered.
+                try:
+                    os.kill(process.pid, signal.SIGHUP)
+                finally:
+                    (root / "repeat-second-signal-sent").touch()
         else:
             for index in reversed(range(count)):
                 release(index)
@@ -1313,7 +1336,14 @@ set +e
     REPLY=""
     _autolint_current_shell_pid || exit 1
     observed=$REPLY
-    sh -c '\''[ "$PPID" = "$1" ]'\'' _ "$observed"
+    # Some Bash builds tail-exec a final external command, replacing this
+    # subshell with `sh` before the verifier reads PPID. That changes the very
+    # parent relationship under test and produces a false failure even though
+    # PID discovery was correct. A background child cannot replace its parent;
+    # exact wait also preserves the verifier status as the subshell result.
+    sh -c '\''[ "$PPID" = "$1" ]'\'' _ "$observed" &
+    verifier=$!
+    wait "$verifier"
   )
 ' _ "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh"
 _current_pid_rc=$?
