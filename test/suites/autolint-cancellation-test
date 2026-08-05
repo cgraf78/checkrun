@@ -12,6 +12,18 @@ CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
 
 _require_compatible_libc "autolint-cancellation-test"
 
+# This suite wraps the host tools so it can inject failures while preserving
+# their real process semantics. Minimal containers may omit procps entirely;
+# skip there instead of passing Python a non-string environment value and
+# misreporting every scenario as a product failure.
+for _required_tool in awk ps mktemp mkdir rm; do
+  if ! command -v "$_required_tool" >/dev/null 2>&1; then
+    echo "SKIP: autolint-cancellation-test (requires $_required_tool)"
+    exit 0
+  fi
+done
+unset _required_tool
+
 echo "=== Parallel autolint lifecycle ==="
 
 _fixture_root=$(_tmpdir)
