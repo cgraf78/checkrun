@@ -1,0 +1,802 @@
+#!/usr/bin/env bash
+# autolint-cancellation-test - process and scratch lifecycle invariants.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "autolint-cancellation-test"
+
+echo "=== Parallel autolint lifecycle ==="
+
+_fixture_root=$(_tmpdir)
+_tool_bin="$_fixture_root/bin"
+mkdir -p "$_tool_bin"
+
+cat >"$_tool_bin/yq" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat >"$_tool_bin/typos" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat >"$_tool_bin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = pgid= ] && [ "$3" = -p ]; then
+  printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/pgid-calls"
+  if [ "${AUTOLINT_CANCEL_SHARED_PGID:-0}" -eq 1 ]; then
+    exec "$AUTOLINT_CANCEL_REAL_PS" -o pgid= -p "$AUTOLINT_CANCEL_PARENT_PID"
+  fi
+  exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
+fi
+printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/ps-calls"
+[ "${AUTOLINT_CANCEL_PS_FAIL:-0}" -eq 0 ] || exit 1
+exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
+SH
+cat >"$_tool_bin/slow-planner" <<'PY'
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import signal
+import time
+
+
+root = Path(os.environ["AUTOLINT_CANCEL_ROOT"])
+(root / "planner.pid").write_text(str(os.getpid()), encoding="ascii")
+group = os.getpgrp()
+if group != int(os.environ["AUTOLINT_CANCEL_PARENT_PID"]):
+    (root / "supervisor.pid").write_text(str(group), encoding="ascii")
+
+
+def terminate(_signum, _frame):
+    (root / "planner.term").touch(exist_ok=True)
+    raise SystemExit(143)
+
+
+signal.signal(signal.SIGTERM, terminate)
+(root / "planner.ready").touch(exist_ok=False)
+time.sleep(1.5)
+PY
+cat >"$_tool_bin/fallback-worker" <<'PY'
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+import time
+
+
+root = Path(os.environ["AUTOLINT_CANCEL_ROOT"])
+index = sys.argv[1]
+(root / f"fallback-{index}.pid").write_text(str(os.getpid()), encoding="ascii")
+(root / f"fallback-{index}.ready").touch(exist_ok=False)
+time.sleep(0.35)
+PY
+cat >"$_tool_bin/shellcheck" <<'PY'
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+
+root = Path(os.environ["AUTOLINT_CANCEL_ROOT"])
+source = Path(sys.argv[-1])
+index = source.stem.rsplit("-", 1)[-1]
+(root / f"backend-{index}.pid").write_text(str(os.getpid()), encoding="ascii")
+(root / f"worker-{index}.pid").write_text(str(os.getppid()), encoding="ascii")
+group = os.getpgrp()
+if group != int(os.environ["AUTOLINT_CANCEL_PARENT_PID"]):
+    try:
+        with (root / "supervisor.pid").open("x", encoding="ascii") as stream:
+            stream.write(str(group))
+    except FileExistsError:
+        pass
+
+
+def terminate(_signum, _frame):
+    (root / f"backend-{index}.term").touch(exist_ok=True)
+    if os.environ.get("AUTOLINT_CANCEL_IGNORE_TERM") != "1":
+        raise SystemExit(143)
+
+
+signal.signal(signal.SIGTERM, terminate)
+gate_fd = os.open(root / f"gate-{index}", os.O_RDONLY | os.O_NONBLOCK)
+try:
+    # Readiness means the TERM handler is installed and a FIFO reader exists;
+    # the harness can now signal or release without racing backend startup.
+    (root / f"backend-{index}.ready").touch(exist_ok=False)
+    while True:
+        try:
+            released = os.read(gate_fd, 1)
+        except BlockingIOError:
+            released = b""
+        if released:
+            break
+        time.sleep(0.005)
+finally:
+    os.close(gate_fd)
+
+print(f"backend:{index}", flush=True)
+with (root / "backend-completion-order").open("a", encoding="ascii") as stream:
+    stream.write(f"{index}\n")
+(root / f"backend-{index}.done").touch(exist_ok=False)
+raise SystemExit(int(os.environ.get(f"AUTOLINT_CANCEL_EXIT_{index}", "0")))
+PY
+chmod +x "$_tool_bin/yq" "$_tool_bin/typos" "$_tool_bin/ps" \
+  "$_tool_bin/slow-planner" "$_tool_bin/fallback-worker" \
+  "$_tool_bin/shellcheck"
+
+_driver="$_fixture_root/driver"
+cat >"$_driver" <<'SH'
+#!/usr/bin/env bash
+set -u
+
+impl=$1
+root=$2
+mode=$3
+count=$4
+jobs=$5
+
+mkdir -p "$root/tmp"
+export TMPDIR="$root/tmp"
+export CHECKRUN_CONFIG_DIR=/nonexistent
+export CHECKRUN_AUTOLINT_JOBS="$jobs"
+export AUTOLINT_CANCEL_ROOT="$root"
+export AUTOLINT_CANCEL_PARENT_PID=${BASHPID:-$$}
+
+# shellcheck source=/dev/null
+. "$impl"
+
+case "$mode" in
+  capability-fallback)
+    command() {
+      if [ "${1:-}" = -v ] && [ "${2:-}" = ps ]; then
+        return 1
+      fi
+      builtin command "$@"
+    }
+    ;;
+  allocation-fallback)
+    mktemp() {
+      if [ "${1:-}" = -d ]; then
+        return 1
+      fi
+      "$AUTOLINT_CANCEL_REAL_MKTEMP" "$@"
+    }
+    ;;
+  allocation-fallback-signal)
+    mktemp() {
+      if [ "${1:-}" = -d ]; then
+        return 1
+      fi
+      "$AUTOLINT_CANCEL_REAL_MKTEMP" "$@"
+    }
+    _autolint_fallback_index=0
+    _lint_one() {
+      local index=$_autolint_fallback_index
+      _autolint_fallback_index=$((_autolint_fallback_index + 1))
+      fallback-worker "$index"
+    }
+    ;;
+  allocation-signal)
+    mktemp() {
+      local rc
+      "$AUTOLINT_CANCEL_REAL_MKTEMP" "$@"
+      rc=$?
+      kill -TERM "$AUTOLINT_CANCEL_PARENT_PID"
+      return "$rc"
+    }
+    ;;
+  cleanup-signal)
+    rm() {
+      local rc
+      "$AUTOLINT_CANCEL_REAL_RM" "$@"
+      rc=$?
+      if [ "${1:-}" = -rf ] && [ ! -e "$root/cleanup-signalled" ]; then
+        : >"$root/cleanup-signalled"
+        kill -TERM "$AUTOLINT_CANCEL_PARENT_PID"
+      fi
+      return "$rc"
+    }
+    ;;
+  cleanup-group-signal)
+    _autolint_cleanup_attempt=0
+    rm() {
+      local rc cleanup_child
+      if [ "${1:-}" = -rf ]; then
+        _autolint_cleanup_attempt=$((_autolint_cleanup_attempt + 1))
+        printf '%s\n' "$_autolint_cleanup_attempt" >>"$root/cleanup-attempts"
+        if [ "$_autolint_cleanup_attempt" -eq 1 ]; then
+          sleep 30 &
+          cleanup_child=$!
+          printf '%s\n' "$cleanup_child" >"$root/cleanup-child.pid"
+          : >"$root/cleanup-ready"
+          if wait "$cleanup_child"; then
+            rc=0
+          else
+            rc=$?
+          fi
+          printf '%s\n' "$rc" >"$root/cleanup-first-status"
+          return "$rc"
+        fi
+      fi
+      "$AUTOLINT_CANCEL_REAL_RM" "$@"
+    }
+    ;;
+  cleanup-failure | cleanup-failure-errexit)
+    _autolint_cleanup_attempt=0
+    rm() {
+      if [ "${1:-}" = -rf ]; then
+        _autolint_cleanup_attempt=$((_autolint_cleanup_attempt + 1))
+        printf '%s\n' "$_autolint_cleanup_attempt" >>"$root/cleanup-attempts"
+        return 73
+      fi
+      "$AUTOLINT_CANCEL_REAL_RM" "$@"
+    }
+    ;;
+  monitor)
+    set -m
+    _autolint_pre_plan() {
+      printf 'x\n' >"$1/0.plan"
+      printf 'x\n' >"$1/1.plan"
+    }
+    _autolint_try_clean_batch() { return 1; }
+    _lint_one_with_plan() { :; }
+    mkdir() {
+      local arg rc
+      "$AUTOLINT_CANCEL_REAL_MKDIR" "$@"
+      rc=$?
+      for arg in "$@"; do
+        case "$arg" in
+          */.supervisor/gate) sleep 0.1 ;;
+        esac
+      done
+      return "$rc"
+    }
+    ;;
+  planner-signal)
+    _autolint_pre_plan() { slow-planner; }
+    ;;
+  direct-one-signal)
+    _autolint_pre_plan() { slow-planner; }
+    ;;
+  validation-fallback)
+    _autolint_validate_private_group() { return 1; }
+    ;;
+  shared-pgid)
+    ;;
+  wave)
+    _autolint_supports_pool() { return 1; }
+    ;;
+esac
+
+if [[ "$count" -lt 2 || "$jobs" -lt 2 ]]; then
+  _autolint_run_parallel_supervised() {
+    : >"$root/unexpected-supervisor"
+    return 99
+  }
+fi
+
+if [ "$mode" = cleanup-failure-errexit ]; then
+  set -e
+fi
+
+case "$mode" in
+  direct-one-signal | direct-jobs-one-signal)
+    trap - HUP INT TERM
+    ;;
+  *)
+    trap 'printf "HUP\n" >>"$root/prior-trap-ran"' HUP
+    trap 'printf "INT\n" >>"$root/prior-trap-ran"' INT
+    trap 'printf "TERM\n" >>"$root/prior-trap-ran"' TERM
+    ;;
+esac
+trap -p HUP >"$root/trap-hup.before"
+trap -p INT >"$root/trap-int.before"
+trap -p TERM >"$root/trap-term.before"
+printf '%s\n' "$-" >"$root/options.before"
+set +o >"$root/set-o.before"
+
+_record_driver_state() {
+  local status="$1" pid_file pid state
+  printf '%s\n' "$status" >"$root/operation-status"
+  : >"$root/processes.before-exit"
+  for pid_file in "$root"/supervisor.pid "$root"/worker-*.pid \
+    "$root"/backend-*.pid "$root"/planner.pid "$root"/fallback-*.pid; do
+    [ -f "$pid_file" ] || continue
+    IFS= read -r pid <"$pid_file" || continue
+    [ "$pid" != "$AUTOLINT_CANCEL_PARENT_PID" ] || continue
+    if state=$(LC_ALL=C "$AUTOLINT_CANCEL_REAL_PS" -o stat= -p "$pid" 2>/dev/null); then
+      [ -z "$state" ] || printf '%s\t%s\n' "$pid" "$state" >>"$root/processes.before-exit"
+    fi
+  done
+  trap -p HUP >"$root/trap-hup.after"
+  trap -p INT >"$root/trap-int.after"
+  trap -p TERM >"$root/trap-term.after"
+  printf '%s\n' "$-" >"$root/options.after"
+  set +o >"$root/set-o.after"
+}
+
+if [ "$mode" = cleanup-failure-errexit ]; then
+  trap '_driver_status=$?; _record_driver_state "$_driver_status"' EXIT
+fi
+
+files=()
+for ((index = 0; index < count; index++)); do
+  file="$root/case-$index.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" ok\n' >"$file"
+  mkfifo "$root/gate-$index"
+  files+=("$file")
+done
+
+if [ "$mode" = monitor ]; then
+  monitor_plan_dir=$(mktemp -d "$TMPDIR/monitor-plans.XXXXXX")
+  json=0
+  _autolint_signal_status=0
+  _autolint_cancel_status=0
+  _autolint_parallel_validated=0
+  _autolint_run_parallel_supervised 2 "$monitor_plan_dir" first.sh second.sh
+  operation_status=$?
+  rm -rf "$monitor_plan_dir"
+else
+  _autolint_main "${files[@]+"${files[@]}"}"
+  operation_status=$?
+fi
+
+_record_driver_state "$operation_status"
+exit 0
+SH
+chmod +x "$_driver"
+
+_harness="$_fixture_root/harness.py"
+cat >"$_harness" <<'PY'
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import signal
+import shutil
+import subprocess
+import sys
+import time
+
+
+shell, driver, impl, tool_bin, root_arg, scenario, signal_name = sys.argv[1:]
+root = Path(root_arg)
+root.mkdir()
+
+case = {
+    "no-op": ("normal", 0, 2, 0),
+    "allocation-fallback": ("allocation-fallback", 2, 2, 0),
+    "allocation-fallback-signal": ("allocation-fallback-signal", 2, 2, 143),
+    "allocation-signal": ("allocation-signal", 2, 2, 143),
+    "cleanup-signal": ("cleanup-signal", 2, 2, 143),
+    "cleanup-group-signal": ("cleanup-group-signal", 2, 2, 143),
+    "cleanup-failure": ("cleanup-failure", 2, 2, 125),
+    "cleanup-failure-errexit": ("cleanup-failure-errexit", 2, 2, 125),
+    "capability-fallback": ("capability-fallback", 2, 2, 0),
+    "monitor": ("monitor", 2, 2, 0),
+    "planner-signal": ("planner-signal", 2, 2, 143),
+    "success": ("normal", 2, 2, 0),
+    "failure": ("normal", 2, 2, 7),
+    "precedence": ("normal", 3, 3, 125),
+    "wave": ("wave", 2, 2, 0),
+    "fallback": ("validation-fallback", 2, 2, 0),
+    "shared-pgid": ("shared-pgid", 2, 2, 0),
+    "one": ("normal", 1, 2, 0),
+    "jobs-one": ("normal", 2, 1, 0),
+    "direct-one-signal": ("direct-one-signal", 1, 2, 143),
+    "direct-jobs-one-signal": ("direct-jobs-one-signal", 2, 1, 143),
+    "signal": ("normal", 2, 2, 128 + getattr(signal, f"SIG{signal_name}")),
+    "repeat": ("normal", 2, 2, 143),
+    "inspect-failure": ("normal", 2, 2, 143),
+}[scenario]
+mode, count, jobs, expected_status = case
+env = os.environ.copy()
+env["PATH"] = tool_bin + os.pathsep + env["PATH"]
+env["AUTOLINT_CANCEL_REAL_PS"] = shutil.which("ps")
+env["AUTOLINT_CANCEL_REAL_MKTEMP"] = shutil.which("mktemp")
+env["AUTOLINT_CANCEL_REAL_MKDIR"] = shutil.which("mkdir")
+env["AUTOLINT_CANCEL_REAL_RM"] = shutil.which("rm")
+if scenario == "failure":
+    env["AUTOLINT_CANCEL_EXIT_0"] = "7"
+if scenario == "precedence":
+    env["AUTOLINT_CANCEL_EXIT_0"] = "1"
+    env["AUTOLINT_CANCEL_EXIT_1"] = "2"
+    env["AUTOLINT_CANCEL_EXIT_2"] = "125"
+if scenario in ("inspect-failure", "repeat"):
+    env["AUTOLINT_CANCEL_IGNORE_TERM"] = "1"
+if scenario == "inspect-failure":
+    env["AUTOLINT_CANCEL_PS_FAIL"] = "1"
+if scenario == "shared-pgid":
+    env["AUTOLINT_CANCEL_SHARED_PGID"] = "1"
+
+process = subprocess.Popen(
+    [shell, driver, impl, str(root), mode, str(count), str(jobs)],
+    env=env,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    start_new_session=True,
+)
+unrelated = subprocess.Popen(
+    [sys.executable, "-c", "import signal; signal.pause()"],
+    start_new_session=True,
+)
+
+
+def process_state(pid):
+    result = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def alive(pid):
+    state = process_state(pid)
+    return bool(state) and not state.startswith(("Z", "X"))
+
+
+def wait_for(predicate, description, seconds=6):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise RuntimeError(f"timed out waiting for {description}")
+
+
+def release(index):
+    with (root / f"gate-{index}").open("wb", buffering=0) as gate:
+        gate.write(b"x")
+
+
+def backend_finished(index):
+    pid_path = root / f"backend-{index}.pid"
+    if not (root / f"backend-{index}.done").is_file() or not pid_path.is_file():
+        return False
+    return not alive(int(pid_path.read_text(encoding="ascii")))
+
+
+backend_pids = []
+worker_pids = []
+errors = []
+signal_started = None
+try:
+    if scenario in (
+        "allocation-fallback", "capability-fallback", "fallback", "jobs-one",
+        "shared-pgid",
+    ):
+        wait_for(lambda: (root / "backend-0.ready").is_file(), "first backend")
+        if (root / "backend-1.ready").exists():
+            raise RuntimeError("sequential fallback launched a second backend early")
+        release(0)
+        wait_for(lambda: (root / "backend-1.ready").is_file(), "second backend")
+        release(1)
+    elif scenario == "allocation-fallback-signal":
+        wait_for(lambda: (root / "fallback-0.ready").is_file(), "fallback worker")
+        os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "allocation-signal":
+        pass
+    elif scenario == "planner-signal":
+        wait_for(lambda: (root / "planner.ready").is_file(), "registry planner")
+        signal_started = time.monotonic()
+        os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "direct-one-signal":
+        wait_for(lambda: (root / "planner.ready").is_file(), "direct registry planner")
+        signal_started = time.monotonic()
+        os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "direct-jobs-one-signal":
+        wait_for(lambda: (root / "backend-0.ready").is_file(), "direct lint backend")
+        signal_started = time.monotonic()
+        os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "monitor":
+        pass
+    elif count == 1:
+        wait_for(lambda: (root / "backend-0.ready").is_file(), "one backend")
+        release(0)
+    else:
+        wait_for(
+            lambda: all((root / f"backend-{index}.ready").is_file() for index in range(count)),
+            "all parallel backends",
+        )
+        if scenario in ("inspect-failure", "signal", "repeat"):
+            os.kill(process.pid, getattr(signal, f"SIG{signal_name}"))
+            if scenario == "repeat":
+                wait_for(
+                    lambda: all((root / f"backend-{index}.term").is_file() for index in range(count)),
+                    "cooperative TERM observation",
+                )
+                os.kill(process.pid, signal.SIGHUP)
+        else:
+            for index in reversed(range(count)):
+                release(index)
+                if scenario == "precedence":
+                    wait_for(
+                        lambda index=index: backend_finished(index),
+                        f"backend {index} completion",
+                    )
+            if scenario == "cleanup-group-signal":
+                wait_for(lambda: (root / "cleanup-ready").is_file(), "cleanup gate")
+                os.killpg(process.pid, signal.SIGTERM)
+
+    direct_signal = scenario in ("direct-one-signal", "direct-jobs-one-signal")
+    if direct_signal:
+        # A direct-path child retains the stdout/stderr pipe after its parent
+        # dies. Measure the driver itself first, then clean up that test-owned
+        # process group before draining pipes.
+        try:
+            process.wait(timeout=0.8)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("parent-only TERM did not stop the direct driver") from error
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate(timeout=2)
+    else:
+        try:
+            stdout, stderr = process.communicate(timeout=8)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("autolint did not finish after its observable event") from error
+
+    expected_driver_status = 125 if scenario == "cleanup-failure-errexit" else 0
+    if direct_signal:
+        expected_driver_status = -signal.SIGTERM
+    if process.returncode != expected_driver_status:
+        raise RuntimeError(
+            f"driver exited {process.returncode}, expected {expected_driver_status}: {stderr}"
+        )
+    if not direct_signal:
+        actual_status = int((root / "operation-status").read_text(encoding="ascii"))
+        if actual_status != expected_status:
+            raise RuntimeError(f"operation status {actual_status}, expected {expected_status}")
+
+    if signal_started is not None and time.monotonic() - signal_started > 0.8:
+        raise RuntimeError("parent-only cancellation waited for foreground work")
+
+    if scenario not in (
+        "allocation-fallback-signal", "allocation-signal", "monitor", "planner-signal",
+        "direct-one-signal", "direct-jobs-one-signal", "signal", "repeat",
+        "inspect-failure"
+    ):
+        expected_output = [f"backend:{index}" for index in range(count)]
+        if stdout.splitlines() != expected_output:
+            raise RuntimeError(f"ordered output {stdout.splitlines()!r}, expected {expected_output!r}")
+    if "Done" in stderr or any(line.startswith("[") for line in stderr.splitlines()):
+        raise RuntimeError(f"job-control notification leaked: {stderr!r}")
+    if (root / "prior-trap-ran").exists():
+        raise RuntimeError("autolint invoked a preexisting caller trap")
+    if not direct_signal:
+        before_exit = (root / "processes.before-exit").read_text(
+            encoding="ascii"
+        ).splitlines()
+        if before_exit:
+            raise RuntimeError(f"owned process visible before driver exit: {before_exit!r}")
+        for name in ("hup", "int", "term"):
+            if (root / f"trap-{name}.before").read_bytes() != (root / f"trap-{name}.after").read_bytes():
+                raise RuntimeError(f"caller {name.upper()} trap was not restored")
+        for name in ("options", "set-o"):
+            if (root / f"{name}.before").read_bytes() != (root / f"{name}.after").read_bytes():
+                raise RuntimeError(f"caller shell {name} state was not restored")
+    if (root / "unexpected-supervisor").exists():
+        raise RuntimeError("hot path invoked the parallel supervisor")
+    if scenario == "cleanup-group-signal":
+        cleanup_attempts = (root / "cleanup-attempts").read_text(
+            encoding="ascii"
+        ).splitlines()
+        if cleanup_attempts != ["1", "2"]:
+            raise RuntimeError(f"cleanup attempts {cleanup_attempts!r}, expected two")
+        cleanup_status = int((root / "cleanup-first-status").read_text(encoding="ascii"))
+        if cleanup_status != 143:
+            raise RuntimeError(f"interrupted cleanup status {cleanup_status}, expected 143")
+    if scenario == "precedence":
+        completion_order = (root / "backend-completion-order").read_text(
+            encoding="ascii"
+        ).splitlines()
+        if completion_order != ["2", "1", "0"]:
+            raise RuntimeError(f"backend completion order {completion_order!r}")
+    if scenario in ("cleanup-failure", "cleanup-failure-errexit"):
+        cleanup_attempts = (root / "cleanup-attempts").read_text(
+            encoding="ascii"
+        ).splitlines()
+        if cleanup_attempts != ["1", "2"]:
+            raise RuntimeError(f"cleanup attempts {cleanup_attempts!r}, expected two")
+        if "autolint: could not remove registry plan temp directory" not in stderr:
+            raise RuntimeError(f"missing cleanup failure diagnostic: {stderr!r}")
+        scratch = list((root / "tmp").iterdir())
+        if len(scratch) != 1 or not scratch[0].name.startswith("autolint-plans."):
+            raise RuntimeError(f"unexpected failed-cleanup scratch: {scratch!r}")
+    elif not direct_signal and any((root / "tmp").iterdir()):
+        raise RuntimeError("owned scratch remains")
+    ps_calls = (root / "ps-calls").read_text(encoding="ascii").splitlines() \
+        if (root / "ps-calls").exists() else []
+    expected_ps_calls = 1 if scenario in (
+        "inspect-failure", "planner-signal", "signal", "repeat"
+    ) else 0
+    if len(ps_calls) != expected_ps_calls:
+        raise RuntimeError(
+            f"process-table scans {len(ps_calls)}, expected {expected_ps_calls}"
+        )
+    pgid_calls = (root / "pgid-calls").read_text(encoding="ascii").splitlines() \
+        if (root / "pgid-calls").exists() else []
+    if scenario == "shared-pgid":
+        # The real caller PGID is already different from the gated `$!`, so
+        # validation rejects the leader before it needs a second lookup.
+        expected_pgid_calls = 1
+    elif scenario in (
+        "cleanup-signal", "cleanup-group-signal", "cleanup-failure",
+        "cleanup-failure-errexit", "monitor", "planner-signal", "success",
+        "failure", "precedence", "wave", "signal", "repeat", "inspect-failure",
+    ):
+        expected_pgid_calls = 2
+    else:
+        expected_pgid_calls = 0
+    if len(pgid_calls) != expected_pgid_calls:
+        raise RuntimeError(
+            f"targeted PGID lookups {len(pgid_calls)}, expected {expected_pgid_calls}"
+        )
+
+    for index in range(count):
+        pid_path = root / f"backend-{index}.pid"
+        worker_path = root / f"worker-{index}.pid"
+        if pid_path.exists():
+            backend_pids.append(int(pid_path.read_text(encoding="ascii")))
+        if worker_path.exists():
+            worker_pids.append(int(worker_path.read_text(encoding="ascii")))
+    owned_pids = backend_pids + worker_pids
+    owned_pids.extend(
+        int(path.read_text(encoding="ascii")) for path in root.glob("fallback-*.pid")
+    )
+    if (root / "planner.pid").exists():
+        owned_pids.append(int((root / "planner.pid").read_text(encoding="ascii")))
+    deadline = time.monotonic() + 1
+    remaining = []
+    while True:
+        remaining = [(pid, process_state(pid)) for pid in owned_pids]
+        remaining = [(pid, state) for pid, state in remaining if state]
+        if not remaining or time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    live_remaining = [(pid, state) for pid, state in remaining if not state.startswith(("Z", "X"))]
+    zombie_remaining = [(pid, state) for pid, state in remaining if state.startswith(("Z", "X"))]
+    if live_remaining and not direct_signal:
+        raise RuntimeError(f"owned process survived: {live_remaining!r}")
+    if zombie_remaining and not direct_signal:
+        raise RuntimeError(f"owned zombie was not reaped: {zombie_remaining!r}")
+    if scenario in ("inspect-failure", "signal", "repeat") and not all(
+        (root / f"backend-{index}.term").is_file() for index in range(count)
+    ):
+        raise RuntimeError("owned backend did not observe cooperative TERM")
+    if scenario == "planner-signal" and not (root / "planner.term").is_file():
+        raise RuntimeError("owned registry planner did not observe TERM")
+    if scenario == "allocation-fallback-signal" and (root / "fallback-1.ready").exists():
+        raise RuntimeError("allocation fallback launched work after cancellation")
+    if not alive(unrelated.pid):
+        raise RuntimeError("unrelated process was signalled")
+except BaseException as error:
+    errors.append(str(error))
+finally:
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    for pid_file in root.glob("backend-*.pid"):
+        pid = int(pid_file.read_text(encoding="ascii"))
+        if alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    for pid_file in root.glob("fallback-*.pid"):
+        pid = int(pid_file.read_text(encoding="ascii"))
+        if alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    planner_pid_file = root / "planner.pid"
+    if planner_pid_file.exists():
+        planner_pid = int(planner_pid_file.read_text(encoding="ascii"))
+        if alive(planner_pid):
+            try:
+                os.kill(planner_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    process.wait()
+    if unrelated.poll() is None:
+        unrelated.kill()
+    unrelated.wait()
+
+if errors:
+    print("; ".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+PY
+chmod +x "$_harness"
+
+_run_case() {
+  local description="$1" scenario="$2" signal_name="${3:-TERM}" signal_label root
+  signal_label=$(printf '%s\n' "$signal_name" | tr '[:upper:]' '[:lower:]')
+  root="$_fixture_root/case-$scenario-$signal_label-$RANDOM"
+  if "$_harness" "$BASH" "$_driver" "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh" \
+    "$_tool_bin" "$root" "$scenario" "$signal_name"; then
+    _pass "$description"
+  else
+    _fail "$description"
+  fi
+}
+
+_run_case "no-op hot path stays direct" no-op
+_run_case "allocation failure restores traps and falls back sequentially" \
+  allocation-fallback
+_run_case "allocation fallback latches TERM and launches no later work" \
+  allocation-fallback-signal
+_run_case "allocation-time signal returns after exact cleanup" allocation-signal
+_run_case "cleanup-time signal remains the operation result" cleanup-signal
+_run_case "terminal-group TERM retries an interrupted cleanup" cleanup-group-signal
+_run_case "permanent cleanup failure is reported" cleanup-failure
+_run_case "set -e caller restores state before cleanup failure returns" \
+  cleanup-failure-errexit
+_run_case "missing cancellation tool falls back sequentially" capability-fallback
+_run_case "monitor-on caller gets no job notification" monitor
+_run_case "parent-only TERM cancels the registry planner promptly" planner-signal
+_run_case "success restores Sley-style caller state and ordered output" success
+_run_case "ordinary failure preserves status and ordered output" failure
+_run_case "reverse completion preserves ordered output and strongest status" \
+  precedence
+_run_case "wave runner retains status and ordered output" wave
+_run_case "validation failure falls back sequentially" fallback
+_run_case "shared process group fails validation and falls back sequentially" \
+  shared-pgid
+_run_case "one-file hot path stays direct" one
+_run_case "jobs=1 hot path stays direct" jobs-one
+_run_case "parent-only TERM stays prompt during one-file planning" direct-one-signal
+_run_case "parent-only TERM stays prompt during jobs=1 lint" direct-jobs-one-signal
+_run_case "parent-only HUP cancels the complete backend group" signal HUP
+_run_case "parent-only INT cancels the complete backend group" signal INT
+_run_case "parent-only TERM cancels the complete backend group" signal TERM
+_run_case "first signal wins while stubborn backends escalate" repeat TERM
+_run_case "failed survivor scan still kills stubborn backends" inspect-failure TERM
+
+set +e
+# shellcheck disable=SC2016 # This program is evaluated by the selected Bash.
+"$BASH" -c '
+  if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+    exit 1
+  fi
+  (exit 7) &
+  pid=$!
+  wait -n 2>/dev/null
+  first_rc=$?
+  wait "$pid" 2>/dev/null
+  second_rc=$?
+  [[ "$first_rc" -eq 7 && "$second_rc" -eq 7 ]]
+' >/dev/null 2>&1
+_wait_n_rc=$?
+set -e
+if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3))); then
+  _assert_exit "wait-n status can be retained by exact PID wait" 0 "$_wait_n_rc"
+else
+  _assert_exit "wait-n probe rejects unsupported Bash" 1 "$_wait_n_rc"
+fi
+
+if [[ "$(uname -s)" == Darwin ]] && ((BASH_VERSINFO[0] > 3)) &&
+  /bin/bash -c '((BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] == 2))'; then
+  if /bin/bash "$0"; then
+    _pass "macOS system Bash 3.2 passes the lifecycle suite"
+  else
+    _fail "macOS system Bash 3.2 passes the lifecycle suite"
+  fi
+fi
+
+_test_summary

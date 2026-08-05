@@ -18,6 +18,7 @@ program	share/checkrun/shell.sh
 program	test/checkrun-test
 program	test/helpers.sh
 program	test/suites/autoformat-test
+program	test/suites/autolint-cancellation-test
 program	test/suites/autolint-test
 program	test/suites/capabilities-test
 program	test/suites/checkrun-cli-test

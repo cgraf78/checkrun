@@ -164,18 +164,13 @@ _lint_one() {
 
 _autolint_pre_plan() {
   # Plan many files in a single Python invocation. Writes `<index>.plan` per
-  # input file into a fresh dir whose path is echoed on stdout for the caller
-  # to capture. Returns non-zero (and removes the dir) if the planner itself
-  # fails — empty per-file plans are legitimate skips, not failures.
-  local out_dir rc
-  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-plans.XXXXXX") || return 125
+  # input file into the caller-owned directory. The caller allocates and
+  # records that directory before this interruptible planner runs, so every
+  # return path can remove the exact invocation scratch without a glob.
+  # Empty per-file plans are legitimate skips, not failures.
+  local out_dir="$1"
+  shift
   _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint -- "$@"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    rm -rf "$out_dir"
-    return "$rc"
-  fi
-  printf '%s\n' "$out_dir"
 }
 
 _lint_dispatch() {
@@ -229,6 +224,7 @@ _autolint_run_clean_batch_step() {
   # Bound each backend invocation while still amortizing startup. The outer
   # Sley/autolint transport retains its existing full argument list.
   for ((start = 0; start < ${#files[@]}; start += 64)); do
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
     chunk=("${files[@]:start:64}")
     case "$adapter" in
       ruff-lint)
@@ -282,6 +278,10 @@ _autolint_try_clean_batch() {
   batch_stderr="$plan_dir/batch.stderr"
   : >"$batch_stderr" || return 1
   for index in "${!batch_adapters[@]}"; do
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+      rm -f "$batch_stderr"
+      return "$_autolint_cancel_status"
+    }
     # Routine clean stdout is intentionally quiet. Buffer exit-0 warnings until
     # every adapter succeeds; a failed probe discards both streams and reruns
     # the authoritative per-file path so diagnostic order and attribution stay
@@ -295,6 +295,10 @@ _autolint_try_clean_batch() {
       "${files[@]}" >/dev/null 2>>"$batch_stderr" || {
       rm -f "$batch_stderr"
       return 1
+    }
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+      rm -f "$batch_stderr"
+      return "$_autolint_cancel_status"
     }
   done
   [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
@@ -351,12 +355,22 @@ _autolint_run_plans_sequential() {
   local plan_dir="$1" count="$2" rc=0 file_rc index
 
   for ((index = 0; index < count; index++)); do
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
     [ -s "$plan_dir/$index.plan" ] || continue
     _lint_one_with_plan "$plan_dir/$index.plan"
     file_rc=$?
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
     rc=$(_autolint_merge_rc "$rc" "$file_rc")
   done
   return "$rc"
+}
+
+_autolint_reap_pids() {
+  local pid
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    wait "$pid" 2>/dev/null || true
+  done
 }
 
 _autolint_run_file_batch() {
@@ -378,14 +392,17 @@ _autolint_run_file_batch() {
   local -a batch_pids=() batch_stdout_files=() batch_stderr_files=()
 
   for index in "${!batch_files[@]}"; do
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
     global_index=$((base_index + index))
     # Empty plans are authoritative no-ops. Do not pay for a worker and two
     # output buffers when the registry already decided this file has no lint
     # steps. Keep the original index so non-empty plan/output ordering is
     # unchanged when supported and unsupported files are interleaved.
     [ -s "$plan_dir/$global_index.plan" ] || continue
-    stdout_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stdout.XXXXXX")
-    stderr_file=$(mktemp "${TMPDIR:-/tmp}/autolint-stderr.XXXXXX")
+    # The plan directory is the invocation's one owned scratch root. Keeping
+    # wave output here makes normal and interrupted cleanup one exact removal.
+    stdout_file="$plan_dir/$global_index.stdout"
+    stderr_file="$plan_dir/$global_index.stderr"
     (
       _lint_one_with_plan "$plan_dir/$global_index.plan"
     ) >"$stdout_file" 2>"$stderr_file" &
@@ -393,7 +410,13 @@ _autolint_run_file_batch() {
     batch_pids[index]="$pid"
     batch_stdout_files[index]="$stdout_file"
     batch_stderr_files[index]="$stderr_file"
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
   done
+
+  if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+    _autolint_reap_pids "${batch_pids[@]+"${batch_pids[@]}"}"
+    return "$_autolint_cancel_status"
+  fi
 
   for index in "${!batch_files[@]}"; do
     global_index=$((base_index + index))
@@ -406,6 +429,10 @@ _autolint_run_file_batch() {
     else
       file_rc=$?
     fi
+    if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+      _autolint_reap_pids "${batch_pids[@]+"${batch_pids[@]}"}"
+      return "$_autolint_cancel_status"
+    fi
     [ -s "$stdout_file" ] && cat "$stdout_file"
     [ -s "$stderr_file" ] && cat "$stderr_file" >&2
     rm -f "$stdout_file" "$stderr_file"
@@ -416,7 +443,9 @@ _autolint_run_file_batch() {
 }
 
 # Bash 4.3 introduced `wait -n` (wait for any one child). Older shells —
-# including macOS's system bash 3.2 — must use the barrier path above.
+# including macOS's system bash 3.2 — must use the barrier path above. CI
+# verifies that every supported modern Bash retains a child's status for the
+# later exact-PID wait used by the ordered-output pass.
 _autolint_supports_pool() {
   if [ "${BASH_VERSINFO[0]}" -gt 4 ]; then
     return 0
@@ -453,6 +482,7 @@ _autolint_run_files_pool() {
   # immediately with its stored exit status, so this is cheap.
   while [ "$next" -lt "$n" ] || [ "$in_flight" -gt 0 ]; do
     while [ "$next" -lt "$n" ] && [ "$in_flight" -lt "$jobs" ]; do
+      [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
       if [ ! -s "$plan_dir/$next.plan" ]; then
         next=$((next + 1))
         continue
@@ -467,13 +497,23 @@ _autolint_run_files_pool() {
       stderrs[next]=$stderr_file
       next=$((next + 1))
       in_flight=$((in_flight + 1))
+      [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
     done
+
+    if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+      _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
+      return "$_autolint_cancel_status"
+    fi
 
     if [ "$in_flight" -gt 0 ]; then
       # `wait -n` returns 127 only when there are no children to wait for.
       # Our in_flight counter guards against that case, so any exit status
       # here belongs to a real worker.
-      wait -n 2>/dev/null || true
+      wait -n 2>/dev/null || :
+      if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+        _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
+        return "$_autolint_cancel_status"
+      fi
       in_flight=$((in_flight - 1))
     fi
   done
@@ -485,6 +525,10 @@ _autolint_run_files_pool() {
     else
       file_rc=$?
     fi
+    if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+      _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
+      return "$_autolint_cancel_status"
+    fi
     [ -s "${stdouts[$i]}" ] && cat "${stdouts[$i]}"
     [ -s "${stderrs[$i]}" ] && cat "${stderrs[$i]}" >&2
     rc=$(_autolint_merge_rc "$rc" "$file_rc")
@@ -493,8 +537,296 @@ _autolint_run_files_pool() {
   return "$rc"
 }
 
+_autolint_record_signal() {
+  local status="$1"
+  [ "${_autolint_signal_status:-0}" -ne 0 ] || _autolint_signal_status=$status
+  [ "${_autolint_cancel_status:-0}" -ne 0 ] || _autolint_cancel_status=$status
+}
+
+_autolint_restore_signal_traps() {
+  local saved_hup="$1" saved_int="$2" saved_term="$3"
+  eval "${saved_hup:-trap - HUP}"
+  eval "${saved_int:-trap - INT}"
+  eval "${saved_term:-trap - TERM}"
+}
+
+_autolint_process_group() {
+  local pid="$1" snapshot group
+  case "$pid" in
+    '' | 0 | *[!0-9]*) return 1 ;;
+  esac
+  snapshot=$(LC_ALL=C ps -o pgid= -p "$pid" 2>/dev/null) || return 1
+  group=$(awk '
+    NF == 1 && $1 ~ /^[0-9]+$/ { group = $1; matches++ }
+    NF != 1 { invalid = 1 }
+    END {
+      if (invalid || matches != 1) exit 1
+      print group
+    }
+  ' <<<"$snapshot") || return 1
+  REPLY=$group
+}
+
+_autolint_validate_private_group() {
+  local leader="$1" caller_pid="$2" jobs_file="$3"
+  local job_leader leader_group caller_group
+  case "$leader" in
+    '' | 0 | *[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$leader" 2>/dev/null || return 1
+  # `jobs -p` confirms that the exact unreaped `$!` is still our Bash job, but
+  # some Bash/platform combinations can report `$!` even when the process is
+  # still in the caller's group. Verify both real PGIDs before group signalling.
+  jobs -p >"$jobs_file" || return 1
+  while IFS= read -r job_leader; do
+    if [ "$job_leader" = "$leader" ]; then
+      _autolint_process_group "$leader" || return 1
+      leader_group=$REPLY
+      [ "$leader_group" = "$leader" ] || return 1
+      _autolint_process_group "$caller_pid" || return 1
+      caller_group=$REPLY
+      [ "$leader_group" != "$caller_group" ] || return 1
+      REPLY=$leader_group
+      return 0
+    fi
+  done <"$jobs_file"
+  return 1
+}
+
+_autolint_group_has_live_processes() {
+  local group="$1" snapshot rc
+  snapshot=$(LC_ALL=C ps -eo pgid=,stat= 2>/dev/null) || return 2
+  awk -v group="$group" '
+    $1 == group && $2 !~ /^[ZX]/ { found = 1 }
+    END { exit !found }
+  ' <<<"$snapshot"
+  rc=$?
+  case "$rc" in
+    0 | 1) return "$rc" ;;
+    *) return 2 ;;
+  esac
+}
+
+_autolint_stop_unvalidated_leader() {
+  local leader="$1" attempt
+  case "$leader" in
+    '' | 0 | *[!0-9]*) return 0 ;;
+  esac
+  kill -TERM "$leader" 2>/dev/null || true
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    kill -0 "$leader" 2>/dev/null || break
+    sleep 0.01
+  done
+  if kill -0 "$leader" 2>/dev/null; then
+    kill -KILL "$leader" 2>/dev/null || true
+  fi
+  wait "$leader" 2>/dev/null || true
+}
+
+_autolint_cancel_private_group() {
+  local leader="$1" group="$2" done_file="$3" attempt group_state live=1
+
+  trap '' HUP INT TERM
+  if [ ! -e "$done_file" ]; then
+    kill -TERM "-$group" 2>/dev/null || true
+    # The supervisor writes its completion marker only after its exact workers
+    # quiesce. Poll that cheap condition first; inspect the complete group once
+    # afterward so an ignored TERM cannot hide behind a finished supervisor.
+    for ((attempt = 0; attempt < 20; attempt++)); do
+      [ -e "$done_file" ] && break
+      sleep 0.01
+    done
+  fi
+  if _autolint_group_has_live_processes "$group"; then
+    live=1
+  else
+    group_state=$?
+    # A failed process-table snapshot is unknown, not proof of completion.
+    # The validated group is still anchored by the exact unwaited leader, so
+    # conservative escalation is safer than blocking forever on a survivor.
+    [ "$group_state" -eq 1 ] && live=0 || live=1
+  fi
+  if [ "$live" -ne 0 ]; then
+    kill -KILL "-$group" 2>/dev/null || true
+  fi
+  wait "$leader" 2>/dev/null || true
+}
+
+_autolint_count_nonempty_plans() {
+  local plan_dir="$1" count="$2" index nonempty=0
+  for ((index = 0; index < count; index++)); do
+    [ -s "$plan_dir/$index.plan" ] && nonempty=$((nonempty + 1))
+  done
+  REPLY=$nonempty
+}
+
+_autolint_run_read_only_pipeline() {
+  local plan_dir="$1" jobs="$2" allow_parallel="$3"
+  shift 3
+  local plan_rc=0 nonempty=0 run_rc=0
+  local -a files=("$@")
+
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  _autolint_pre_plan "$plan_dir" "${files[@]}" || plan_rc=$?
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  [ "$plan_rc" -eq 0 ] || return "$plan_rc"
+
+  if [ "$json" -eq 0 ]; then
+    if _autolint_try_clean_batch "$plan_dir" "${files[@]}"; then
+      return 0
+    fi
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  fi
+
+  if [ "$allow_parallel" -eq 1 ]; then
+    _autolint_count_nonempty_plans "$plan_dir" "${#files[@]}"
+    nonempty=$REPLY
+    if [ "$nonempty" -gt 1 ]; then
+      if _autolint_supports_pool; then
+        _autolint_run_files_pool "$jobs" "$plan_dir" "${files[@]}"
+        return $?
+      fi
+      local start batch_rc rc=0
+      for ((start = 0; start < ${#files[@]}; start += jobs)); do
+        [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+        if _autolint_run_file_batch \
+          "$plan_dir" "$start" "${files[@]:start:jobs}"; then
+          batch_rc=0
+        else
+          batch_rc=$?
+        fi
+        rc=$(_autolint_merge_rc "$rc" "$batch_rc")
+      done
+      return "$rc"
+    fi
+  fi
+
+  if _autolint_run_plans_sequential "$plan_dir" "${#files[@]}"; then
+    run_rc=0
+  else
+    run_rc=$?
+  fi
+  return "$run_rc"
+}
+
+_autolint_parallel_supervisor() {
+  local gate="$1" parent_pid="$2" jobs="$3" plan_dir="$4"
+  shift 4
+  local rc=0 _autolint_signal_status=0 _autolint_cancel_status=0
+  local -a files=("$@")
+
+  trap '_autolint_record_signal 129' HUP
+  trap '_autolint_record_signal 130' INT
+  trap '_autolint_record_signal 143' TERM
+  while [ ! -d "$gate" ]; do
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+    kill -0 "$parent_pid" 2>/dev/null || return 125
+    sleep 0.001
+  done
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+
+  if _autolint_run_read_only_pipeline \
+    "$plan_dir" "$jobs" 1 "${files[@]}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || rc=$_autolint_cancel_status
+  return "$rc"
+}
+
+_autolint_restore_monitor() {
+  [ "$1" -eq 0 ] || set -m 2>/dev/null || true
+}
+
+_autolint_run_parallel_supervised() {
+  local jobs="$1" plan_dir="$2"
+  shift 2
+  local control_dir="$plan_dir/.supervisor" gate done_file jobs_file
+  local parent_pid=${BASHPID:-$$} leader="" group="" rc=0 tool
+  local had_monitor=0
+
+  _autolint_parallel_validated=0
+  [ "${_autolint_signal_status:-0}" -eq 0 ] || return "$_autolint_signal_status"
+  for tool in awk mkdir ps sleep; do
+    command -v "$tool" >/dev/null 2>&1 || return 0
+  done
+  mkdir "$control_dir" 2>/dev/null || return 0
+  gate="$control_dir/gate"
+  done_file="$control_dir/done"
+  jobs_file="$control_dir/jobs"
+
+  [[ "$-" == *m* ]] && had_monitor=1
+  if ! set -m 2>/dev/null; then
+    return 0
+  fi
+  (
+    set +m
+    trap - EXIT
+    trap ': >"$done_file" 2>/dev/null || true' EXIT
+    _autolint_parallel_supervisor \
+      "$gate" "$parent_pid" "$jobs" "$plan_dir" "$@"
+  ) </dev/null &
+  leader=$!
+  # The gated leader is intended to own a private group; validation below is
+  # authoritative. Disable notifications while it waits even when the sourced
+  # caller started with monitor mode on. Restoring `m` after the exact wait
+  # avoids a late `[1]+ Done` diagnostic.
+  set +m
+
+  if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
+    _autolint_stop_unvalidated_leader "$leader"
+    _autolint_restore_monitor "$had_monitor"
+    return "$_autolint_signal_status"
+  fi
+  if ! _autolint_validate_private_group "$leader" "$parent_pid" "$jobs_file"; then
+    _autolint_stop_unvalidated_leader "$leader"
+    _autolint_restore_monitor "$had_monitor"
+    return 0
+  fi
+  group=$REPLY
+  if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
+    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_restore_monitor "$had_monitor"
+    return "$_autolint_signal_status"
+  fi
+  if ! kill -0 "$leader" 2>/dev/null; then
+    _autolint_stop_unvalidated_leader "$leader"
+    _autolint_restore_monitor "$had_monitor"
+    return 0
+  fi
+  # Directory creation is the nonblocking gate release. Unlike opening a FIFO
+  # writer, it cannot hang if the validated child exits at this boundary.
+  if ! mkdir "$gate" 2>/dev/null; then
+    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_restore_monitor "$had_monitor"
+    return 0
+  fi
+  _autolint_parallel_validated=1
+
+  if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
+    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_restore_monitor "$had_monitor"
+    return "$_autolint_signal_status"
+  fi
+
+  if wait "$leader"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
+    # A trap interrupts Bash's wait without reaping the direct child.
+    _autolint_cancel_private_group "$leader" "$group" "$done_file"
+    _autolint_restore_monitor "$had_monitor"
+    return "$_autolint_signal_status"
+  fi
+  _autolint_restore_monitor "$had_monitor"
+  return "$rc"
+}
+
 _autolint_main() {
-  local fix=0 json=0 rc=0 jobs start file lint_file arg
+  local fix=0 json=0 rc=0 jobs file lint_file arg
   local -a file_args=() lint_files=()
 
   for arg in "$@"; do
@@ -549,46 +881,123 @@ _autolint_main() {
         rc=$(_autolint_merge_rc "$rc" "$?")
       done
     else
-      # Plan every file in a single Python invocation. The pre-built plan
-      # directory survives the spawn/wait below and is cleaned up after the
-      # runner returns. If the batch scratch directory is unavailable, fall
-      # back to per-file planning. An authoritative registry error is returned
-      # directly instead of being retried once per file.
-      local plan_dir="" plan_rc=0
-      plan_dir=$(_autolint_pre_plan "${lint_files[@]}") || plan_rc=$?
-      if [ "$plan_rc" -eq 0 ] && [ "$json" -eq 0 ] &&
-        _autolint_try_clean_batch "$plan_dir" "${lint_files[@]}"; then
-        # Homogeneous clean work completed without per-file backend startup.
-        :
-      elif [ "$plan_rc" -eq 0 ] && [ "$jobs" -eq 1 ]; then
-        # Preserve strictly sequential backend execution while amortizing the
-        # registry interpreter across the complete read-only file set.
-        _autolint_run_plans_sequential "$plan_dir" "${#lint_files[@]}"
-        rc=$(_autolint_merge_rc "$rc" "$?")
-      elif [ "$plan_rc" -eq 0 ] && _autolint_supports_pool; then
-        # Modern bash: keep ${jobs} workers in flight at all times.
-        _autolint_run_files_pool "$jobs" "$plan_dir" "${lint_files[@]}"
-        rc=$(_autolint_merge_rc "$rc" "$?")
-      elif [ "$plan_rc" -eq 0 ]; then
-        # Legacy bash (e.g. macOS system bash 3.2): wave-style barrier
-        # batching. Pass the plan_dir + the global base index of each wave so
-        # workers find their pre-built plan via plan_dir/<global_index>.plan.
-        for ((start = 0; start < ${#lint_files[@]}; start += jobs)); do
-          _autolint_run_file_batch "$plan_dir" "$start" \
-            "${lint_files[@]:start:jobs}"
-          rc=$(_autolint_merge_rc "$rc" "$?")
-        done
-      elif [ "$plan_rc" -eq 125 ]; then
-        # Batch scratch allocation failed. Each _lint_one call uses the
-        # portable single-plan tempfile path, preserving the legacy fallback.
-        for file in "${lint_files[@]}"; do
-          _lint_one "$file"
-          rc=$(_autolint_merge_rc "$rc" "$?")
-        done
-      else
-        rc=$(_autolint_merge_rc "$rc" "$plan_rc")
+      # A multi-input/jobs>1 operation cannot know how many plans are nonempty
+      # until the registry returns, so its validated group owns the complete
+      # planner-through-linter pipeline. One-file and jobs=1 calls retain their
+      # direct signal behavior without installing managed cancellation traps.
+      local plan_dir="" allocation_rc=0 run_rc=0 file_rc=0 cleanup_rc=0
+      local managed_parallel=0
+      local saved_hup saved_int saved_term
+      local _autolint_signal_status=0 _autolint_cancel_status=0
+      local _autolint_parallel_validated=0
+
+      if [ "$jobs" -gt 1 ] && [ "${#lint_files[@]}" -gt 1 ]; then
+        managed_parallel=1
+        saved_hup=$(trap -p HUP)
+        saved_int=$(trap -p INT)
+        saved_term=$(trap -p TERM)
+        trap '_autolint_record_signal 129' HUP
+        trap '_autolint_record_signal 130' INT
+        trap '_autolint_record_signal 143' TERM
       fi
-      [ -n "$plan_dir" ] && rm -rf "$plan_dir"
+      plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-plans.XXXXXX") || allocation_rc=125
+      if [ "$allocation_rc" -eq 0 ]; then
+        if [ "$managed_parallel" -eq 1 ]; then
+          if [ "$_autolint_signal_status" -eq 0 ]; then
+            if _autolint_run_parallel_supervised \
+              "$jobs" "$plan_dir" "${lint_files[@]}"; then
+              run_rc=0
+            else
+              run_rc=$?
+            fi
+            if [ "$_autolint_signal_status" -ne 0 ]; then
+              rc=$_autolint_signal_status
+            elif [ "$_autolint_parallel_validated" -eq 1 ]; then
+              rc=$(_autolint_merge_rc "$rc" "$run_rc")
+            else
+              # Restricted hosts without complete cancellation prerequisites
+              # retain a direct sequential pipeline and exact scratch cleanup.
+              # They do not claim the parent-only descendant guarantee.
+              if _autolint_run_read_only_pipeline \
+                "$plan_dir" "$jobs" 0 "${lint_files[@]}"; then
+                run_rc=0
+              else
+                run_rc=$?
+              fi
+              rc=$(_autolint_merge_rc "$rc" "$run_rc")
+            fi
+          fi
+        else
+          if _autolint_run_read_only_pipeline \
+            "$plan_dir" "$jobs" 0 "${lint_files[@]}"; then
+            run_rc=0
+          else
+            run_rc=$?
+          fi
+          rc=$(_autolint_merge_rc "$rc" "$run_rc")
+        fi
+
+        if rm -rf "$plan_dir"; then
+          cleanup_rc=0
+        else
+          cleanup_rc=$?
+        fi
+        if [ "$managed_parallel" -eq 1 ]; then
+          # A terminal-group signal can stop the foreground rm before Bash runs
+          # our deferred trap. Freeze dispositions only after that trap can
+          # latch, then retry the same private path under ignored signals.
+          trap '' HUP INT TERM
+        fi
+        if [ -e "$plan_dir" ]; then
+          if rm -rf "$plan_dir"; then
+            cleanup_rc=0
+          else
+            cleanup_rc=$?
+          fi
+        fi
+        if [ -e "$plan_dir" ]; then
+          echo "autolint: could not remove registry plan temp directory" >&2
+          cleanup_rc=125
+        else
+          cleanup_rc=0
+        fi
+        if [ "$managed_parallel" -eq 1 ] &&
+          [ "$_autolint_signal_status" -ne 0 ]; then
+          rc=$_autolint_signal_status
+        elif [ "$cleanup_rc" -ne 0 ]; then
+          rc=$(_autolint_merge_rc "$rc" "$cleanup_rc")
+        fi
+        if [ "$managed_parallel" -eq 1 ]; then
+          _autolint_restore_signal_traps "$saved_hup" "$saved_int" "$saved_term"
+        fi
+      else
+        if [ "$managed_parallel" -eq 0 ] ||
+          [ "$_autolint_signal_status" -eq 0 ]; then
+          # Scratch allocation failed. Preserve the existing per-file fallback,
+          # retaining the managed scope's latch until no later file can launch.
+          for file in "${lint_files[@]}"; do
+            if [ "$managed_parallel" -eq 1 ] &&
+              [ "$_autolint_signal_status" -ne 0 ]; then
+              break
+            fi
+            if _lint_one "$file"; then
+              file_rc=0
+            else
+              file_rc=$?
+            fi
+            if [ "$managed_parallel" -eq 1 ] &&
+              [ "$_autolint_signal_status" -ne 0 ]; then
+              break
+            fi
+            rc=$(_autolint_merge_rc "$rc" "$file_rc")
+          done
+        fi
+        if [ "$managed_parallel" -eq 1 ]; then
+          trap '' HUP INT TERM
+          [ "$_autolint_signal_status" -eq 0 ] || rc=$_autolint_signal_status
+          _autolint_restore_signal_traps "$saved_hup" "$saved_int" "$saved_term"
+        fi
+      fi
     fi
   fi
 
