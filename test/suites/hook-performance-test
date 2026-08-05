@@ -165,6 +165,8 @@ for index in {0..299}; do
   supported_batch+=("$batch_file")
 done
 host_ps=$(command -v ps || true)
+procfs_available=0
+[[ -r "/proc/${BASHPID:-$$}/stat" ]] && procfs_available=1
 
 hook_path=$(_mock_bin)
 hook_tools=(awk bash cat dirname getconf mkdir mktemp python3 rm sleep)
@@ -320,7 +322,7 @@ CHECKRUN_LINTER_LOG="$linter_log" \
   "$AUTOLINT" "${supported_batch[@]}"
 rc=$?
 _assert_exit "supported lint batch: clean files exit 0" 0 "$rc"
-if [[ -n "$host_ps" ]]; then
+if [[ -n "$host_ps" || "$procfs_available" -eq 1 ]]; then
   _assert_eq "supported lint batch: Typos uses five bounded commands for 300 files" 5 \
     "$(grep -c '^typos$' "$linter_log")"
   _assert_eq "supported lint batch: Ruff uses five bounded commands for 300 files" 5 \
@@ -561,7 +563,7 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
   _assert_perf_result "20-file unsupported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
 
-  if [[ -n "$host_ps" ]]; then
+  if [[ -n "$host_ps" || "$procfs_available" -eq 1 ]]; then
     default_perf_runs=$CHECKRUN_HOOK_PERF_RUNS
     CHECKRUN_HOOK_PERF_RUNS=$CHECKRUN_SUPPORTED_BATCH_RUNS
     perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
@@ -576,7 +578,7 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
       "$median_budget_ms" "$p95_budget_ms"
     CHECKRUN_HOOK_PERF_RUNS=$default_perf_runs
   else
-    echo "  - skipping supervised 300-file performance assertion (ps unavailable)"
+    echo "  - skipping supervised 300-file performance assertion (no procfs or ps)"
   fi
 fi
 

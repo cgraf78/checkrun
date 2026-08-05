@@ -650,20 +650,6 @@ _autolint_read_proc_group() {
   printf -v "$output_name" '%s' "$group"
 }
 
-_autolint_group_has_live_processes() {
-  local group="$1" snapshot rc
-  snapshot=$(LC_ALL=C ps -eo pgid=,stat= 2>/dev/null) || return 2
-  awk -v group="$group" '
-    $1 == group && $2 !~ /^[ZX]/ { found = 1 }
-    END { exit !found }
-  ' <<<"$snapshot"
-  rc=$?
-  case "$rc" in
-    0 | 1) return "$rc" ;;
-    *) return 2 ;;
-  esac
-}
-
 _autolint_stop_unvalidated_leader() {
   local leader="$1" attempt
   case "$leader" in
@@ -682,7 +668,7 @@ _autolint_stop_unvalidated_leader() {
 
 _autolint_cancel_private_group() {
   local leader="$1" group="$2" done_file="$3" exited_file="$4"
-  local attempt group_state live=1
+  local attempt
 
   trap '' HUP INT TERM
   if [ -e "$done_file" ]; then
@@ -690,10 +676,11 @@ _autolint_cancel_private_group() {
     return 0
   fi
   kill -TERM "-$group" 2>/dev/null || true
-  # On cancellation, the supervisor suppresses its normal done marker but still
-  # publishes exited after shielding and reaping every exact worker. Poll that
-  # cheap condition first; inspect the complete group once afterward so an
-  # ignored TERM or surviving descendant cannot hide behind the direct workers.
+  # On cancellation, the supervisor suppresses its normal done marker, reaps
+  # every exact worker, publishes exited, and then remains alive as the private
+  # group's PID anchor. Give cooperative cleanup a short grace before escalating
+  # the still-validated group; no process-table scan or reusable bare PGID is
+  # involved.
   for ((attempt = 0; attempt < 20; attempt++)); do
     [ -e "$exited_file" ] && break
     sleep 0.01
@@ -702,19 +689,40 @@ _autolint_cancel_private_group() {
     wait "$leader" 2>/dev/null || true
     return 0
   fi
-  if _autolint_group_has_live_processes "$group"; then
-    live=1
-  else
-    group_state=$?
-    # A failed process-table snapshot is unknown, not proof of completion.
-    # The validated group is still anchored by the exact unwaited leader, so
-    # conservative escalation is safer than blocking forever on a survivor.
-    [ "$group_state" -eq 1 ] && live=0 || live=1
-  fi
-  if [ "$live" -ne 0 ]; then
-    kill -KILL "-$group" 2>/dev/null || true
-  fi
+  kill -KILL "-$group" 2>/dev/null || true
   wait "$leader" 2>/dev/null || true
+}
+
+_autolint_finish_parallel_supervisor() {
+  local parent_pid="$1" gate="$2" done_file="$3" exited_file="$4" attempt
+
+  : >"$exited_file" 2>/dev/null || true
+  if [ "${_autolint_cancel_status:-0}" -eq 0 ]; then
+    : >"$done_file" 2>/dev/null || true
+    return 0
+  fi
+  # The parent creates the gate only after proving that this exact process owns
+  # a private group. A rejected candidate must exit directly so capability
+  # fallback never signals or waits on an unvalidated group.
+  [ -d "$gate" ] || return 0
+
+  # Keep the exact PID and private PGID allocated until the parent performs its
+  # bounded escalation. This closes the gap where Bash retained wait status for
+  # an already-reaped leader while the numeric PGID became reusable.
+  trap '' HUP INT TERM
+  # A signal can land after the parent's final latch check but immediately
+  # before `wait`. Re-deliver the already-latched signal so that exact wait is
+  # interrupted and the parent reaches group escalation instead of deadlocking
+  # with this identity hold.
+  case "${_autolint_cancel_status:-0}" in
+    129) kill -HUP "$parent_pid" 2>/dev/null || true ;;
+    130) kill -INT "$parent_pid" 2>/dev/null || true ;;
+    143) kill -TERM "$parent_pid" 2>/dev/null || true ;;
+  esac
+  for ((attempt = 0; attempt < 200; attempt++)); do
+    kill -0 "$parent_pid" 2>/dev/null || return 0
+    sleep 0.01
+  done
 }
 
 _autolint_count_nonempty_plans() {
@@ -815,7 +823,7 @@ _autolint_run_parallel_supervised() {
 
   _autolint_parallel_validated=0
   [ "${_autolint_signal_status:-0}" -eq 0 ] || return "$_autolint_signal_status"
-  for tool in mkdir ps sleep; do
+  for tool in mkdir sleep; do
     command -v "$tool" >/dev/null 2>&1 || return 0
   done
   mkdir "$control_dir" 2>/dev/null || return 0
@@ -833,10 +841,10 @@ _autolint_run_parallel_supervised() {
     set +m
     trap - EXIT
     _autolint_cancel_status=0
-    # done retains its stronger normal-completion meaning. exited is also
-    # published after cancellation because exact worker reaping shields later
-    # signals; the parent still performs one authoritative group liveness scan.
-    trap ': >"$exited_file" 2>/dev/null || true; if [ "${_autolint_cancel_status:-0}" -eq 0 ]; then : >"$done_file" 2>/dev/null || true; fi' EXIT
+    # done retains its stronger normal-completion meaning. On cancellation the
+    # EXIT handler publishes exited, then holds the validated group identity
+    # stable until its parent performs bounded escalation.
+    trap '_autolint_finish_parallel_supervisor "$parent_pid" "$gate" "$done_file" "$exited_file"' EXIT
     _autolint_parallel_supervisor \
       "$gate" "$parent_pid" "$jobs" "$plan_dir" "$@"
   ) </dev/null &

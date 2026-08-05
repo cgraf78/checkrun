@@ -16,7 +16,7 @@ _require_compatible_libc "autolint-cancellation-test"
 # their real process semantics. Minimal containers may omit procps entirely;
 # skip there instead of passing Python a non-string environment value and
 # misreporting every scenario as a product failure.
-for _required_tool in awk ps mktemp mkdir rm; do
+for _required_tool in ps mktemp mkdir rm; do
   if ! command -v "$_required_tool" >/dev/null 2>&1; then
     echo "SKIP: autolint-cancellation-test (requires $_required_tool)"
     exit 0
@@ -37,11 +37,6 @@ SH
 cat >"$_tool_bin/typos" <<'SH'
 #!/usr/bin/env bash
 exit 0
-SH
-cat >"$_tool_bin/awk" <<'SH'
-#!/usr/bin/env bash
-printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/awk-calls"
-exec "$AUTOLINT_CANCEL_REAL_AWK" "$@"
 SH
 cat >"$_tool_bin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -75,13 +70,6 @@ if [ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = pgid= ] && [ "$3" = -p ]; then
   exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
 fi
 printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/ps-calls"
-if [ "$#" -eq 2 ] && [ "$1" = -eo ] && [ "$2" = pgid=,stat= ]; then
-  for marker in "$AUTOLINT_CANCEL_ROOT"/tmp/autolint-plans.*/.supervisor/exited; do
-    [ -e "$marker" ] || continue
-    printf 'called\n' >>"$AUTOLINT_CANCEL_ROOT/exited-before-scan"
-  done
-fi
-[ "${AUTOLINT_CANCEL_PS_FAIL:-0}" -eq 0 ] || exit 1
 exec "$AUTOLINT_CANCEL_REAL_PS" "$@"
 SH
 cat >"$_tool_bin/slow-planner" <<'PY'
@@ -174,7 +162,7 @@ with (root / "backend-completion-order").open("a", encoding="ascii") as stream:
 (root / f"backend-{index}.done").touch(exist_ok=False)
 raise SystemExit(int(os.environ.get(f"AUTOLINT_CANCEL_EXIT_{index}", "0")))
 PY
-chmod +x "$_tool_bin/yq" "$_tool_bin/typos" "$_tool_bin/awk" "$_tool_bin/ps" \
+chmod +x "$_tool_bin/yq" "$_tool_bin/typos" "$_tool_bin/ps" \
   "$_tool_bin/slow-planner" "$_tool_bin/fallback-worker" \
   "$_tool_bin/shellcheck"
 
@@ -207,6 +195,8 @@ case "$mode" in
       fi
       builtin command "$@"
     }
+    _autolint_read_proc_group() { return 1; }
+    ps() { return 127; }
     ;;
   allocation-fallback)
     mktemp() {
@@ -231,6 +221,8 @@ case "$mode" in
       fi
       builtin command "$@"
     }
+    _autolint_read_proc_group() { return 1; }
+    ps() { return 127; }
     ;;
   allocation-signal)
     mktemp() {
@@ -366,6 +358,18 @@ case "$mode" in
     ;;
   malformed-pgid)
     _autolint_read_proc_group() { return 1; }
+    ;;
+  repeat)
+    kill() {
+      local group
+      if [ "${1:-}" = -KILL ] && [[ "${2:-}" == -[1-9]* ]]; then
+        group=${2#-}
+        if builtin kill -0 "$group" 2>/dev/null; then
+          : >"$root/group-kill-anchored"
+        fi
+      fi
+      builtin kill "$@"
+    }
     ;;
   wave)
     _autolint_supports_pool() { return 1; }
@@ -518,13 +522,11 @@ case = {
     "direct-one-signal": ("direct-one-signal", 1, 2, 143),
     "direct-jobs-one-signal": ("direct-jobs-one-signal", 2, 1, 143),
     "signal": ("normal", 2, 2, 128 + getattr(signal, f"SIG{signal_name}")),
-    "repeat": ("normal", 2, 2, 143),
-    "inspect-failure": ("normal", 2, 2, 143),
+    "repeat": ("repeat", 2, 2, 143),
 }[scenario]
 mode, count, jobs, expected_status = case
 env = os.environ.copy()
 env["PATH"] = tool_bin + os.pathsep + env["PATH"]
-env["AUTOLINT_CANCEL_REAL_AWK"] = shutil.which("awk")
 env["AUTOLINT_CANCEL_REAL_PS"] = shutil.which("ps")
 env["AUTOLINT_CANCEL_REAL_MKTEMP"] = shutil.which("mktemp")
 env["AUTOLINT_CANCEL_REAL_MKDIR"] = shutil.which("mkdir")
@@ -535,10 +537,8 @@ if scenario == "precedence":
     env["AUTOLINT_CANCEL_EXIT_0"] = "1"
     env["AUTOLINT_CANCEL_EXIT_1"] = "2"
     env["AUTOLINT_CANCEL_EXIT_2"] = "125"
-if scenario in ("inspect-failure", "repeat"):
+if scenario == "repeat":
     env["AUTOLINT_CANCEL_IGNORE_TERM"] = "1"
-if scenario == "inspect-failure":
-    env["AUTOLINT_CANCEL_PS_FAIL"] = "1"
 if scenario == "shared-pgid":
     env["AUTOLINT_CANCEL_PGID_SNAPSHOT"] = "shared"
 if scenario == "malformed-pgid":
@@ -643,7 +643,7 @@ try:
             lambda: all((root / f"backend-{index}.ready").is_file() for index in range(count)),
             "all parallel backends",
         )
-        if scenario in ("inspect-failure", "signal", "repeat"):
+        if scenario in ("signal", "repeat"):
             os.kill(process.pid, getattr(signal, f"SIG{signal_name}"))
             if scenario == "repeat":
                 wait_for(
@@ -712,7 +712,6 @@ try:
     if not direct_signal and scenario not in (
         "allocation-fallback-signal", "allocation-signal", "monitor", "planner-signal",
         "direct-one-signal", "direct-jobs-one-signal", "pre-wait-signal", "signal", "repeat",
-        "inspect-failure"
     ):
         expected_output = [f"backend:{index}" for index in range(count)]
         if stdout.splitlines() != expected_output:
@@ -780,11 +779,11 @@ try:
             raise RuntimeError(f"unexpected failed-cleanup scratch: {scratch!r}")
     elif not direct_signal and any((root / "tmp").iterdir()):
         raise RuntimeError("owned scratch remains")
+    if scenario == "repeat" and not (root / "group-kill-anchored").is_file():
+        raise RuntimeError("private-group escalation ran without its leader anchor")
     ps_calls = (root / "ps-calls").read_text(encoding="ascii").splitlines() \
         if (root / "ps-calls").exists() else []
-    expected_ps_calls = 1 if scenario in (
-        "inspect-failure", "planner-signal", "pre-wait-signal", "repeat", "signal"
-    ) else 0
+    expected_ps_calls = 0
     if len(ps_calls) != expected_ps_calls:
         observed_states = {
             path.name: process_state(int(path.read_text(encoding="ascii")))
@@ -821,23 +820,11 @@ try:
     ).splitlines() if (root / "combined-pgid-format-calls").exists() else []
     if combined_pgid_calls:
         raise RuntimeError("PGID validation used the ambiguous combined BSD ps format")
-    if scenario == "signal" and not (root / "exited-before-scan").exists():
-        raise RuntimeError("cooperative cancellation reached its group scan without quiescing")
     legacy_pgid_calls = (root / "legacy-pgid-calls").read_text(
         encoding="ascii"
     ).splitlines() if (root / "legacy-pgid-calls").exists() else []
     if legacy_pgid_calls:
         raise RuntimeError(f"legacy PGID lookups remain: {legacy_pgid_calls!r}")
-    awk_calls = (root / "awk-calls").read_text(encoding="ascii").splitlines() \
-        if (root / "awk-calls").exists() else []
-    # Cancellation's one full-group liveness scan still uses awk. PGID
-    # validation itself must add no awk process beyond that established scan.
-    expected_awk_calls = 0 if scenario == "inspect-failure" else expected_ps_calls
-    if len(awk_calls) != expected_awk_calls:
-        raise RuntimeError(
-            f"awk calls {len(awk_calls)}, expected {expected_awk_calls}"
-        )
-
     for index in range(count):
         pid_path = root / f"backend-{index}.pid"
         worker_path = root / f"worker-{index}.pid"
@@ -865,7 +852,7 @@ try:
         raise RuntimeError(f"owned process survived: {live_remaining!r}")
     if zombie_remaining and not direct_signal:
         raise RuntimeError(f"owned zombie was not reaped: {zombie_remaining!r}")
-    if scenario in ("inspect-failure", "signal", "repeat") and not all(
+    if scenario in ("signal", "repeat") and not all(
         (root / f"backend-{index}.term").is_file() for index in range(count)
     ):
         raise RuntimeError("owned backend did not observe cooperative TERM")
@@ -967,7 +954,6 @@ _run_case "parent-only HUP cancels the complete backend group" signal HUP
 _run_case "parent-only INT cancels the complete backend group" signal INT
 _run_case "parent-only TERM cancels the complete backend group" signal TERM
 _run_case "first signal wins while stubborn backends escalate" repeat TERM
-_run_case "failed survivor scan still kills stubborn backends" inspect-failure TERM
 
 set +e
 # shellcheck disable=SC2016 # This program is evaluated by the selected Bash.
