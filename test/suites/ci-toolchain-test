@@ -11,6 +11,8 @@ python3 "$repo_root/.github/scripts/verify_mise_lock.py" \
 python3 - \
   "$repo_root/.github/scripts/verify_mise_lock.py" \
   "$repo_root/.github/workflows/test.yml" \
+  "$repo_root/.github/workflows/retry-infrastructure.yml" \
+  "$repo_root/.github/cgraf78-actions.lock" \
   "$repo_root/.github/workflows/update-mise-lock.yml" <<'PY'
 from __future__ import annotations
 
@@ -23,7 +25,18 @@ from pathlib import Path
 script = Path(sys.argv[1])
 workflow_path = Path(sys.argv[2])
 workflow = workflow_path.read_text(encoding="utf-8")
-update_workflow_path = Path(sys.argv[3])
+retry_workflow_path = Path(sys.argv[3])
+retry_workflow = retry_workflow_path.read_text(encoding="utf-8")
+lock_path = Path(sys.argv[4])
+if not lock_path.is_file() or lock_path.is_symlink():
+    raise AssertionError("cgraf78/actions lock is missing")
+lock_text = lock_path.read_text(encoding="utf-8")
+if re.fullmatch(r"[0-9a-f]{40}\n", lock_text) is None:
+    raise AssertionError(
+        "cgraf78/actions lock must contain one lowercase full commit SHA"
+    )
+actions_sha = lock_text[:-1]
+update_workflow_path = Path(sys.argv[5])
 update_workflow = update_workflow_path.read_text(encoding="utf-8")
 spec = importlib.util.spec_from_file_location("verify_mise_lock", script)
 if spec is None or spec.loader is None:
@@ -111,12 +124,11 @@ def step_block(source: str, name: str) -> str:
 
 
 shell_job = job_block(workflow, "shell")
-workflow_refs = re.findall(
-    r"uses: cgraf78/actions/\.github/workflows/shell-ci\.yml@([0-9a-f]{40})",
-    workflow,
-)
-if len(workflow_refs) != 1:
-    raise AssertionError("shell workflow must use one immutable revision")
+if "branches: [main]" not in workflow:
+    raise AssertionError("push CI must target only the maintained main branch")
+shell_ref = f"uses: cgraf78/actions/.github/workflows/shell-ci.yml@{actions_sha}"
+if shell_job.count(shell_ref) != 1:
+    raise AssertionError("shell workflow must use the locked actions revision")
 if not (workflow_path.parents[2] / "test/shellcheck-files.txt").is_file():
     raise AssertionError("shared ShellCheck inventory is missing")
 if "setup: checkrun" not in shell_job:
@@ -125,6 +137,31 @@ if "shellcheck-inventory-path: test/shellcheck-files.txt" not in shell_job:
     raise AssertionError("main shell job must include the shared ShellCheck gate")
 if "test-command: test/checkrun-test" not in shell_job:
     raise AssertionError("main shell job must run the complete repository suite")
+
+actions_sync_job = job_block(workflow, "actions-sync")
+for contract in [
+    "name: cgraf78/actions sync",
+    "runs-on: ubuntu-24.04",
+    "contents: read",
+    "persist-credentials: false",
+    (
+        "uses: cgraf78/actions/.github/actions/verify-consumer-sync@"
+        f"{actions_sha}"
+    ),
+]:
+    if contract not in actions_sync_job:
+        raise AssertionError(f"actions sync job must include {contract}")
+checkout_lines = [
+    line
+    for line in actions_sync_job.splitlines()
+    if re.fullmatch(r"      - uses: actions/checkout@[0-9a-f]{40}(?: # .+)?", line)
+]
+if len(checkout_lines) != 1:
+    raise AssertionError("actions sync job must use one immutable checkout revision")
+
+retry_ref = f"uses: cgraf78/actions/.github/actions/infra-retry@{actions_sha}"
+if retry_workflow.count(retry_ref) != 1:
+    raise AssertionError("infrastructure retry must use the locked actions revision")
 
 publish_job = job_block(update_workflow, "publish")
 mise_refs = re.findall(r"uses: jdx/mise-action@([0-9a-f]{40})", update_workflow)
