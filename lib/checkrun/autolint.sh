@@ -579,6 +579,9 @@ _autolint_run_files_pool() {
 
 _autolint_record_signal() {
   local status="$1" first=0
+  # The first terminal signal is the operation result. Keep both latches
+  # monotonic: later delivery during cleanup must not replace the caller-facing
+  # status or restart descendant cancellation with a different reason.
   if [ "${_autolint_signal_status:-0}" -eq 0 ]; then
     _autolint_signal_status=$status
     first=1
@@ -599,6 +602,9 @@ _autolint_record_signal() {
 
 _autolint_restore_signal_traps() {
   local saved_hup="$1" saved_int="$2" saved_term="$3"
+  # `trap -p` returns re-evaluable Bash source with the original handler safely
+  # quoted. Evaluate that exact form so arbitrary caller traps survive intact;
+  # an empty saved value means the caller had the default disposition.
   eval "${saved_hup:-trap - HUP}"
   eval "${saved_int:-trap - INT}"
   eval "${saved_term:-trap - TERM}"
@@ -710,6 +716,10 @@ _autolint_read_proc_group() {
   esac
   [ -r "/proc/$pid/stat" ] || return 1
   IFS= read -r stat <"/proc/$pid/stat" || return 1
+  # The parenthesized comm field can itself contain spaces and `)`. Strip
+  # through the final `) ` delimiter before reading state, PPID, and PGID;
+  # ambiguous metadata must reject this snapshot so the caller can fall back or
+  # decline group signalling instead of guessing.
   case "$stat" in
     "$pid ("*") "*) ;;
     *) return 1 ;;
@@ -732,6 +742,9 @@ _autolint_read_process_parent() {
 
   if [ -r "/proc/$pid/stat" ]; then
     IFS= read -r stat <"/proc/$pid/stat" || return 1
+    # Match the rightmost comm delimiter for the same reason as the PGID reader.
+    # Parent identity controls when an anchored PGID may be released, so a
+    # surprising process name must fail closed rather than shift the PPID field.
     case "$stat" in
       "$pid ("*") "*) ;;
       *) return 1 ;;
@@ -759,6 +772,10 @@ _autolint_stop_unvalidated_leader() {
   case "$leader" in
     '' | 0 | *[!0-9]*) return 0 ;;
   esac
+  # The gate is still closed, so this exact Bash job cannot own planners or
+  # workers yet, and its group identity has not been proved safe to signal.
+  # Stop only the captured child PID, give it a short cooperative grace, then
+  # KILL and exact-wait it so fallback cannot inherit an orphan or zombie.
   kill -TERM "$leader" 2>/dev/null || true
   for ((attempt = 0; attempt < 20; attempt++)); do
     kill -0 "$leader" 2>/dev/null || break
@@ -994,6 +1011,10 @@ _autolint_parallel_supervisor() {
   local rc=0 _autolint_signal_status=0
   local -a files=("$@")
 
+  # Install handlers before observing the gate so cancellation cannot be lost
+  # during parent-side validation. The directory is the authority to begin
+  # work; before it exists, parent liveness only prevents a stranded candidate
+  # and does not authorize this child to create descendants.
   trap '_autolint_record_signal 129' HUP
   trap '_autolint_record_signal 130' INT
   trap '_autolint_record_signal 143' TERM
@@ -1028,6 +1049,10 @@ _autolint_run_parallel_supervised() {
   local _autolint_active_group="" _autolint_active_done_file=""
   local REPLY=""
 
+  # Until this function sets `_autolint_parallel_validated`, a zero return means
+  # the host could not safely provide supervised cancellation, not that linting
+  # completed. The caller uses the flag to clean up, restore its traps, and run
+  # the foreground fallback outside this managed scope.
   _autolint_parallel_validated=0
   [ "${_autolint_signal_status:-0}" -eq 0 ] || return "$_autolint_signal_status"
   for tool in mkdir sleep; do
@@ -1050,7 +1075,13 @@ _autolint_run_parallel_supervised() {
     return 0
   fi
   (
+    # Parent monitor mode exists only to create this one private process group.
+    # Disable it in the supervisor so every planner and worker inherits that
+    # validated PGID and one group signal covers the complete descendant tree.
     set +m
+    # A sourced caller may own an EXIT trap, but this child must publish only its
+    # supervisor lifecycle markers. Replace any inherited EXIT behavior before
+    # installing the anchor-aware handler below.
     trap - EXIT
     # shellcheck disable=SC2030 # This reset intentionally belongs only to the supervisor copy.
     _autolint_cancel_status=0
@@ -1265,6 +1296,9 @@ _autolint_main() {
 
       if [ "$jobs" -gt 1 ] && [ "${#lint_files[@]}" -gt 1 ]; then
         managed_parallel=1
+        # Managed semantics begin before scratch allocation: a signal during
+        # mktemp, validation, or cleanup must be latched as the operation result,
+        # and fallback must not run until the exact caller traps are restored.
         saved_hup=$(trap -p HUP)
         saved_int=$(trap -p INT)
         saved_term=$(trap -p TERM)

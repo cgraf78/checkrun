@@ -243,6 +243,9 @@ case "$mode" in
         _autolint_cleanup_attempt=$((_autolint_cleanup_attempt + 1))
         printf '%s\n' "$_autolint_cleanup_attempt" >>"$root/cleanup-attempts"
         if [ "$_autolint_cleanup_attempt" -eq 1 ]; then
+          # Give the harness a live child wait to interrupt with a terminal-group
+          # signal. A fast real rm would not prove that active cleanup returns
+          # the signal status which drives the managed retry.
           sleep 30 &
           cleanup_child=$!
           printf '%s\n' "$cleanup_child" >"$root/cleanup-child.pid"
@@ -269,6 +272,9 @@ case "$mode" in
           return 73
         fi
         if [ "$_autolint_cleanup_attempt" -eq 2 ]; then
+          # Publish readiness only from inside the retry, then hold until the
+          # managed handler records TERM. This pins the signal to the retry
+          # window instead of merely observing it before or after cleanup.
           : >"$root/cleanup-retry-ready"
           while [ "${_autolint_signal_status:-0}" -eq 0 ]; do
             sleep 0.01
@@ -358,6 +364,10 @@ case "$mode" in
       for arg in "$@"; do
         case "$arg" in
           */.supervisor/gate)
+            # The real mkdir above creates the gate; wait until authorized work
+            # is visible before returning failure. This models mkdir succeeding at the
+            # filesystem boundary but reporting interruption, where exact-PID
+            # cleanup would miss descendants and the validated group must win.
             while [ ! -e "$root/gate-visible-worker.ready" ]; do
               sleep 0.01
             done
@@ -419,6 +429,9 @@ case "$mode" in
       rc=$?
       for arg in "$@"; do
         case "$arg" in
+          # The real mkdir already released the child. Hold the parent here so
+          # a fast supervisor can finish while notifications are disabled;
+          # restoring monitor mode later must not emit a stale job message.
           */.supervisor/gate) sleep 0.1 ;;
         esac
       done
@@ -446,6 +459,9 @@ case "$mode" in
     _autolint_restore_signal_traps() {
       local saved_hup="$1" saved_int="$2" saved_term="$3"
       if [ ! -e "$root/restore-signal" ]; then
+        # Inject before evaluating the saved handlers. The managed TERM trap must
+        # still own this boundary so the operation records cancellation instead
+        # of invoking the caller trap halfway through restoration.
         : >"$root/restore-signal"
         kill -TERM "$AUTOLINT_CANCEL_PARENT_PID"
       fi
