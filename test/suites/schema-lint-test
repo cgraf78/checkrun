@@ -17,6 +17,7 @@ _require_compatible_libc "schema-lint-test"
 SCRIPT="$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema-lint.py"
 POLICY_SCRIPT="$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema_policy.py"
 POLICY_SCHEMA="$CHECKRUN_REPO_ROOT/share/checkrun/schemas/associations.schema.json"
+SHFMT_SCHEMA="$CHECKRUN_REPO_ROOT/share/checkrun/schemas/shfmt-config.schema.json"
 
 echo "=== schema-lint: public schema API ==="
 
@@ -118,6 +119,39 @@ PY
   _assert_exit "policy schema: control-character mutations match runtime behavior" 0 "$?"
 else
   echo "  SKIP: policy schema behavioral parity (jsonschema and uv unavailable)"
+fi
+
+echo "=== schema-lint: Checkrun-owned config schemas ==="
+
+_assert_file_exists "shfmt config schema: repo schema file is tracked" "$SHFMT_SCHEMA"
+if [[ "${#_schema_python[@]}" -gt 0 ]]; then
+  "${_schema_python[@]}" - "$SHFMT_SCHEMA" <<'PY'
+import json
+import sys
+
+import jsonschema
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    schema = json.load(handle)
+
+validator_cls = jsonschema.validators.validator_for(schema)
+validator_cls.check_schema(schema)
+validator = validator_cls(schema)
+
+assert not list(
+    validator.iter_errors({"indent": 2, "switch_case_indent": True})
+)
+for invalid in (
+    {"indent": -1},
+    {"indent": 1.5},
+    {"switch_case_indent": "true"},
+    {"unknown": True},
+):
+    assert list(validator.iter_errors(invalid)), invalid
+PY
+  _assert_exit "shfmt config schema: accepts supported values and rejects drift" 0 "$?"
+else
+  echo "  SKIP: shfmt config schema validation (jsonschema and uv unavailable)"
 fi
 
 echo "=== schema-lint: policy matching and diagnostics ==="

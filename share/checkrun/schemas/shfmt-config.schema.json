@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cgraf78.github.io/checkrun/schemas/shfmt-config.schema.json",
+  "title": "Checkrun shfmt fallback configuration",
+  "description": "Configuration that Checkrun translates into shfmt command-line options when a project has no EditorConfig.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "indent": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Indent width passed to shfmt; zero selects tabs."
+    },
+    "switch_case_indent": {
+      "type": "boolean",
+      "description": "Whether shfmt should indent switch case bodies."
+    }
+  }
+}
