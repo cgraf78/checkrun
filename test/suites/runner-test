@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# Verify the bounded suite runner preserves results and owns its descendants.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+echo "=== parallel suite runner ==="
+
+_runner_process_state() {
+  local pid="$1" stat_line
+
+  # BusyBox ps does not support GNU's `-o stat= -p PID` form. Linux procfs is
+  # both cheaper and unambiguous there; retain ps for macOS and other hosts
+  # without procfs. Strip through the final `) ` because comm may contain
+  # spaces or parentheses before the state field.
+  if [[ -r "/proc/$pid/stat" ]]; then
+    IFS= read -r stat_line <"/proc/$pid/stat" || return 0
+    stat_line=${stat_line##*) }
+    printf '%s\n' "${stat_line%% *}"
+    return 0
+  fi
+  ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }'
+}
+
+fixture=$(_tmpdir)
+cat >"$fixture/slow-first" <<'EOF'
+#!/usr/bin/env bash
+sleep 0.1
+printf 'first\n'
+exit 7
+EOF
+cat >"$fixture/fast-second" <<'EOF'
+#!/usr/bin/env bash
+printf 'second\n'
+exit 3
+EOF
+chmod +x "$fixture/slow-first" "$fixture/fast-second"
+
+runner_output=$(CHECKRUN_TEST_JOBS=2 "$CHECKRUN_TEST_DIR/run-suites" \
+  "$fixture/slow-first" "$fixture/fast-second" 2>&1)
+runner_rc=$?
+_assert_exit "runner: preserves the first declared failure" 7 "$runner_rc"
+_assert_eq "runner: replays concurrent output in declared order" \
+  $'first\nsecond' "$runner_output"
+
+# Prove worker overlap by state, not elapsed time: the first suite cannot finish
+# until the second suite runs. A serial implementation deterministically times
+# out, while a loaded parallel host gets the same generous condition budget.
+overlap_marker="$fixture/overlap.ready"
+cat >"$fixture/overlap-first" <<'EOF'
+#!/usr/bin/env bash
+for _ in {1..200}; do
+  if [[ -e "$RUNNER_OVERLAP_MARKER" ]]; then
+    printf 'overlap-first\n'
+    exit 0
+  fi
+  sleep 0.02
+done
+exit 9
+EOF
+cat >"$fixture/overlap-second" <<'EOF'
+#!/usr/bin/env bash
+: >"$RUNNER_OVERLAP_MARKER"
+printf 'overlap-second\n'
+EOF
+chmod +x "$fixture/overlap-first" "$fixture/overlap-second"
+
+runner_output=$(RUNNER_OVERLAP_MARKER="$overlap_marker" CHECKRUN_TEST_JOBS=2 \
+  "$CHECKRUN_TEST_DIR/run-suites" \
+  "$fixture/overlap-first" "$fixture/overlap-second" 2>&1)
+runner_rc=$?
+_assert_exit "runner: configured workers execute concurrently" 0 "$runner_rc"
+_assert_eq "runner: concurrent output remains ordered" \
+  $'overlap-first\noverlap-second' "$runner_output"
+
+successful_child_pid_file="$fixture/successful-child.pid"
+cat >"$fixture/successful-leak" <<'EOF'
+#!/usr/bin/env bash
+sleep 30 &
+child=$!
+printf '%s\n' "$child" >"$RUNNER_CHILD_PID_FILE"
+exit 0
+EOF
+chmod +x "$fixture/successful-leak"
+
+RUNNER_CHILD_PID_FILE="$successful_child_pid_file" CHECKRUN_TEST_JOBS=1 \
+  "$CHECKRUN_TEST_DIR/run-suites" "$fixture/successful-leak" \
+  >/dev/null 2>&1
+runner_rc=$?
+_assert_exit "runner: successful suite status is preserved" 0 "$runner_rc"
+if [[ -s "$successful_child_pid_file" ]]; then
+  successful_child_pid=$(cat "$successful_child_pid_file")
+  successful_child_state=$(_runner_process_state "$successful_child_pid")
+  if kill -0 "$successful_child_pid" 2>/dev/null &&
+    [[ "$successful_child_state" != *Z* ]]; then
+    _fail "runner: successful suite leaves no descendant (pid=$successful_child_pid state=$successful_child_state)"
+    kill -KILL "$successful_child_pid" 2>/dev/null || true
+  else
+    _pass "runner: successful suite leaves no descendant"
+  fi
+else
+  _fail "runner: successful fixture records its child"
+fi
+
+immediate_suite_pid_file="$fixture/immediate-suite.pid"
+cat >"$fixture/immediate-interrupt" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$RUNNER_SUITE_PID_FILE"
+kill -TERM "$PPID"
+sleep 30
+EOF
+chmod +x "$fixture/immediate-interrupt"
+
+RUNNER_SUITE_PID_FILE="$immediate_suite_pid_file" CHECKRUN_TEST_JOBS=1 \
+  "$CHECKRUN_TEST_DIR/run-suites" "$fixture/immediate-interrupt" \
+  >/dev/null 2>&1
+runner_rc=$?
+_assert_exit "runner: suite-triggered immediate TERM is preserved" 143 "$runner_rc"
+if [[ -s "$immediate_suite_pid_file" ]]; then
+  immediate_suite_pid=$(cat "$immediate_suite_pid_file")
+  immediate_suite_state=$(_runner_process_state "$immediate_suite_pid")
+  if kill -0 "$immediate_suite_pid" 2>/dev/null &&
+    [[ "$immediate_suite_state" != *Z* ]]; then
+    _fail "runner: immediate TERM leaves no suite process (pid=$immediate_suite_pid state=$immediate_suite_state)"
+    kill -KILL "$immediate_suite_pid" 2>/dev/null || true
+  else
+    _pass "runner: immediate TERM leaves no suite process"
+  fi
+else
+  _fail "runner: immediate TERM fixture records its suite PID"
+fi
+
+# Multiple active groups must receive TERM as one phase. If cleanup waits for
+# each group serially, the first handler times out before the second sees TERM.
+group_cleanup_dir="$fixture/group-cleanup"
+mkdir -p "$group_cleanup_dir"
+cat >"$fixture/group-one" <<'EOF'
+#!/usr/bin/env bash
+name=${0##*/}
+case "$name" in
+  group-one) own=one peer=two ;;
+  *) own=two peer=one ;;
+esac
+: >"$RUNNER_GROUP_DIR/$own.ready"
+trap '
+  : >"$RUNNER_GROUP_DIR/$own.term"
+  for _ in {1..200}; do
+    [[ -e "$RUNNER_GROUP_DIR/$peer.term" ]] && exit 0
+    sleep 0.02
+  done
+  : >"$RUNNER_GROUP_DIR/$own.timeout"
+  exit 1
+' TERM
+while :; do sleep 1; done
+EOF
+cp "$fixture/group-one" "$fixture/group-two"
+chmod +x "$fixture/group-one" "$fixture/group-two"
+
+RUNNER_GROUP_DIR="$group_cleanup_dir" CHECKRUN_TEST_JOBS=2 \
+  "$CHECKRUN_TEST_DIR/run-suites" \
+  "$fixture/group-one" "$fixture/group-two" >/dev/null 2>&1 &
+runner_pid=$!
+wait_count=0
+while ((wait_count < 200)); do
+  [[ -e "$group_cleanup_dir/one.ready" && -e "$group_cleanup_dir/two.ready" ]] && break
+  sleep 0.01
+  wait_count=$((wait_count + 1))
+done
+if [[ -e "$group_cleanup_dir/one.ready" && -e "$group_cleanup_dir/two.ready" ]]; then
+  kill -TERM "$runner_pid"
+  wait "$runner_pid"
+  runner_rc=$?
+  _assert_exit "runner: multi-group cleanup preserves TERM status" 143 "$runner_rc"
+  if [[ -e "$group_cleanup_dir/one.term" && -e "$group_cleanup_dir/two.term" &&
+    ! -e "$group_cleanup_dir/one.timeout" && ! -e "$group_cleanup_dir/two.timeout" ]]; then
+    _pass "runner: multi-group cleanup signals all workers before waiting"
+  else
+    _fail "runner: multi-group cleanup signals all workers before waiting"
+  fi
+else
+  _fail "runner: multi-group cleanup fixtures become ready"
+  kill -TERM "$runner_pid" 2>/dev/null || true
+  wait "$runner_pid" 2>/dev/null || true
+fi
+
+CHECKRUN_TEST_JOBS=0 "$CHECKRUN_TEST_DIR/run-suites" \
+  "$fixture/slow-first" >/dev/null 2>&1
+_assert_exit "runner: rejects a zero worker count" 2 "$?"
+
+child_pid_file="$fixture/child.pid"
+cat >"$fixture/interrupt" <<'EOF'
+#!/usr/bin/env bash
+sleep 30 &
+child=$!
+printf '%s\n' "$child" >"$RUNNER_CHILD_PID_FILE"
+wait "$child"
+EOF
+chmod +x "$fixture/interrupt"
+
+RUNNER_CHILD_PID_FILE="$child_pid_file" CHECKRUN_TEST_JOBS=1 \
+  "$CHECKRUN_TEST_DIR/run-suites" "$fixture/interrupt" \
+  >/dev/null 2>&1 &
+runner_pid=$!
+wait_count=0
+while ((wait_count < 200)); do
+  [[ -s "$child_pid_file" ]] && break
+  sleep 0.01
+  wait_count=$((wait_count + 1))
+done
+if [[ -s "$child_pid_file" ]]; then
+  child_pid=$(cat "$child_pid_file")
+  kill -TERM "$runner_pid"
+  wait "$runner_pid"
+  runner_rc=$?
+  _assert_exit "runner: preserves TERM status" 143 "$runner_rc"
+
+  wait_count=0
+  while ((wait_count < 200)); do
+    kill -0 "$child_pid" 2>/dev/null || break
+    child_state=$(_runner_process_state "$child_pid")
+    [[ "$child_state" == *Z* ]] && break
+    sleep 0.01
+    wait_count=$((wait_count + 1))
+  done
+  child_state=$(_runner_process_state "$child_pid")
+  if kill -0 "$child_pid" 2>/dev/null && [[ "$child_state" != *Z* ]]; then
+    _fail "runner: TERM leaves no suite descendant (pid=$child_pid state=$child_state)"
+    kill -KILL "$child_pid" 2>/dev/null || true
+  else
+    _pass "runner: TERM leaves no suite descendant"
+  fi
+else
+  _fail "runner: interrupt fixture records its child"
+  kill -TERM "$runner_pid" 2>/dev/null || true
+  wait "$runner_pid" 2>/dev/null || true
+fi
+
+_test_summary

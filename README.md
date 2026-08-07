@@ -96,6 +96,11 @@ full test matrix on its pull request. The manifest and lock are test
 infrastructure for this repo; installed consumers should provide their own
 toolchain through the host environment or integration layer.
 
+`test/checkrun-test` runs independent behavioral suites with four workers by
+default. Set `CHECKRUN_TEST_JOBS` to a positive integer to tune that bound for a
+specific host. Cancellation and hook-latency suites always run alone so faster
+feedback does not weaken their timing and process-lifecycle assertions.
+
 ## Public API
 
 - `bin/checkrun`, `bin/autoformat`, and `bin/autolint` are the PATH-visible

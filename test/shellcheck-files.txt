@@ -17,6 +17,7 @@ program	lib/checkrun/linters/web.sh
 program	share/checkrun/shell.sh
 program	test/checkrun-test
 program	test/helpers.sh
+program	test/run-suites
 program	test/suites/autoformat-test
 program	test/suites/autolint-cancellation-test
 program	test/suites/autolint-test
@@ -30,6 +31,7 @@ program	test/suites/nvim-test
 program	test/suites/path-policy-test
 program	test/suites/registry-launcher-test
 program	test/suites/registry-test
+program	test/suites/runner-test
 program	test/suites/schema-lint-test
 program	test/suites/schema-refresh-test
 program	test/suites/timeout-test
