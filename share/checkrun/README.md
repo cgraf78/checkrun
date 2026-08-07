@@ -11,6 +11,7 @@ Treat them as part of the runtime interface.
 - `schemas/associations.schema.json` validates user schema association files.
 - `schemas/diagnostics.schema.json` validates one JSON-line diagnostic emitted
   by `autolint --json` and consumed by editor integrations.
+- `schemas/shfmt-config.schema.json` validates Checkrun's shfmt fallback TOML.
 - `shell.sh` is a stable loader path for shell integrations. It is intentionally
   small because checkrun behavior lives in `bin/` and `lib/checkrun/`.
 

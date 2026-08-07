@@ -134,6 +134,9 @@ toolchain through the host environment or integration layer.
   newline-delimited diagnostic emitted by `autolint --json`. Editor adapters use
   this producer-owned contract when translating Checkrun diagnostics into their
   native diagnostic APIs.
+- `share/checkrun/schemas/shfmt-config.schema.json` is the JSON Schema for the
+  fallback TOML options that Checkrun translates into shfmt arguments when a
+  project has no EditorConfig.
 - `share/checkrun/shell.sh` is a stable no-op shell loader for integration
   harnesses that source each dependency's shell API uniformly.
 
