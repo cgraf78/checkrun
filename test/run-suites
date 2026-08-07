@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Run independent Checkrun suites concurrently while preserving deterministic
+# output and reliable cleanup. The aggregate test owns policy checks and keeps
+# latency-sensitive suites out of this runner.
+
+set -euo pipefail
+
+jobs=${CHECKRUN_TEST_JOBS:-4}
+case "$jobs" in
+  "" | *[!0-9]* | 0*)
+    printf 'run-suites: CHECKRUN_TEST_JOBS must be a positive integer\n' >&2
+    exit 2
+    ;;
+esac
+
+if (($# == 0)); then
+  exit 0
+fi
+
+suite_files=("$@")
+pids=()
+logs=()
+statuses=()
+run_root=""
+launching_worker=0
+pending_signal=0
+
+suite_groups_alive() {
+  local group
+
+  for group in "$@"; do
+    kill -0 -- "-$group" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+terminate_suite_groups() {
+  local count=0 group
+
+  (($# > 0)) || return 0
+
+  # Every worker is started as a process-group leader below. Signal all owned
+  # groups before waiting so four stubborn workers consume one bounded grace
+  # period, not four serial grace periods during which cleanup ignores Ctrl-C.
+  for group in "$@"; do
+    case "$group" in
+      "" | *[!0-9]*) continue ;;
+    esac
+    kill -TERM -- "-$group" 2>/dev/null || true
+  done
+  while suite_groups_alive "$@" && ((count < 250)); do
+    sleep 0.02
+    count=$((count + 1))
+  done
+  for group in "$@"; do
+    case "$group" in
+      "" | *[!0-9]*) continue ;;
+    esac
+    if kill -0 -- "-$group" 2>/dev/null; then
+      kill -KILL -- "-$group" 2>/dev/null || true
+    fi
+  done
+  count=0
+  while suite_groups_alive "$@" && ((count < 100)); do
+    sleep 0.02
+    count=$((count + 1))
+  done
+}
+
+terminate_suite_group() {
+  terminate_suite_groups "$1"
+}
+
+# shellcheck disable=SC2329 # EXIT and signal traps invoke this function.
+cleanup() {
+  local status=$? pid index
+  local -a active_groups=()
+
+  # Cleanup can take a few seconds when a broken child ignores TERM. Ignore a
+  # repeated terminal signal rather than abandoning the remaining owned groups
+  # halfway through that bounded cleanup.
+  trap - EXIT
+  trap '' HUP INT TERM
+  if ((${#pids[@]} > 0)); then
+    for index in "${!pids[@]}"; do
+      if [[ ! -e "${statuses[$index]}" ]]; then
+        active_groups+=("${pids[$index]}")
+      fi
+    done
+    terminate_suite_groups ${active_groups[@]+"${active_groups[@]}"}
+    for pid in "${pids[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
+  [[ -z "$run_root" ]] || rm -rf -- "$run_root"
+  exit "$status"
+}
+
+# shellcheck disable=SC2329 # Signal traps invoke this function.
+handle_signal() {
+  local status="$1"
+
+  # Bash may run a trap after the background-launch command but before the
+  # following PID registration. Defer exit only across that tiny critical
+  # section so cleanup can see and terminate the newly owned process group.
+  if ((launching_worker)); then
+    pending_signal=$status
+    return 0
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+
+old_umask=$(umask)
+umask 077
+run_root=$(mktemp -d "${TMPDIR:-/tmp}/checkrun-run.XXXXXX") || {
+  umask "$old_umask"
+  exit 1
+}
+umask "$old_umask"
+
+finalize_worker() {
+  local index="$1" wait_for_suite="$2" status=0 status_tmp
+
+  [[ ! -e "${statuses[$index]}" ]] || return 0
+  if [[ "$wait_for_suite" == 1 ]]; then
+    wait "${pids[$index]}" || status=$?
+  elif kill -0 "${pids[$index]}" 2>/dev/null; then
+    return 1
+  else
+    wait "${pids[$index]}" || status=$?
+  fi
+
+  # The worker owns the complete suite process group, even when the suite shell
+  # reports success. A buggy fixture can otherwise exit 0 after orphaning a
+  # timeout sentinel or hook child, contaminating later suites and the caller's
+  # session. For a clean suite the group is already absent and this is a cheap
+  # no-op; for a leak it enforces the runner's ownership boundary.
+  terminate_suite_group "${pids[$index]}"
+  status_tmp="${statuses[$index]}.tmp"
+  printf '%s\n' "$status" >"$status_tmp"
+  mv -f -- "$status_tmp" "${statuses[$index]}"
+  if [[ -t 2 ]]; then
+    printf 'run-suites: completed %s (status %s)\n' \
+      "${suite_files[$index]##*/}" "$status" >&2
+  fi
+}
+
+for index in "${!suite_files[@]}"; do
+  while :; do
+    active=0
+    if ((${#statuses[@]} > 0)); then
+      for prior in "${!statuses[@]}"; do
+        if [[ ! -e "${statuses[$prior]}" ]]; then
+          if ! finalize_worker "$prior" 0; then
+            active=$((active + 1))
+          fi
+        fi
+      done
+    fi
+    if ((active < jobs)); then
+      break
+    fi
+    sleep 0.02
+  done
+
+  log="$run_root/$index.log"
+  status_file="$run_root/$index.status"
+  logs+=("$log")
+  statuses+=("$status_file")
+
+  # Monitor mode makes the suite PID its process-group ID on Bash 3.2 as well
+  # as current Bash. That keeps the cleanup contract portable to stock macOS.
+  launching_worker=1
+  set -m
+  "${suite_files[$index]}" >"$log" 2>&1 &
+  pids+=("$!")
+  set +m
+  launching_worker=0
+  if ((pending_signal)); then
+    exit "$pending_signal"
+  fi
+done
+
+if ((${#pids[@]} > 0)); then
+  for index in "${!pids[@]}"; do
+    finalize_worker "$index" 1 || true
+  done
+fi
+pids=()
+
+# Concurrent workers write only private logs. Replay in the declared suite
+# order so local and CI failures remain deterministic and easy to compare.
+failed=0
+for index in "${!suite_files[@]}"; do
+  cat "${logs[$index]}"
+  status=$(cat "${statuses[$index]}" 2>/dev/null || printf '1\n')
+  case "$status" in
+    "" | *[!0-9]*) status=1 ;;
+  esac
+  if [[ "$status" != 0 && "$failed" == 0 ]]; then
+    failed=$status
+  fi
+done
+
+exit "$failed"

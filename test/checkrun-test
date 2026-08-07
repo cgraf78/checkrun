@@ -5,8 +5,25 @@ set -euo pipefail
 
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
+parallel_suites=()
+exclusive_suites=()
 for suite in "$test_dir"/suites/*-test; do
+  case "${suite##*/}" in
+    autolint-cancellation-test | hook-performance-test | runner-test)
+      # Cancellation and latency suites intentionally assert wall-clock and
+      # signal behavior. Running them beside CPU-heavy suites would trade test
+      # reliability for a misleadingly shorter aggregate time.
+      exclusive_suites+=("$suite")
+      ;;
+    *) parallel_suites+=("$suite") ;;
+  esac
+done
+
+# Run timing and lifecycle-deadline suites before the worker pool so their
+# measured signal is not biased by the CPU and writeback residue of peak load.
+for suite in ${exclusive_suites[@]+"${exclusive_suites[@]}"}; do
   "$suite"
 done
+"$test_dir/run-suites" ${parallel_suites[@]+"${parallel_suites[@]}"}
 
 printf 'checkrun-test: ok\n'
