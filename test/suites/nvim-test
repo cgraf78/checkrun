@@ -20,6 +20,9 @@ td=$(_tmpdir)
 capabilities_cmd="$td/checkrun-capabilities"
 schema_cmd="$td/checkrun-schema"
 flaky_schema_cmd="$td/checkrun-schema-flaky"
+editor_metadata="$td/checkrun-editor-metadata.json"
+invalid_editor_metadata="$td/checkrun-editor-metadata-invalid.json"
+dependency_root="$td/dependency"
 lua_test="$td/checkrun-nvim-test.lua"
 
 cat >"$capabilities_cmd" <<'SH'
@@ -74,11 +77,59 @@ SH
 chmod +x "$flaky_schema_cmd"
 touch "${flaky_schema_cmd}.fail-once"
 
+mkdir -p "$dependency_root/schemas"
+printf '%s\n' '{}' >"$dependency_root/schemas/dependency.schema.json"
+cat >"$editor_metadata" <<'JSON'
+{
+  "version": 1,
+  "capabilities": {
+    "version": 2,
+    "filetypes": {
+      "format": ["lua"],
+      "lint": ["sh"],
+      "custom": {"filename": {}, "extension": {}, "patterns": []}
+    }
+  },
+  "schemas": {
+    "json": [
+      {
+        "name": "Dependency schema",
+        "url": "shdeps:example/dependency/schemas/dependency.schema.json",
+        "fileMatch": ["$HOME/.config/example/*.json"]
+      },
+      {
+        "name": "Malformed dependency schema",
+        "url": "shdeps:malformed",
+        "fileMatch": ["ignored.json"]
+      }
+    ],
+    "yaml": {
+      "file://$HOME/.local/share/checkrun/schemas/local.schema.json": [
+        "$HOME/.config/example/*.yml"
+      ]
+    },
+    "toml": {
+      "$HOME/.config/example/.*\\.toml$": "https://example.invalid/toml.schema"
+    }
+  }
+}
+JSON
+printf '%s\n' '{"version": 2, "schemas": []}' >"$invalid_editor_metadata"
+
 cat >"$lua_test" <<'LUA'
 local root = assert(os.getenv("CHECKRUN_REPO_ROOT"), "CHECKRUN_REPO_ROOT missing")
 local capabilities_cmd = assert(os.getenv("CHECKRUN_CAPABILITIES_CMD"), "CHECKRUN_CAPABILITIES_CMD missing")
 local schema_cmd = assert(os.getenv("CHECKRUN_SCHEMA_CMD"), "CHECKRUN_SCHEMA_CMD missing")
 local flaky_schema_cmd = assert(os.getenv("CHECKRUN_FLAKY_SCHEMA_CMD"), "CHECKRUN_FLAKY_SCHEMA_CMD missing")
+local editor_metadata_path = assert(
+  os.getenv("CHECKRUN_EDITOR_METADATA"),
+  "CHECKRUN_EDITOR_METADATA missing"
+)
+local invalid_editor_metadata_path = assert(
+  os.getenv("CHECKRUN_INVALID_EDITOR_METADATA"),
+  "CHECKRUN_INVALID_EDITOR_METADATA missing"
+)
+local dependency_root = assert(os.getenv("CHECKRUN_DEPENDENCY_ROOT"), "CHECKRUN_DEPENDENCY_ROOT missing")
 local checkrun_nvim = dofile(root .. "/lib/checkrun/nvim.lua")
 
 local function assert_eq(desc, expected, actual)
@@ -134,6 +185,69 @@ assert_eq(
   recovered["https://example.invalid/recovered.schema"][1]
 )
 
+local dependency_calls = 0
+local materialized = checkrun_nvim.editor_metadata({
+  path = editor_metadata_path,
+  home = "/tmp/home +#%.test",
+  resolve_dependency = function(dependency, asset)
+    dependency_calls = dependency_calls + 1
+    assert_eq("editor metadata dependency name", "example/dependency", dependency)
+    assert_eq("editor metadata dependency asset", "schemas/dependency.schema.json", asset)
+    return dependency_root .. "/" .. asset
+  end,
+})
+assert_eq("editor metadata version", 1, materialized.version)
+assert_eq("editor metadata capabilities", "lua", materialized.capabilities.filetypes.format[1])
+assert_eq("editor metadata drops malformed dependency URLs", 1, #materialized.schemas.json)
+assert_eq("editor metadata resolves each dependency URL once", 1, dependency_calls)
+assert_eq(
+  "editor metadata dependency URL",
+  vim.uri_from_fname(dependency_root .. "/schemas/dependency.schema.json"),
+  materialized.schemas.json[1].url
+)
+assert_eq(
+  "editor metadata expands JSON file matches",
+  "/tmp/home +#%.test/.config/example/*.json",
+  materialized.schemas.json[1].fileMatch[1]
+)
+assert_eq(
+  "editor metadata materializes HOME file URLs",
+  "/tmp/home +#%.test/.config/example/*.yml",
+  materialized.schemas.yaml[vim.uri_from_fname(
+    "/tmp/home +#%.test/.local/share/checkrun/schemas/local.schema.json"
+  )][1]
+)
+local toml_pattern, toml_url = next(materialized.schemas.toml)
+if not toml_pattern:find("/tmp/home \\+#%\\.test/", 1, true) then
+  error("editor metadata regex-escapes HOME: " .. tostring(toml_pattern), 0)
+end
+assert_eq("editor metadata preserves ordinary URLs", "https://example.invalid/toml.schema", toml_url)
+
+materialized.capabilities.filetypes.format[1] = "mutated"
+local fresh_materialized = checkrun_nvim.editor_metadata({
+  path = editor_metadata_path,
+  home = "/tmp/home +#%.test",
+  resolve_dependency = function(_, asset)
+    return dependency_root .. "/" .. asset
+  end,
+})
+assert_eq(
+  "editor metadata returns independent data",
+  "lua",
+  fresh_materialized.capabilities.filetypes.format[1]
+)
+
+local invalid_materialized = checkrun_nvim.editor_metadata({
+  path = invalid_editor_metadata_path,
+})
+assert_eq("invalid editor metadata falls back to version one", 1, invalid_materialized.version)
+assert_eq(
+  "invalid editor metadata has empty capabilities",
+  0,
+  #invalid_materialized.capabilities.filetypes.format
+)
+assert_eq("invalid editor metadata has empty JSON schemas", 0, #invalid_materialized.schemas.json)
+
 local before_init = checkrun_nvim.yaml_before_init({
   command = { schema_cmd },
   env = { CHECKRUN_NVIM_TEST_ENV = "present" },
@@ -168,6 +282,9 @@ output=$(
     CHECKRUN_CAPABILITIES_CMD="$capabilities_cmd" \
     CHECKRUN_SCHEMA_CMD="$schema_cmd" \
     CHECKRUN_FLAKY_SCHEMA_CMD="$flaky_schema_cmd" \
+    CHECKRUN_EDITOR_METADATA="$editor_metadata" \
+    CHECKRUN_INVALID_EDITOR_METADATA="$invalid_editor_metadata" \
+    CHECKRUN_DEPENDENCY_ROOT="$dependency_root" \
     nvim --headless --clean -n -u NONE -i NONE -l "$lua_test" 2>&1
 )
 rc=$?

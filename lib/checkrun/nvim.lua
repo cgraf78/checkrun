@@ -24,8 +24,167 @@ local empty_capabilities = {
   },
 }
 
+local empty_editor_metadata = {
+  version = 1,
+  capabilities = empty_capabilities,
+  schemas = {
+    json = {},
+    yaml = {},
+    toml = {},
+  },
+}
+
 local function deepcopy(value)
   return vim.deepcopy(value)
+end
+
+local function expand_home(value, home)
+  if type(value) ~= "string" then
+    return value
+  end
+  return value:gsub("%$HOME", (home:gsub("%%", "%%%%")))
+end
+
+local regex_magic = {
+  ["\\"] = true,
+  ["."] = true,
+  ["^"] = true,
+  ["$"] = true,
+  ["*"] = true,
+  ["+"] = true,
+  ["?"] = true,
+  ["{"] = true,
+  ["}"] = true,
+  ["["] = true,
+  ["]"] = true,
+  ["("] = true,
+  [")"] = true,
+  ["|"] = true,
+}
+
+local function regex_escape(value)
+  local result = {}
+  for index = 1, #value do
+    local byte = value:sub(index, index)
+    result[#result + 1] = regex_magic[byte] and ("\\" .. byte) or byte
+  end
+  return table.concat(result)
+end
+
+local function expand_home_regex(value, home)
+  if type(value) ~= "string" then
+    return value
+  end
+  return value:gsub("%$HOME", (regex_escape(home):gsub("%%", "%%%%")))
+end
+
+local function read_editor_metadata(opts)
+  if type(opts.metadata) == "table" then
+    return deepcopy(opts.metadata)
+  end
+  if type(opts.path) ~= "string" or opts.path == "" then
+    return nil
+  end
+
+  local file = io.open(opts.path, "rb")
+  if not file then
+    return nil
+  end
+  local encoded = file:read("*a")
+  file:close()
+
+  local ok, decoded = pcall(vim.json.decode, encoded)
+  if ok and type(decoded) == "table" then
+    return decoded
+  end
+  return nil
+end
+
+local function materialize_editor_url(value, opts, dependency_url_cache)
+  if type(value) ~= "string" then
+    return nil
+  end
+
+  -- `checkrun editor-metadata --json` deliberately leaves dependency assets
+  -- portable. The adapter owns the protocol transformation, while callers own
+  -- dependency discovery. A callback keeps Checkrun independent of shdeps and
+  -- lets other dependency managers consume the same metadata contract.
+  local dependency, asset = value:match("^shdeps:([^/]+/[^/]+)/(.*)$")
+  if dependency and asset ~= "" then
+    if dependency_url_cache[value] ~= nil then
+      return dependency_url_cache[value] or nil
+    end
+    if type(opts.resolve_dependency) ~= "function" then
+      dependency_url_cache[value] = false
+      return nil
+    end
+    local path = opts.resolve_dependency(dependency, asset)
+    dependency_url_cache[value] = path and vim.uri_from_fname(path) or false
+    return dependency_url_cache[value] or nil
+  elseif value:sub(1, 7) == "shdeps:" then
+    return nil
+  end
+
+  local home = opts.home or vim.env.HOME or os.getenv("HOME") or ""
+  if value == "file://$HOME" or value:sub(1, 13) == "file://$HOME/" then
+    return vim.uri_from_fname(expand_home(value:sub(8), home))
+  end
+  return expand_home(value, home)
+end
+
+local function materialize_editor_patterns(patterns, home)
+  local result = {}
+  if type(patterns) ~= "table" then
+    return result
+  end
+  for _, pattern in ipairs(patterns) do
+    if type(pattern) == "string" then
+      result[#result + 1] = expand_home(pattern, home)
+    end
+  end
+  return result
+end
+
+local function materialize_editor_schemas(schemas, opts)
+  schemas = type(schemas) == "table" and schemas or {}
+  local result = { json = {}, yaml = {}, toml = {} }
+  local is_list = vim.islist or vim.tbl_islist
+  local json_schemas = type(schemas.json) == "table" and is_list(schemas.json) and schemas.json
+    or {}
+  local yaml_schemas = type(schemas.yaml) == "table" and not is_list(schemas.yaml) and schemas.yaml
+    or {}
+  local toml_schemas = type(schemas.toml) == "table" and not is_list(schemas.toml) and schemas.toml
+    or {}
+  local home = opts.home or vim.env.HOME or os.getenv("HOME") or ""
+  local dependency_url_cache = {}
+
+  for _, schema in ipairs(json_schemas) do
+    if type(schema) == "table" then
+      local url = materialize_editor_url(schema.url, opts, dependency_url_cache)
+      if url then
+        local item = deepcopy(schema)
+        item.url = url
+        item.fileMatch = materialize_editor_patterns(schema.fileMatch, home)
+        result.json[#result.json + 1] = item
+      end
+    end
+  end
+
+  for url, patterns in pairs(yaml_schemas) do
+    local materialized = materialize_editor_url(url, opts, dependency_url_cache)
+    if materialized then
+      result.yaml[materialized] = materialize_editor_patterns(patterns, home)
+    end
+  end
+
+  for pattern, url in pairs(toml_schemas) do
+    local materialized = materialize_editor_url(url, opts, dependency_url_cache)
+    if materialized then
+      result.toml[expand_home_regex(pattern, home)] = materialized
+    end
+  end
+
+  return result
 end
 
 local function sorted_env(env)
@@ -200,6 +359,38 @@ end
 
 local function glob_to_lua_pattern(glob)
   return glob:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1"):gsub("%*", ".*")
+end
+
+--- Read and materialize `checkrun editor-metadata --json` for this Neovim host.
+---
+--- The CLI output is intentionally portable: HOME remains a literal token and
+--- dependency-owned schemas use `shdeps:owner/repo/path` URLs. Keeping the
+--- materializer here makes Checkrun the single owner of that versioned
+--- contract. Consumers provide only their checked metadata path and an
+--- optional dependency resolver; they do not need to duplicate schema-shape,
+--- URI, or regex escaping rules.
+---
+--- Missing, unreadable, malformed, or unsupported metadata degrades to the
+--- empty version-one contract. Individual dependency schemas whose assets
+--- cannot be resolved are omitted, matching the optional nature of editor
+--- integrations without weakening the CLI's stricter generation-time checks.
+---
+--- @param opts table|nil Options: direct `metadata`, file `path`, `home`, and
+---   `resolve_dependency(dependency, asset)` returning a local path or nil.
+--- @return table metadata Materialized capabilities and schema configuration.
+function M.editor_metadata(opts)
+  opts = opts or {}
+  local metadata = read_editor_metadata(opts)
+  if type(metadata) ~= "table" or metadata.version ~= 1 then
+    return deepcopy(empty_editor_metadata)
+  end
+
+  return {
+    version = 1,
+    capabilities = type(metadata.capabilities) == "table" and deepcopy(metadata.capabilities)
+      or deepcopy(empty_capabilities),
+    schemas = materialize_editor_schemas(metadata.schemas, opts),
+  }
 end
 
 --- Read and normalize `checkrun capabilities --json`.
