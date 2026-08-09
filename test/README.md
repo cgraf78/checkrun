@@ -18,7 +18,9 @@ the focused suites under `test/suites/`.
   files, validates `test/shellcheck-files.txt`, and runs ShellCheck once.
   Inventory records use `program<TAB>path`; reviewed shell fixture exclusions
   use `fixture<TAB>path`.
-- `nvim-test` covers the optional Neovim Lua adapter.
+- `nvim-test` covers the optional Neovim Lua adapter, including host
+  materialization of checked editor metadata, dependency URLs, HOME paths, and
+  TOML regex keys.
 
 Prefer adding assertions to the suite that owns the API being changed. Registry
 changes usually need both registry-level coverage and one behavior test proving

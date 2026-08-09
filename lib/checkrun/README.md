@@ -11,8 +11,10 @@ reimplementing registry or schema-policy logic.
   behavior on top of the shared registry model.
 - `registry.py` is the registry interpreter used by `checkrun plan`,
   `checkrun explain`, and tests.
-- `nvim.lua` is the Neovim adapter API for filetype and YAML schema
-  integration.
+- `nvim.lua` is the Neovim adapter API for filetype and schema integration,
+  including host materialization of the portable `editor-metadata` contract.
+  Consumers supply dependency resolution as a callback so this provider-owned
+  transformation does not acquire a dependency-manager dependency.
 - `schemas/` owns schema association policy and schema-lint entrypoints.
 - `linters/` groups shell functions by tooling domain. Keep new backend logic
   in the closest existing domain file unless a new domain has clear ownership.

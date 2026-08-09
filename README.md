@@ -124,7 +124,11 @@ feedback does not weaken their timing and process-lifecycle assertions.
 - `lib/checkrun/nvim.lua` is the optional Neovim adapter API. It does not
   depend on shdeps, Sley, LazyVim, Mason, or local editor policy; callers pass
   explicit commands, environment, and working directories when they do not want
-  the PATH/default-script behavior.
+  the PATH/default-script behavior. Its `editor_metadata(opts)` API also
+  materializes the portable `checkrun editor-metadata --json` contract for a
+  host. Callers pass their checked metadata path and an optional dependency
+  resolver callback, keeping path and URI semantics in Checkrun without making
+  Checkrun depend on a particular dependency manager.
 - `lib/checkrun/schemas/schema-lint.py` validates files through that policy.
 - `lib/checkrun/schemas/schema_refresh.py` refreshes pinned public schema
   payloads from association `source` URLs. It is exposed as
@@ -184,6 +188,9 @@ local yaml_before_init = checkrun_nvim.yaml_before_init({
 
 Public functions:
 
+- `editor_metadata(opts)` reads direct or file-backed portable editor metadata,
+  expands `$HOME`, resolves dependency schema assets through a caller callback,
+  URI-encodes local files, and regex-escapes TOML association keys.
 - `capabilities(opts)` reads and normalizes `checkrun capabilities --json`.
 - `filetypes(opts)` converts Checkrun custom filetype metadata into
   `vim.filetype.add` input.
@@ -196,9 +203,11 @@ Public functions:
 
 Supported options are `command`, `env`, `cwd`, direct `capabilities` or
 `config` tables for tests/pre-fetched callers, and `script`/`python` for the
-default schema-policy command. The module does not choose formatter/linter
-plugin names, Treesitter parsers, LSP servers, package managers, keymaps, or
-workspace roots.
+default schema-policy command. `editor_metadata` accepts direct `metadata` or a
+file `path`, an explicit `home`, and
+`resolve_dependency(dependency, asset)`. The module does not choose
+formatter/linter plugin names, Treesitter parsers, LSP servers, package
+managers, keymaps, or workspace roots.
 
 ## Editor And Hook Flow
 
