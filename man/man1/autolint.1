@@ -1,4 +1,4 @@
-.TH AUTOLINT 1 "2026-06-30" "checkrun" "User Commands"
+.TH AUTOLINT 1 "2026-08-10" "checkrun" "User Commands"
 .SH NAME
 autolint \- lint supported files through Checkrun policy
 .SH SYNOPSIS
@@ -8,6 +8,11 @@ autolint \- lint supported files through Checkrun policy
 .RI [ -h | --help ]
 .I file
 .RI [ file ...]
+.br
+.B autolint
+.RB [ --fix ]
+.RB [ --json ]
+.BI --files0-from " manifest"
 .SH DESCRIPTION
 .B autolint
 lints each supplied file with the Checkrun-selected fast linter for that
@@ -25,6 +30,14 @@ Allow supported linters to apply safe fixes.
 .TP
 .B --json
 Print JSON diagnostic records instead of human-readable output.
+.TP
+.BI --files0-from " file"
+Read paths from a NUL-delimited regular file instead of positional arguments.
+Every record must be non-empty and NUL-terminated. This option cannot be
+combined with positional files.
+.TP
+.B --
+End option parsing and treat every later argument as a file path.
 .TP
 .BR -h ", " --help
 Show usage and supported file types.

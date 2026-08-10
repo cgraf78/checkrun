@@ -1261,6 +1261,43 @@ _run_case() {
   fi
 }
 
+echo "=== Manifest planning cancellation boundary ==="
+
+_manifest_cancel_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-cancel-manifest.XXXXXX")
+_manifest_cancel_marker="$_manifest_cancel_dir/registry-started"
+set +e
+(
+  CHECKRUN_LIB_DIR="$CHECKRUN_TEST_ROOT/lib/checkrun"
+  # shellcheck source=../../lib/checkrun/autolint.sh
+  . "$CHECKRUN_LIB_DIR/autolint.sh"
+  _autolint_signal_status=0
+  _autolint_cancel_status=0
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced planner.
+  printf() {
+    if [ "${1:-}" = '%s\0' ]; then
+      _autolint_record_signal 143
+    fi
+    # shellcheck disable=SC2059 # This shim must preserve the exact format.
+    builtin printf "$@"
+  }
+  # shellcheck disable=SC2329 # Invoked indirectly by the sourced planner.
+  _checkrun_registry() {
+    : >"$_manifest_cancel_marker"
+  }
+  files=()
+  for ((index = 0; index < 257; index++)); do
+    files+=("file-$index.sh")
+  done
+  _autolint_pre_plan "$_manifest_cancel_dir" "${files[@]}"
+)
+_manifest_cancel_rc=$?
+set -e
+_assert_exit "manifest cancellation: latched TERM is returned" 143 \
+  "$_manifest_cancel_rc"
+_assert_file_missing "manifest cancellation: no later planner starts" \
+  "$_manifest_cancel_marker"
+rm -rf "$_manifest_cancel_dir"
+
 _run_case "no-op hot path stays direct" no-op
 _run_case "allocation failure restores traps and falls back sequentially" \
   allocation-fallback

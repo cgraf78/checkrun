@@ -22,6 +22,7 @@ import fnmatch
 import json
 import os
 import re
+import stat
 import sys
 from json import JSONDecodeError
 from pathlib import Path
@@ -75,6 +76,32 @@ _SHELL_DISPATCH = {
 }
 _SchemaMatchers = list[tuple[dict[str, Any], list[str]]]
 _SchemaContext = tuple[Any, dict[str, Any] | None, _SchemaMatchers | None]
+_INVALID_CONFIG_DOCUMENT = object()
+
+
+class _PlanningContext:
+    """Filesystem snapshots shared only by one top-level planning operation.
+
+    A large file set commonly asks the same questions thousands of times: which
+    config is visible from this directory, what does that config contain, and
+    which ignore patterns apply. Reusing those answers within one plan removes
+    repeated filesystem walks and parses. Keeping the context operation-scoped
+    is the correctness boundary: library callers can create, remove, or replace
+    config files between calls and the next plan must observe that new state.
+    """
+
+    def __init__(self) -> None:
+        self.config_walks: dict[tuple[Path, str], Path | None] = {}
+        self.config_documents: dict[tuple[Path, str], Any] = {}
+        self.ignore_patterns: dict[Path, list[str] | None] = {}
+        self._config_root: Path | None = None
+
+    def config_root(self) -> Path:
+        # Resolve path policy lazily: exported resolve_config callers with a
+        # project-local hit must not require HOME or XDG fallback state.
+        if self._config_root is None:
+            self._config_root = _config_root()
+        return self._config_root
 
 
 class RegistryError(RuntimeError):
@@ -689,6 +716,15 @@ def _walk_config(dir_path: Path, filename: str) -> Path | None:
     return None
 
 
+def _cached_config_walk(context: _PlanningContext, dir_path: Path, filename: str) -> Path | None:
+    # _plan_file normalizes every target once. Re-resolving this directory for
+    # every policy probe would turn a five-entry cache into 5N realpath calls.
+    key = (dir_path, filename)
+    if key not in context.config_walks:
+        context.config_walks[key] = _walk_config(dir_path, filename)
+    return context.config_walks[key]
+
+
 def _lookup_path(data: Any, query: list[str]) -> Any:
     node = data
     for part in query:
@@ -698,17 +734,25 @@ def _lookup_path(data: Any, query: list[str]) -> Any:
     return node
 
 
-def _probe_contains(path: Path, contains: dict[str, Any]) -> bool:
+def _probe_contains(path: Path, contains: dict[str, Any], context: _PlanningContext) -> bool:
     # Some policy files are multiplexed. A bare pyproject.toml should not disable
     # the Ruff fallback unless it actually contains Ruff policy.
-    try:
-        if contains["format"] == "toml":
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-        elif contains["format"] == "json":
-            data = json.loads(path.read_text(encoding="utf-8"))
-        else:
-            return False
-    except (OSError, JSONDecodeError, tomllib.TOMLDecodeError):
+    document_format = str(contains["format"])
+    # Config walks return resolved paths, so the path is already a stable key.
+    key = (path, document_format)
+    if key not in context.config_documents:
+        try:
+            if document_format == "toml":
+                data = tomllib.loads(path.read_text(encoding="utf-8"))
+            elif document_format == "json":
+                data = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                data = _INVALID_CONFIG_DOCUMENT
+        except (OSError, JSONDecodeError, tomllib.TOMLDecodeError):
+            data = _INVALID_CONFIG_DOCUMENT
+        context.config_documents[key] = data
+    data = context.config_documents[key]
+    if data is _INVALID_CONFIG_DOCUMENT:
         return False
     return _lookup_path(data, [str(item) for item in contains["query"]]) is not None
 
@@ -717,6 +761,7 @@ def _resolve_config(
     registry: dict[str, Any],
     policy_name: str | None,
     path: Path,
+    context: _PlanningContext,
 ) -> dict[str, Any]:
     # The registry decides which config source applies; adapters still decide
     # how to spell that source on each tool's CLI. This keeps the JSON model
@@ -726,24 +771,26 @@ def _resolve_config(
     policy = registry["configPolicies"][policy_name]
     file_dir = path.parent
     for probe in policy.get("project", []):
-        found = _walk_config(file_dir, probe["file"])
+        found = _cached_config_walk(context, file_dir, probe["file"])
         if not found:
             continue
-        if "contains" in probe and not _probe_contains(found, probe["contains"]):
+        if "contains" in probe and not _probe_contains(found, probe["contains"], context):
             continue
-        if policy.get("selfConfigGuard") is True and found.resolve(strict=False) == path.resolve(
-            strict=False
-        ):
+        if policy.get("selfConfigGuard") is True and found == path:
             return {"policy": policy_name, "source": "native", "path": str(found)}
         return {"policy": policy_name, "source": "project", "path": str(found)}
 
     fallback = policy.get("fallback")
     if fallback:
-        root = _config_root()
+        root = context.config_root()
         candidate = (root / fallback["file"]).resolve(strict=False)
         if candidate.is_file():
-            if policy.get("selfConfigGuard") is True and candidate == path.resolve(strict=False):
-                return {"policy": policy_name, "source": "native", "path": str(candidate)}
+            if policy.get("selfConfigGuard") is True and candidate == path:
+                return {
+                    "policy": policy_name,
+                    "source": "native",
+                    "path": str(candidate),
+                }
             return {"policy": policy_name, "source": "fallback", "path": str(candidate)}
 
     if policy.get("native") == "none":
@@ -764,30 +811,24 @@ def resolve_config(
     because the execution phase is verify instead of lint.
     """
 
-    return _resolve_config(registry, policy_name, _abs_path(str(file)))
+    return _resolve_config(registry, policy_name, _abs_path(str(file)), _PlanningContext())
 
 
-# Cache parsed ignore-file pattern lists per (config_dir, filename) so repeated
-# `_ignore_match` calls within one planner invocation don't re-stat and re-parse
-# the same files. Lint mode does four calls per file (lint/spell/schema/tool),
-# so even single-file invocations benefit; the batch entrypoint that plans
-# multiple files in one Python process gains an extra Nx multiplier on top.
-# Sentinel `None` means "stat'd, file does not exist" (so we don't re-stat);
-# missing key means "not yet probed".
-_IGNORE_PATTERNS_CACHE: dict[tuple[str, str], list[str] | None] = {}
-
-
-def _load_ignore_patterns(source: Path) -> list[str] | None:
-    key = (str(source.parent), source.name)
-    if key in _IGNORE_PATTERNS_CACHE:
-        return _IGNORE_PATTERNS_CACHE[key]
+def _load_ignore_patterns(source: Path, context: _PlanningContext) -> list[str] | None:
+    # Sentinel None means "probed and absent/unreadable". The containing context
+    # is intentionally fresh for every plan so a later call sees config changes.
+    # config_root is operation-stable and absolute. Keep this key lexical so a
+    # stale or looping symlink retains the historical absent/unreadable result.
+    key = source
+    if key in context.ignore_patterns:
+        return context.ignore_patterns[key]
     if not source.is_file():
-        _IGNORE_PATTERNS_CACHE[key] = None
+        context.ignore_patterns[key] = None
         return None
     try:
         lines = source.read_text(encoding="utf-8").splitlines()
     except OSError:
-        _IGNORE_PATTERNS_CACHE[key] = None
+        context.ignore_patterns[key] = None
         return None
     patterns: list[str] = []
     for raw in lines:
@@ -795,11 +836,13 @@ def _load_ignore_patterns(source: Path) -> list[str] | None:
         if not pattern or pattern.startswith("#"):
             continue
         patterns.append(pattern)
-    _IGNORE_PATTERNS_CACHE[key] = patterns
+    context.ignore_patterns[key] = patterns
     return patterns
 
 
-def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
+def _ignore_match(
+    path: Path, config: Path, phase: str, context: _PlanningContext
+) -> dict[str, Any]:
     # Two filenames per phase: the shared "ignore" applies to every phase,
     # plus the phase-specific override (e.g. "lint-ignore"). Order matches the
     # original implementation so a generic `ignore` match still wins over a
@@ -808,7 +851,7 @@ def _ignore_match(path: Path, config: Path, phase: str) -> dict[str, Any]:
     str_path = str(path)
     for filename in ("ignore", _PHASE_IGNORE_FILES.get(phase, f"{phase}-ignore")):
         source = config / filename
-        patterns = _load_ignore_patterns(source)
+        patterns = _load_ignore_patterns(source, context)
         if patterns is None:
             continue
         for pattern in patterns:
@@ -883,13 +926,14 @@ def _planned_step(
     path: Path,
     step: dict[str, Any],
     default_phase: str,
+    context: _PlanningContext,
 ) -> dict[str, Any]:
     phase = str(step.get("phase", default_phase))
     planned = {
         "phase": phase,
         "tool": step["tool"],
         "adapter": step["adapter"],
-        "config": _resolve_config(registry, step.get("config"), path),
+        "config": _resolve_config(registry, step.get("config"), path, context),
     }
     if step.get("requiresConfigMatch") is True:
         planned["requiresConfigMatch"] = True
@@ -903,6 +947,7 @@ def _collect_steps(
     path: Path,
     filetype: str | None,
     phase: str,
+    context: _PlanningContext,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     # Cross-cutting lint steps intentionally precede backend tool lint so
     # spelling/schema behavior remains independent of language-specific ignores.
@@ -915,13 +960,13 @@ def _collect_steps(
         for step in registry.get("crossCutting", {}).get("lint", []):
             key = _step_key(step, "lint")
             if key not in seen:
-                steps.append(_planned_step(registry, path, step, "lint"))
+                steps.append(_planned_step(registry, path, step, "lint", context))
                 seen.add(key)
     for selector in registry["selectors"]:
         if not _selector_matches(path, filetype, selector):
             continue
         for step in selector.get(phase, []):
-            planned = _planned_step(registry, path, step, phase)
+            planned = _planned_step(registry, path, step, phase, context)
             if not _path_pattern_matches(path, step.get("pathPatterns", [])):
                 skipped.append(
                     _skipped_record(
@@ -955,6 +1000,7 @@ def _plan_file(
     phase: str | None = None,
     *,
     schema_context: _SchemaContext,
+    planning_context: _PlanningContext,
 ) -> dict[str, Any]:
     # Planning inspects local files and config only; it never executes tools.
     # Shell entrypoints consume this as their policy answer and keep adapter
@@ -969,10 +1015,12 @@ def _plan_file(
     }
     for plan_phase in phases:
         if plan_phase == "format":
-            config = _config_root()
-            ignored = _ignore_match(path, config, "format")
+            config = planning_context.config_root()
+            ignored = _ignore_match(path, config, "format", planning_context)
             candidate_steps, skipped = (
-                _collect_steps(registry, path, filetype, "format") if path.is_file() else ([], [])
+                _collect_steps(registry, path, filetype, "format", planning_context)
+                if path.is_file()
+                else ([], [])
             )
             if ignored["ignored"]:
                 steps = []
@@ -990,13 +1038,15 @@ def _plan_file(
                 "configDir": str(config),
             }
         elif plan_phase == "lint":
-            config = _config_root()
-            lint_ignore = _ignore_match(path, config, "lint")
-            spell_ignore = _ignore_match(path, config, "spell")
-            schema_ignore = _ignore_match(path, config, "schema")
-            tool_ignore = _ignore_match(path, config, "tool")
+            config = planning_context.config_root()
+            lint_ignore = _ignore_match(path, config, "lint", planning_context)
+            spell_ignore = _ignore_match(path, config, "spell", planning_context)
+            schema_ignore = _ignore_match(path, config, "schema", planning_context)
+            tool_ignore = _ignore_match(path, config, "tool", planning_context)
             all_steps, skipped = (
-                _collect_steps(registry, path, filetype, "lint") if path.is_file() else ([], [])
+                _collect_steps(registry, path, filetype, "lint", planning_context)
+                if path.is_file()
+                else ([], [])
             )
             steps = []
             for step in all_steps:
@@ -1052,10 +1102,18 @@ def plan(registry: dict[str, Any], files: list[str], phase: str | None = None) -
         expected = ", ".join(sorted(_PLAN_PHASES))
         raise RegistryError(f"unknown plan phase {phase!r}; expected one of {expected}")
     schema_context = _load_schema_policy(prepare_matches=True)
+    planning_context = _PlanningContext()
     return {
         "version": 1,
         "files": [
-            _plan_file(registry, file, phase, schema_context=schema_context) for file in files
+            _plan_file(
+                registry,
+                file,
+                phase,
+                schema_context=schema_context,
+                planning_context=planning_context,
+            )
+            for file in files
         ],
     }
 
@@ -1120,8 +1178,14 @@ def explain_items(registry: dict[str, Any], files: list[str]) -> list[dict[str, 
 
     items = []
     schema_context = _load_schema_policy(prepare_matches=True)
+    planning_context = _PlanningContext()
     for file in files:
-        item = _plan_file(registry, file, schema_context=schema_context)
+        item = _plan_file(
+            registry,
+            file,
+            schema_context=schema_context,
+            planning_context=planning_context,
+        )
         fmt = item["format"]
         lint = item["lint"]
         items.append(
@@ -1204,10 +1268,18 @@ def _shell_plan_items(
     """
 
     schema_context = _load_schema_policy(prepare_matches=True)
+    planning_context = _PlanningContext()
     schema_policy, _, _ = schema_context
     policy_path = schema_policy.policy_path() if phase == "lint" else None
     planned_files = [
-        _plan_file(registry, file, phase, schema_context=schema_context) for file in files
+        _plan_file(
+            registry,
+            file,
+            phase,
+            schema_context=schema_context,
+            planning_context=planning_context,
+        )
+        for file in files
     ]
     items: list[list[list[str]]] = []
     for item in planned_files:
@@ -1298,6 +1370,38 @@ def _write_shell_plan_dir(
                     handle.write(chunk)
 
 
+def _read_files0(path_arg: str) -> list[str]:
+    """Read one regular-file NUL manifest without losing filesystem bytes."""
+
+    path = Path(path_arg)
+    fd = -1
+    try:
+        # O_NONBLOCK makes a mistakenly supplied FIFO safe to inspect rather
+        # than hanging a commit hook before fstat can reject its file type.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RegistryError(f"--files0-from requires a regular file: {path}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            payload = handle.read()
+    except OSError as exc:
+        raise RegistryError(f"cannot read --files0-from manifest {path}: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    if not payload:
+        return []
+    if not payload.endswith(b"\0"):
+        raise RegistryError(f"--files0-from manifest must end with NUL: {path}")
+    records = payload[:-1].split(b"\0")
+    if any(not record for record in records):
+        raise RegistryError(f"--files0-from manifest contains an empty path: {path}")
+    # os.fsdecode uses the interpreter's filesystem encoding and surrogateescape,
+    # matching argv decoding so raw non-UTF-8 names retain their original bytes.
+    return [os.fsdecode(record) for record in records]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1333,9 +1437,24 @@ def main(argv: list[str] | None = None) -> int:
     # directory; the single-stream stdout path stays unchanged so existing
     # single-file callers do not have to migrate.
     shell_parser.add_argument("--output-dir")
+    shell_parser.add_argument(
+        "--files0-from",
+        action="append",
+        metavar="FILE",
+        help="read private NUL-delimited file input from FILE",
+    )
     shell_parser.add_argument("files", nargs="*")
 
     args = parser.parse_args(argv)
+    shell_files: list[str] | None = None
+    if args.command == "shell-plan" and args.files0_from:
+        if len(args.files0_from) != 1:
+            parser.error("shell-plan --files0-from may be provided only once")
+        if args.files:
+            parser.error("shell-plan positional files are not allowed with --files0-from")
+        shell_files = _read_files0(args.files0_from[0])
+    elif args.command == "shell-plan":
+        shell_files = args.files
     registry = load_registry()
 
     if args.command == "registry":
@@ -1372,11 +1491,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "shell-plan":
+        assert shell_files is not None
         try:
             if args.output_dir:
-                _write_shell_plan_dir(registry, args.phase, args.files, Path(args.output_dir))
+                _write_shell_plan_dir(registry, args.phase, shell_files, Path(args.output_dir))
             else:
-                _print_shell_plan(registry, args.phase, args.files)
+                _print_shell_plan(registry, args.phase, shell_files)
         except checkrun_paths.PathPolicyError as exc:
             # Direct autoformat/autolint callers historically use exit 1 for an
             # unusable HOME/XDG policy. Keep that shell-entrypoint contract while

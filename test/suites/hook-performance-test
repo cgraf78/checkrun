@@ -164,6 +164,12 @@ for index in {0..299}; do
   printf 'value_%s = %s\n' "$index" "$index" >"$batch_file"
   supported_batch+=("$batch_file")
 done
+large_manifest="$td/large-files0"
+for index in {0..999}; do
+  printf '%s\0' "$td/$(printf 'long-path-%04d-%0130d.py' "$index" 0)" >>"$large_manifest"
+done
+small_manifest="$td/small-files0"
+printf '%s\0%s\0' "$td/one.py" "$td/two.py" >"$small_manifest"
 host_ps=$(command -v ps || true)
 
 hook_path=$(_mock_bin)
@@ -340,6 +346,72 @@ _assert_not_contains "hook startup: lint shell does not resolve config separatel
   "checkrun_paths.py config" "$python_calls"
 _assert_contains "hook startup: lint registry planner owns the no-op decision" \
   "registry.py shell-plan" "$python_calls"
+_assert_not_contains "hook startup: one file avoids manifest staging" \
+  "--files0-from" "$python_calls"
+
+# The manifest reaches autolint with a bounded argv, and autolint must keep the
+# second Python boundary bounded too. Stub only execution after planning: this
+# test owns transport shape, while registry/autolint behavior suites own plans.
+large_shape_log="$td/large-shape.log"
+: >"$large_shape_log"
+CHECKRUN_LARGE_SHAPE_LOG="$large_shape_log" \
+  CHECKRUN_AUTOLINT_JOBS=1 \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$hook_path" \
+  bash -c '
+    . "$1"
+    shift
+    _lintable_path_into() {
+      printf -v "$1" "%s" "$2"
+    }
+    _checkrun_registry() {
+      printf "argc:%s\n" "$#" >>"$CHECKRUN_LARGE_SHAPE_LOG"
+      printf "args:" >>"$CHECKRUN_LARGE_SHAPE_LOG"
+      printf "<%s>" "$@" >>"$CHECKRUN_LARGE_SHAPE_LOG"
+      printf "\n" >>"$CHECKRUN_LARGE_SHAPE_LOG"
+      local output_dir="" manifest="" arg index=0 path count=0
+      while [[ "$#" -gt 0 ]]; do
+        arg=$1
+        shift
+        case "$arg" in
+          --output-dir) output_dir=$1; shift ;;
+          --files0-from) manifest=$1; shift ;;
+          --) break ;;
+        esac
+      done
+      [[ -n "$manifest" ]] || return 99
+      printf "manifest:%s\n" "$manifest" >>"$CHECKRUN_LARGE_SHAPE_LOG"
+      while IFS= read -r -d "" path; do
+        : >"$output_dir/$index.plan"
+        index=$((index + 1))
+        count=$((count + 1))
+      done <"$manifest"
+      printf "count:%s\n" "$count" >>"$CHECKRUN_LARGE_SHAPE_LOG"
+    }
+    _autolint_main --files0-from "$1" || exit
+    _autolint_main --files0-from "$2" || exit
+    _autolint_main "$3" "$4"
+  ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
+  "$large_manifest" "$small_manifest" "${unsupported_batch[@]:0:2}"
+rc=$?
+_assert_exit "large files0: structural transport exits 0" 0 "$rc"
+_assert_eq "large files0: one planner starts per request" 3 \
+  "$(grep -c '^argc:' "$large_shape_log" || true)"
+_assert_contains "large files0: planner receives a manifest" \
+  "<--files0-from>" "$(cat "$large_shape_log")"
+_assert_contains "large files0: planner receives every path" \
+  "count:1000" "$(cat "$large_shape_log")"
+_assert_contains "small files0: manifest input keeps the planner argv bounded" \
+  "count:2" "$(cat "$large_shape_log")"
+_assert_eq "multi-file positional input keeps the planner argv bounded" 2 \
+  "$(grep -c '^count:2$' "$large_shape_log" || true)"
+_assert_not_contains "large files0: planner does not receive positional separator" \
+  "<-->" "$(cat "$large_shape_log")"
+if [ "$(grep -Ec '^argc:7$' "$large_shape_log" || true)" -eq 3 ]; then
+  _pass "large files0: planner argv remains bounded"
+else
+  _fail "large files0: planner argv is not bounded ($(cat "$large_shape_log"))"
+fi
 
 linter_log="$td/linter.log"
 : >"$linter_log"

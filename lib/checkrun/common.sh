@@ -13,18 +13,29 @@
 # Resolve an existing directory relative to the caller's current cwd.
 # Callers use this once for fallback config roots so every later
 # `--config` argument survives tools that `cd` before execution.
-_abs_dir() {
-  local dir="$1"
+_abs_dir_into() {
+  local output_name="$1" dir="$2" value
   [ -d "$dir" ] || return 1
-  (cd "$dir" && pwd)
+  # The sentinel protects a directory name ending in newline from command
+  # substitution trimming. `PWD` is already an absolute spelling after cd, so
+  # a second `pwd` invocation is unnecessary and would add work per file.
+  value=$(cd "$dir" && printf '%s_' "$PWD") || return 1
+  value=${value%_}
+  printf -v "$output_name" '%s' "$value"
+}
+
+_abs_dir() {
+  local result
+  _abs_dir_into result "$1" || return 1
+  printf '%s\n' "$result"
 }
 
 # Resolve a path without requiring GNU `readlink -f` and without
 # canonicalizing symlinks. These scripts treat the user-provided file
 # path as the identity surfaced in diagnostics, so only the directory
 # prefix is made cwd-independent.
-_abs_path() {
-  local path="$1" dir base
+_abs_path_into() {
+  local output_name="$1" path="$2" dir base absdir value
 
   case "$path" in
     */*)
@@ -38,13 +49,19 @@ _abs_path() {
       ;;
   esac
 
-  local absdir
-  absdir=$(_abs_dir "$dir") || return 1
+  _abs_dir_into absdir "$dir" || return 1
   if [ "$absdir" = "/" ]; then
-    printf '/%s\n' "$base"
+    value=/$base
   else
-    printf '%s/%s\n' "$absdir" "$base"
+    value=$absdir/$base
   fi
+  printf -v "$output_name" '%s' "$value"
+}
+
+_abs_path() {
+  local result
+  _abs_path_into result "$1" || return 1
+  printf '%s\n' "$result"
 }
 
 _checkrun_path_dir() {

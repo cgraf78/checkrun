@@ -436,6 +436,223 @@ assert dedupe_keys[-1] == ("extra", "ruff-lint")
 PY
 _assert_exit "registry: interpreter derives capabilities and plans" 0 "$?"
 
+echo "=== checkrun: invocation-local planning cache ==="
+
+python3 - "$CHECKRUN_REPO_ROOT" "$_td" <<'PY'
+import importlib.util
+import os
+import sys
+import tomllib
+from pathlib import Path
+from unittest import mock
+
+root = Path(sys.argv[1])
+tmp = Path(sys.argv[2]) / "planning-cache"
+tmp.mkdir()
+spec = importlib.util.spec_from_file_location(
+    "checkrun_registry_cache", root / "lib/checkrun/registry.py"
+)
+registry_mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(registry_mod)
+registry = registry_mod.load_registry()
+
+project = tmp / "project"
+project.mkdir()
+target = project / "app.py"
+target.write_text("value = 1\n", encoding="utf-8")
+(project / "pyproject.toml").write_text("[tool.ruff]\n", encoding="utf-8")
+
+original_loads = tomllib.loads
+with (
+    mock.patch.object(
+        registry_mod, "_walk_config", wraps=registry_mod._walk_config
+    ) as walk_config,
+    mock.patch.object(
+        registry_mod.tomllib, "loads", wraps=original_loads
+    ) as parse_toml,
+    mock.patch.object(
+        registry_mod, "_config_root", wraps=registry_mod._config_root
+    ) as config_root,
+):
+    registry_mod.plan(registry, [str(target)] * 1000, "lint")
+
+# There are five distinct project-config filenames in this Python lint plan.
+# Files sharing a directory should reuse those five walks and the one parsed
+# pyproject document for this operation, regardless of file count.
+assert walk_config.call_count == 5, walk_config.call_count
+assert parse_toml.call_count == 1, parse_toml.call_count
+assert config_root.call_count == 1, config_root.call_count
+
+with mock.patch.object(
+    registry_mod, "_config_root", side_effect=AssertionError("fallback root accessed")
+):
+    resolved = registry_mod.resolve_config(registry, "ruff-lint", target)
+assert resolved["source"] == "project", resolved
+
+config_dir = tmp / "config"
+config_dir.mkdir()
+old_config_dir = os.environ.get("CHECKRUN_CONFIG_DIR")
+try:
+    os.environ["CHECKRUN_CONFIG_DIR"] = str(config_dir)
+    (config_dir / "ignore").symlink_to("ignore")
+    assert not registry_mod.plan(registry, [str(target)], "lint")["files"][0]["lint"][
+        "ignored"
+    ]
+    (config_dir / "ignore").unlink()
+    assert not registry_mod.plan(registry, [str(target)], "lint")["files"][0]["lint"][
+        "ignored"
+    ]
+    (config_dir / "lint-ignore").write_text("*.py\n", encoding="utf-8")
+    assert registry_mod.plan(registry, [str(target)], "lint")["files"][0]["lint"][
+        "ignored"
+    ]
+    (config_dir / "lint-ignore").unlink()
+    assert not registry_mod.plan(registry, [str(target)], "lint")["files"][0]["lint"][
+        "ignored"
+    ]
+finally:
+    if old_config_dir is None:
+        os.environ.pop("CHECKRUN_CONFIG_DIR", None)
+    else:
+        os.environ["CHECKRUN_CONFIG_DIR"] = old_config_dir
+
+biome = tmp / "biome.json"
+sibling = tmp / "sibling.json"
+biome.write_text("{}\n", encoding="utf-8")
+sibling.write_text("{}\n", encoding="utf-8")
+items = registry_mod.plan(registry, [str(biome), str(sibling)], "lint")["files"]
+biome_steps = {step["adapter"]: step for step in items[0]["lint"]["steps"]}
+sibling_steps = {step["adapter"]: step for step in items[1]["lint"]["steps"]}
+assert biome_steps["biome-lint"]["config"]["source"] == "native"
+assert sibling_steps["biome-lint"]["config"]["source"] == "project"
+
+left = tmp / "left"
+right = tmp / "right"
+left.mkdir()
+right.mkdir()
+for directory in (left, right):
+    (directory / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (directory / "ruff.toml").write_text("line-length = 88\n", encoding="utf-8")
+items = registry_mod.plan(
+    registry, [str(left / "app.py"), str(right / "app.py")], "lint"
+)["files"]
+for item, directory in zip(items, (left, right)):
+    steps = {step["adapter"]: step for step in item["lint"]["steps"]}
+    assert steps["ruff-lint"]["config"]["path"] == str(
+        (directory / "ruff.toml").resolve()
+    )
+PY
+_assert_exit "registry: planning caches filesystem work for one operation only" 0 "$?"
+
+echo "=== checkrun: NUL manifest shell-plan transport ==="
+
+manifest_dir="$_td/manifest"
+mkdir -p "$manifest_dir/input"
+manifest_first="$manifest_dir/input/first file.py"
+manifest_second="$manifest_dir/input/second.py"
+printf 'value = 1\n' >"$manifest_first"
+printf 'value = 2\n' >"$manifest_second"
+manifest="$manifest_dir/files0"
+printf '%s\0%s\0%s\0' \
+  "$manifest_first" "$manifest_second" "$manifest_first" >"$manifest"
+manifest_plans="$manifest_dir/plans"
+output=$("$REGISTRY_PY" shell-plan --phase lint --output-dir "$manifest_plans" \
+  --files0-from "$manifest" 2>&1)
+rc=$?
+_assert_exit "registry files0: valid manifest exits 0" 0 "$rc"
+_assert_eq "registry files0: preserves ordered duplicate plan count" 3 \
+  "$(printf '%s\n' "$manifest_plans"/*.plan 2>/dev/null | grep -Ec '/[0-9]+\.plan$' || true)"
+
+python3 - "$manifest_first" "$manifest_second" "$manifest_plans" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+# macOS fixture roots commonly use /var -> /private/var. Checkrun has always
+# canonicalized planner paths, so compare canonical filesystem bytes rather
+# than the caller's possibly symlinked spelling.
+first, second = (os.fsencode(Path(arg).resolve()) for arg in sys.argv[1:3])
+plan_dir = Path(sys.argv[3])
+
+
+def planned_path(index: int) -> bytes:
+    fields = (plan_dir / f"{index}.plan").read_bytes().split(b"\0")
+    assert fields[-1] == b""
+    return fields[0]
+
+
+assert [planned_path(index) for index in range(3)] == [first, second, first]
+PY
+_assert_exit "registry files0: plan bytes preserve order and duplicates" 0 "$?"
+
+python3 - "$REGISTRY_PY" "$manifest_dir" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+registry = sys.argv[1]
+root = Path(sys.argv[2])
+if sys.platform.startswith("linux"):
+    input_dir = os.fsencode(root / "input")
+    raw_path = input_dir + b"/raw-\xff.py"
+    fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(b"value = 3\n")
+    raw_manifest = root / "raw-files0"
+    raw_manifest.write_bytes(raw_path + b"\0")
+    raw_plans = root / "raw-plans"
+    result = subprocess.run(
+        [registry, "shell-plan", "--phase", "lint", "--output-dir", raw_plans,
+         "--files0-from", raw_manifest],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (raw_plans / "0.plan").read_bytes().split(b"\0", 1)[0] == raw_path
+
+fifo = root / "files0-fifo"
+os.mkfifo(fifo)
+result = subprocess.run(
+    [registry, "shell-plan", "--phase", "lint", "--output-dir", root / "fifo-plans",
+     "--files0-from", fifo],
+    capture_output=True,
+    check=False,
+    timeout=3,
+)
+assert result.returncode == 2, result.returncode
+assert b"regular file" in result.stderr, result.stderr
+PY
+_assert_exit "registry files0: byte-path and FIFO safeguards pass" 0 "$?"
+
+printf '%s' "$manifest_first" >"$manifest_dir/truncated"
+output=$("$REGISTRY_PY" shell-plan --phase lint --output-dir "$manifest_dir/truncated-plans" \
+  --files0-from "$manifest_dir/truncated" 2>&1)
+rc=$?
+_assert_exit "registry files0: truncated manifest exits 2" 2 "$rc"
+_assert_contains "registry files0: truncated manifest explains NUL termination" \
+  "NUL" "$output"
+
+printf '\0' >"$manifest_dir/empty-record"
+output=$("$REGISTRY_PY" shell-plan --phase lint --output-dir "$manifest_dir/empty-record-plans" \
+  --files0-from "$manifest_dir/empty-record" 2>&1)
+rc=$?
+_assert_exit "registry files0: empty record exits 2" 2 "$rc"
+_assert_contains "registry files0: empty record is actionable" "empty" "$output"
+
+output=$("$REGISTRY_PY" shell-plan --phase lint --output-dir "$manifest_dir/mixed-plans" \
+  --files0-from "$manifest" "$manifest_first" 2>&1)
+rc=$?
+_assert_exit "registry files0: positional and manifest inputs are exclusive" 2 "$rc"
+_assert_contains "registry files0: mixed input is actionable" "not allowed" "$output"
+
+output=$("$REGISTRY_PY" shell-plan --phase lint --output-dir "$manifest_dir/repeated-plans" \
+  --files0-from "$manifest" --files0-from "$manifest" 2>&1)
+rc=$?
+_assert_exit "registry files0: repeated manifest exits 2" 2 "$rc"
+_assert_contains "registry files0: repeated manifest is actionable" "only once" "$output"
+
 echo "=== checkrun: invalid registry fixtures ==="
 
 cp "$REGISTRY" "$_td/registry.json"
