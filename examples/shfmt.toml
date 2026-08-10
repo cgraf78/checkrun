@@ -1,0 +1,4 @@
+# This is host fallback policy, used only when a project does not provide an
+# EditorConfig. Project-local formatting policy deliberately wins.
+indent = 2
+switch_case_indent = true

@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# examples-test - exercise the checked-in consumer examples through public APIs.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+_require_compatible_libc "examples-test"
+
+POLICY="$CHECKRUN_REPO_ROOT/examples/associations.json"
+LOCAL_SCHEMA="$CHECKRUN_REPO_ROOT/examples/schemas/application.schema.json"
+SHFMT_CONFIG="$CHECKRUN_REPO_ROOT/examples/shfmt.toml"
+NVIM_EXAMPLE="$CHECKRUN_REPO_ROOT/examples/nvim.lua"
+
+echo "=== checkrun: checked-in examples ==="
+
+_assert_file_exists "examples: schema association policy is tracked" "$POLICY"
+_assert_file_exists "examples: local schema payload is tracked" "$LOCAL_SCHEMA"
+_assert_file_exists "examples: shfmt fallback config is tracked" "$SHFMT_CONFIG"
+_assert_file_exists "examples: Neovim integration is tracked" "$NVIM_EXAMPLE"
+
+_td=$(_tmpdir)
+_home="$_td/home"
+_data="$_td/data"
+_metadata="$_td/editor-metadata.json"
+mkdir -p "$_home" "$_data/checkrun/schemas"
+cp "$LOCAL_SCHEMA" "$_data/checkrun/schemas/application.schema.json"
+
+HOME="$_home" XDG_DATA_HOME="$_data" \
+  CHECKRUN_SCHEMA_ASSOCIATIONS="$POLICY" \
+  "$CHECKRUN_REPO_ROOT/bin/checkrun" editor-metadata --json >"$_metadata"
+_assert_exit "examples: policy produces portable editor metadata" 0 "$?"
+
+python3 - "$POLICY" "$LOCAL_SCHEMA" "$_metadata" \
+  "$CHECKRUN_REPO_ROOT/lib/checkrun/schemas" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+policy_path, schema_path, metadata_path, module_dir = map(Path, sys.argv[1:])
+sys.path.insert(0, str(module_dir))
+import schema_policy  # noqa: E402
+
+policy = schema_policy.load_policy(policy_path)
+assert policy is not None
+assert [item["name"] for item in policy["associations"]] == [
+    "Example application config",
+    "Dependency-owned tool config",
+    "Editor-native settings",
+]
+
+schema = json.loads(schema_path.read_text(encoding="utf-8"))
+assert schema["type"] == "object"
+assert schema["required"] == ["enabled"]
+
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+dependency = next(
+    item for item in metadata["schemas"]["toml"].values()
+    if item.startswith("shdeps:")
+)
+assert dependency == "shdeps:example/tool/share/example/schemas/config.schema.json"
+local = next(item for item in metadata["schemas"]["json"] if item["name"] == "Example application config")
+assert local["url"] == "file://$HOME/.local/share/checkrun/schemas/application.schema.json"
+PY
+_assert_exit "examples: policy and generated metadata preserve documented ownership" 0 "$?"
+
+# Exercise the same minimal TOML reader used by the shfmt adapter. This catches
+# both misspelled keys and changes to the example's intended values.
+set +u
+# shellcheck source=../../lib/checkrun/common.sh
+. "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh"
+set -u
+_shfmt_indent=""
+_shfmt_switch_case=""
+{
+  read -r _shfmt_indent
+  read -r _shfmt_switch_case
+} < <(_toml_read_keys "$SHFMT_CONFIG" indent switch_case_indent)
+_assert_eq "examples: shfmt indent uses two spaces" "2" "$_shfmt_indent"
+_assert_eq "examples: shfmt switch cases are indented" "true" "$_shfmt_switch_case"
+
+if command -v nvim >/dev/null 2>&1; then
+  _lua_test="$_td/examples-nvim-test.lua"
+  cat >"$_lua_test" <<'LUA'
+local repo = assert(os.getenv("CHECKRUN_REPO_ROOT"))
+local metadata_path = assert(os.getenv("CHECKRUN_EDITOR_METADATA"))
+local dependency_root = assert(os.getenv("CHECKRUN_DEPENDENCY_ROOT"))
+local dep_calls = {}
+
+local shdeps = {}
+function shdeps.dep_file(dependency, asset)
+  dep_calls[#dep_calls + 1] = dependency .. "/" .. asset
+  if dependency == "cgraf78/checkrun" and asset == "lib/checkrun/nvim.lua" then
+    return repo .. "/lib/checkrun/nvim.lua"
+  end
+  if dependency == "example/tool" then
+    return dependency_root .. "/" .. asset
+  end
+  return nil
+end
+
+local example = dofile(repo .. "/examples/nvim.lua")
+local integration = example.setup({
+  shdeps = shdeps,
+  metadata_path = metadata_path,
+  home = "/tmp/example-home",
+})
+
+assert(integration.metadata.version == 1)
+assert(type(integration.filetypes) == "table")
+assert(type(integration.yaml_before_init) == "function")
+assert(next(integration.toml_schema_associations) ~= nil)
+local observed = {}
+for _, call in ipairs(dep_calls) do
+  observed[call] = true
+end
+assert(observed["cgraf78/checkrun/lib/checkrun/nvim.lua"])
+assert(observed["example/tool/share/example/schemas/config.schema.json"])
+print("checkrun example Neovim integration passed")
+LUA
+
+  mkdir -p "$_td/dependency/share/example/schemas"
+  printf '%s\n' '{}' >"$_td/dependency/share/example/schemas/config.schema.json"
+  set +e
+  output=$(CHECKRUN_REPO_ROOT="$CHECKRUN_REPO_ROOT" \
+    CHECKRUN_EDITOR_METADATA="$_metadata" \
+    CHECKRUN_DEPENDENCY_ROOT="$_td/dependency" \
+    nvim --headless --clean -n -u NONE -i NONE -l "$_lua_test" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "examples: Neovim integration loads against generated metadata" 0 "$rc"
+  _assert_contains "examples: Neovim integration reports success" \
+    "checkrun example Neovim integration passed" "$output"
+else
+  echo "  SKIP: checked-in Neovim example requires Neovim"
+fi
+
+_test_summary
