@@ -7,7 +7,7 @@
 # Respects per-repo config files.
 #
 # Usage: autolint [--fix] [--json] <file> [file...]
-#        autolint [--fix] [--json] --files0-from FILE
+#        autolint [--fix] [--json] --files0-from FILE|-
 
 set -u
 
@@ -57,7 +57,7 @@ CHECKRUN_LIB_DIR="${BASH_SOURCE[0]%/*}"
 _autolint_usage() {
   printf '%s\n' \
     "Usage: autolint [--fix] [--json] [-h|--help] <file> [file...]" \
-    "       autolint [--fix] [--json] --files0-from FILE" \
+    "       autolint [--fix] [--json] --files0-from FILE|-" \
     "" \
     "Lint files by extension. Unsupported files, missing files, ignored files," \
     "and files whose linter is not installed are skipped." \
@@ -83,8 +83,8 @@ _autolint_usage() {
     "" \
     "Options:" \
     "  --fix       Apply safe linter fixes where supported." \
-    "  --files0-from FILE" \
-    "              Read NUL-delimited paths from FILE instead of argv." \
+    "  --files0-from FILE|-" \
+    "              Read NUL-delimited paths from FILE or stdin instead of argv." \
     "  --json      Emit one unified JSON diagnostic per output line." \
     "  --          End option parsing; treat later arguments as paths." \
     "  -h, --help  Show this help and exit." \
@@ -92,6 +92,47 @@ _autolint_usage() {
     "Environment:" \
     "  CHECKRUN_AUTOLINT_JOBS  Override parallel worker count (default: min(cores, 8))." \
     "  CHECKRUN_CONFIG_DIR       Fallback config directory (default: XDG config root)."
+}
+
+_autolint_read_files0() {
+  local display="$1" file
+  # `_autolint_main` owns this dynamically scoped array. Keeping it local to
+  # the complete invocation prevents repeated calls in one sourced shell from
+  # sharing decoded paths while still supporting Bash 3.2 without namerefs.
+  _autolint_files0_args=()
+  if [ "$display" = "-" ]; then
+    # EOF is a valid empty manifest, but Bash gives a failed read with an empty
+    # field for both EOF and descriptor errors. Reject a closed descriptor and
+    # directory source before reading so an invalid stream cannot become a
+    # silent no-op. Pipes, regular files, sockets, and terminals remain valid.
+    if { [ ! -r /dev/stdin ] && [ ! -r /dev/fd/0 ]; } ||
+      [ -d /dev/stdin ] || [ -d /dev/fd/0 ]; then
+      echo "autolint: --files0-from - requires a readable stream on standard input" >&2
+      return 2
+    fi
+    display="standard input"
+  fi
+
+  # Bash's NUL-delimited read preserves the same raw path bytes as argv. Keep
+  # decoding in this process so stdin can be consumed completely before any
+  # backend starts; subsequent linters therefore inherit EOF rather than a
+  # producer pipe that could block or steal tool input.
+  while :; do
+    file=""
+    if IFS= read -r -d '' file; then
+      if [ -z "$file" ]; then
+        echo "autolint: --files0-from contains an empty path: $display" >&2
+        return 2
+      fi
+      _autolint_files0_args+=("$file")
+    else
+      if [ -n "$file" ]; then
+        echo "autolint: --files0-from must end with NUL: $display" >&2
+        return 2
+      fi
+      break
+    fi
+  done
 }
 
 _lint_one_with_plan() {
@@ -1264,7 +1305,7 @@ _autolint_run_parallel_supervised() {
 _autolint_main() {
   local fix=0 json=0 rc=0 jobs file lint_file arg
   local files0_from="" files0_seen=0 parse_options=1 _autolint_force_manifest=0
-  local -a file_args=() lint_files=()
+  local -a file_args=() lint_files=() _autolint_files0_args=()
 
   while [ "$#" -gt 0 ]; do
     arg=$1
@@ -1326,29 +1367,22 @@ _autolint_main() {
     return 2
   fi
   if [ "$files0_seen" -eq 1 ]; then
-    if [ ! -f "$files0_from" ] || [ ! -r "$files0_from" ]; then
+    if [ "$files0_from" != "-" ] &&
+      { [ ! -f "$files0_from" ] || [ ! -r "$files0_from" ]; }; then
       echo "autolint: --files0-from requires a readable regular file: $files0_from" >&2
       return 2
     fi
-    # read -d '' preserves spaces, newlines, and raw filesystem bytes in Bash.
-    # Reset `file` before each attempt so a failed read with remaining bytes is
-    # distinguishable from the clean EOF after a correctly terminated record.
-    while :; do
-      file=""
-      if IFS= read -r -d '' file; then
-        if [ -z "$file" ]; then
-          echo "autolint: --files0-from contains an empty path: $files0_from" >&2
-          return 2
-        fi
-        file_args+=("$file")
-      else
-        if [ -n "$file" ]; then
-          echo "autolint: --files0-from must end with NUL: $files0_from" >&2
-          return 2
-        fi
-        break
-      fi
-    done <"$files0_from"
+    if [ "$files0_from" = "-" ]; then
+      _autolint_read_files0 "$files0_from"
+    else
+      # shellcheck disable=SC2094 # The helper only reads stdin; it never writes the source path.
+      _autolint_read_files0 "$files0_from" <"$files0_from"
+    fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      return "$rc"
+    fi
+    file_args+=(${_autolint_files0_args[@]+"${_autolint_files0_args[@]}"})
   fi
   # A manifest-backed caller may have a large inherited environment even when
   # the decoded path payload is below the ordinary argv threshold. Keep the

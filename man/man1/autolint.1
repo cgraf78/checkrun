@@ -12,7 +12,7 @@ autolint \- lint supported files through Checkrun policy
 .B autolint
 .RB [ --fix ]
 .RB [ --json ]
-.BI --files0-from " manifest"
+.BI --files0-from " manifest|-"
 .SH DESCRIPTION
 .B autolint
 lints each supplied file with the Checkrun-selected fast linter for that
@@ -31,10 +31,12 @@ Allow supported linters to apply safe fixes.
 .B --json
 Print JSON diagnostic records instead of human-readable output.
 .TP
-.BI --files0-from " file"
-Read paths from a NUL-delimited regular file instead of positional arguments.
-Every record must be non-empty and NUL-terminated. This option cannot be
-combined with positional files.
+.BI --files0-from " file|-"
+Read paths from a NUL-delimited regular file, or from standard input when the
+operand is
+.BR - ,
+instead of positional arguments. Every record must be non-empty and
+NUL-terminated. This option cannot be combined with positional files.
 .TP
 .B --
 End option parsing and treat every later argument as a file path.

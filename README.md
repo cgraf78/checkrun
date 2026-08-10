@@ -17,6 +17,7 @@ the bundled `man/man1/` pages into the user-local manpath.
 ```text
 checkrun registry --json
 checkrun capabilities --json
+checkrun capabilities --has autolint-files0-stdin
 checkrun editor-metadata --json
 checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
@@ -26,7 +27,7 @@ checkrun format|fmt FILE [FILE...]
 checkrun lint|check [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
 autolint [--fix] [--json] FILE [FILE...]
-autolint [--fix] [--json] --files0-from MANIFEST
+autolint [--fix] [--json] --files0-from MANIFEST|-
 ```
 
 `autoformat` always mutates eligible files. It exits 0 even when a formatter
@@ -36,8 +37,11 @@ fails so save-time hooks surface stderr without blocking the caller.
 newline-delimited diagnostics with `--json`. It exits non-zero when lint
 findings exist. `checkrun lint` and `checkrun check` are aliases for this same
 fast linter path. Integrations with large file sets can use `--files0-from`
-with a NUL-delimited regular file instead of expanding every path into argv;
-manifest input and positional paths are mutually exclusive.
+with a NUL-delimited regular file, or `--files0-from -` with NUL-delimited
+standard input, instead of expanding every path into argv; manifest input and
+positional paths are mutually exclusive. `checkrun capabilities --has
+autolint-files0-stdin` reports stdin-transport support through its exit status
+without starting the registry interpreter.
 
 `checkrun verify` is the explicit project-check surface for work that should
 not run from save-time editor lint. Its project backends are deduplicated by
