@@ -92,6 +92,19 @@ case "$cmd" in
   capabilities)
     shift
     case "${1:-}" in
+      --has)
+        if [ "$#" -ne 2 ]; then
+          printf 'checkrun capabilities: --has requires exactly one capability name\n' >&2
+          exit 2
+        fi
+        # Keep invocation capabilities in this shell launcher rather than the
+        # registry-derived editor JSON. Callers use only the status, so they can
+        # negotiate a transport before starting Python or parsing display text.
+        case "$2" in
+          autolint-files0-stdin) exit 0 ;;
+          *) exit 1 ;;
+        esac
+        ;;
       --json | "")
         [ "${1:-}" = "--json" ] && shift
         _run_registry_single_start capabilities --json "$@"

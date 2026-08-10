@@ -2629,6 +2629,51 @@ _assert_eq "files0: exit matches positional input" "$direct_rc" "$rc"
 _assert_eq "files0: output matches positional input" "$direct_output" "$output"
 
 set +e
+output=$(printf '%s\0%s\0' "$_td/a.sh" "$_td/clean.sh" |
+  "$AUTOLINT" --files0-from - 2>&1)
+rc=$?
+set -e
+_assert_exit "files0 stdin: preserves a lint finding" 1 "$rc"
+_assert_eq "files0 stdin: output matches regular manifest" "$direct_output" "$output"
+
+set +e
+output=$(printf '' | "$AUTOLINT" --files0-from - 2>&1)
+rc=$?
+set -e
+_assert_exit "files0 stdin: empty input is a no-op" 0 "$rc"
+_assert_eq "files0 stdin: empty input is quiet" "" "$output"
+
+set +e
+output=$("$AUTOLINT" --files0-from - <&- 2>&1)
+rc=$?
+set -e
+_assert_exit "files0 stdin: closed descriptor exits 2" 2 "$rc"
+_assert_contains "files0 stdin: closed descriptor is actionable" \
+  "requires a readable stream" "$output"
+
+set +e
+output=$("$AUTOLINT" --files0-from - <"$_td" 2>&1)
+rc=$?
+set -e
+_assert_exit "files0 stdin: directory descriptor exits 2" 2 "$rc"
+_assert_contains "files0 stdin: directory descriptor is actionable" \
+  "requires a readable stream" "$output"
+
+set +e
+output=$(printf '%s' "$_td/clean.sh" | "$AUTOLINT" --files0-from=- 2>&1)
+rc=$?
+set -e
+_assert_exit "files0 stdin: truncated input exits 2" 2 "$rc"
+_assert_contains "files0 stdin: truncated input explains NUL termination" "NUL" "$output"
+
+set +e
+output=$(printf '\0' | "$AUTOLINT" --files0-from - 2>&1)
+rc=$?
+set -e
+_assert_exit "files0 stdin: empty path exits 2" 2 "$rc"
+_assert_contains "files0 stdin: empty path is actionable" "empty path" "$output"
+
+set +e
 output=$("$AUTOLINT" --files0-from "$_lint_manifest" "$_td/clean.sh" 2>&1)
 rc=$?
 set -e

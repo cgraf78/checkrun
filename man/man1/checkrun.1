@@ -36,6 +36,12 @@ Print raw Checkrun registry metadata.
 .B capabilities [--json]
 Print generated capability metadata for editor and integration adapters.
 .TP
+.BI capabilities --has " name"
+Exit successfully when an invocation capability is supported and with status
+1 when it is not. The
+.B autolint-files0-stdin
+capability reports support for NUL-delimited standard-input transport.
+.TP
 .B editor-metadata --json
 Print a deterministic, versioned editor projection containing capabilities and
 portable LSP schema configuration. Home-relative values retain the

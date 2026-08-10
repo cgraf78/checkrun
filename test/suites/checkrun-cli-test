@@ -73,6 +73,39 @@ _assert_contains "schema: unknown subcommand is reported" "unknown command: miss
 
 echo "=== checkrun: capabilities ==="
 
+_capability_python_bin=$(_mock_bin)
+_capability_python_marker="$_capability_python_bin/started"
+cat >"$_capability_python_bin/python3" <<EOF
+#!/usr/bin/env bash
+touch "$_capability_python_marker"
+exit 99
+EOF
+chmod +x "$_capability_python_bin/python3"
+set +e
+output=$(CHECKRUN_PYTHON="$_capability_python_bin/python3" \
+  "$CHECKRUN" capabilities --has autolint-files0-stdin 2>&1)
+rc=$?
+set -e
+_assert_exit "capabilities: reports autolint files0 stdin" 0 "$rc"
+_assert_eq "capabilities: supported probe is quiet" "" "$output"
+_assert_file_missing "capabilities: invocation probe does not start Python" \
+  "$_capability_python_marker"
+
+set +e
+output=$("$CHECKRUN" capabilities --has unknown-capability 2>&1)
+rc=$?
+set -e
+_assert_exit "capabilities: unknown probe is unsupported" 1 "$rc"
+_assert_eq "capabilities: unsupported probe is quiet" "" "$output"
+
+set +e
+output=$("$CHECKRUN" capabilities --has 2>&1)
+rc=$?
+set -e
+_assert_exit "capabilities: missing probe name is a usage error" 2 "$rc"
+_assert_contains "capabilities: missing probe name is actionable" \
+  "--has requires exactly one capability name" "$output"
+
 output=$("$CHECKRUN" capabilities --json 2>&1)
 rc=$?
 _assert_exit "capabilities: --json exits 0" 0 "$rc"
