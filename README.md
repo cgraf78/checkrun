@@ -12,6 +12,26 @@ CLIs as their formatting and linting policy surface.
 `shdeps` installs the `bin/` entry points as PATH-visible symlinks and links
 the bundled `man/man1/` pages into the user-local manpath.
 
+## Install from a checkout
+
+Keep the checkout at a stable path and run:
+
+```bash
+./install.sh
+```
+
+The installer creates checkout-backed symlinks for all three commands under
+`$HOME/.local/bin` and for their manual pages under
+`$HOME/.local/share/man/man1`. Set `PREFIX` to relocate both trees, or set
+`BIN_DIR` and `MAN_DIR` independently. Re-running the installer is safe and
+retargets existing symlinks, but it refuses to replace a non-symlink path.
+Moving or deleting the checkout breaks the installed links.
+
+Command links resolve Checkrun's matching library, registry, and schemas from
+the checkout. The installer therefore creates no second `lib/checkrun/` or
+`share/checkrun/` tree and no completion tree. Continue to resolve non-binary
+assets through shdeps, or use their absolute paths in this checkout.
+
 ## CLIs
 
 ```text
