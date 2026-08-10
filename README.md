@@ -26,6 +26,7 @@ checkrun format|fmt FILE [FILE...]
 checkrun lint|check [--fix] [--json] FILE [FILE...]
 autoformat FILE [FILE...]
 autolint [--fix] [--json] FILE [FILE...]
+autolint [--fix] [--json] --files0-from MANIFEST
 ```
 
 `autoformat` always mutates eligible files. It exits 0 even when a formatter
@@ -34,7 +35,9 @@ fails so save-time hooks surface stderr without blocking the caller.
 `autolint` is read-only by default, applies fixes with `--fix`, and emits
 newline-delimited diagnostics with `--json`. It exits non-zero when lint
 findings exist. `checkrun lint` and `checkrun check` are aliases for this same
-fast linter path.
+fast linter path. Integrations with large file sets can use `--files0-from`
+with a NUL-delimited regular file instead of expanding every path into argv;
+manifest input and positional paths are mutually exclusive.
 
 `checkrun verify` is the explicit project-check surface for work that should
 not run from save-time editor lint. Its project backends are deduplicated by

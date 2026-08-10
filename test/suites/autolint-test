@@ -2603,6 +2603,80 @@ rc=$?
 set -e
 _assert_exit "hostile filename: tab/newline shell path lints" 0 "$rc"
 
+_newline_dir="$_td/"$'directory-ending-newline\n'
+mkdir -p "$_newline_dir"
+cp "$_td/a.sh" "$_newline_dir/a.sh"
+set +e
+output=$("$AUTOLINT" "$_newline_dir/a.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "hostile directory: trailing newline survives normalization" 1 "$rc"
+_assert_contains "hostile directory: normalized file is actually linted" "a.sh" "$output"
+
+echo "=== NUL manifest input ==="
+
+_lint_manifest="$_td/autolint-files0"
+printf '%s\0%s\0' "$_td/a.sh" "$_td/clean.sh" >"$_lint_manifest"
+set +e
+direct_output=$("$AUTOLINT" "$_td/a.sh" "$_td/clean.sh" 2>&1)
+direct_rc=$?
+output=$("$AUTOLINT" --files0-from "$_lint_manifest" 2>&1)
+rc=$?
+set -e
+_assert_exit "files0: preserves a lint finding" 1 "$rc"
+_assert_contains "files0: lints the first manifest path" "a.sh" "$output"
+_assert_eq "files0: exit matches positional input" "$direct_rc" "$rc"
+_assert_eq "files0: output matches positional input" "$direct_output" "$output"
+
+set +e
+output=$("$AUTOLINT" --files0-from "$_lint_manifest" "$_td/clean.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "files0: positional and manifest inputs are exclusive" 2 "$rc"
+_assert_contains "files0: mixed input is actionable" "cannot be combined" "$output"
+
+printf '%s' "$_td/clean.sh" >"$_td/autolint-files0-truncated"
+set +e
+output=$("$AUTOLINT" --files0-from "$_td/autolint-files0-truncated" 2>&1)
+rc=$?
+set -e
+_assert_exit "files0: truncated input exits 2" 2 "$rc"
+_assert_contains "files0: truncated input explains NUL termination" "NUL" "$output"
+
+printf '\0' >"$_td/autolint-files0-empty-record"
+set +e
+output=$("$AUTOLINT" --files0-from "$_td/autolint-files0-empty-record" 2>&1)
+rc=$?
+set -e
+_assert_exit "files0: empty path exits 2" 2 "$rc"
+_assert_contains "files0: empty path is actionable" "empty path" "$output"
+
+set +e
+output=$("$AUTOLINT" --unknown-option "$_td/clean.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "options: unknown option exits 2" 2 "$rc"
+_assert_contains "options: unknown option is named" "--unknown-option" "$output"
+
+_option_name_dir="$_td/option-name"
+mkdir -p "$_option_name_dir"
+printf '#!/bin/bash\necho ok\n' >"$_option_name_dir/--files0-from"
+cat >"$_option_name_dir/--dash.sh" <<'EOF'
+#!/bin/bash
+echo $UNDEFINED
+EOF
+set +e
+output=$(cd "$_option_name_dir" && "$AUTOLINT" -- --files0-from 2>&1)
+rc=$?
+set -e
+_assert_exit "options: separator keeps option-shaped filename positional" 0 "$rc"
+set +e
+output=$(cd "$_option_name_dir" && "$AUTOLINT" --dash.sh 2>&1)
+rc=$?
+set -e
+_assert_exit "options: existing legacy dash filename is linted" 1 "$rc"
+_assert_contains "options: legacy dash filename appears in diagnostics" "--dash.sh" "$output"
+
 # ---------------------------------------------------------------------------
 # Tests: graceful skip when linter not installed
 # ---------------------------------------------------------------------------

@@ -17,8 +17,8 @@ _JQ_SEVLIB='def sev($v):
     "hint":"hint","style":"hint"
   })[($v // "warning") | ascii_downcase] // "warning";'
 
-_lintable_path() {
-  local file="$1"
+_lintable_path_into() {
+  local output_name="$1" file="$2" normalized
 
   [ -z "$file" ] && return 1
   [ -f "$file" ] || return 1
@@ -28,9 +28,15 @@ _lintable_path() {
   # decisions live in the registry planner now; keeping them out of this prefilter
   # lets lint-ignore, spell-ignore, schema-ignore, and tool-ignore share one
   # source of truth with `checkrun plan` and `checkrun explain`.
-  file=$(_abs_path "$file") || return 1
+  _abs_path_into normalized "$file" || return 1
 
-  printf '%s\n' "$file"
+  printf -v "$output_name" '%s' "$normalized"
+}
+
+_lintable_path() {
+  local result
+  _lintable_path_into result "$1" || return 1
+  printf '%s\n' "$result"
 }
 
 # Emit a synthesized error-level diagnostic for tools with no structured output.

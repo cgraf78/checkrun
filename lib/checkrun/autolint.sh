@@ -7,6 +7,7 @@
 # Respects per-repo config files.
 #
 # Usage: autolint [--fix] [--json] <file> [file...]
+#        autolint [--fix] [--json] --files0-from FILE
 
 set -u
 
@@ -56,6 +57,7 @@ CHECKRUN_LIB_DIR="${BASH_SOURCE[0]%/*}"
 _autolint_usage() {
   printf '%s\n' \
     "Usage: autolint [--fix] [--json] [-h|--help] <file> [file...]" \
+    "       autolint [--fix] [--json] --files0-from FILE" \
     "" \
     "Lint files by extension. Unsupported files, missing files, ignored files," \
     "and files whose linter is not installed are skipped." \
@@ -81,7 +83,10 @@ _autolint_usage() {
     "" \
     "Options:" \
     "  --fix       Apply safe linter fixes where supported." \
+    "  --files0-from FILE" \
+    "              Read NUL-delimited paths from FILE instead of argv." \
     "  --json      Emit one unified JSON diagnostic per output line." \
+    "  --          End option parsing; treat later arguments as paths." \
     "  -h, --help  Show this help and exit." \
     "" \
     "Environment:" \
@@ -168,9 +173,38 @@ _autolint_pre_plan() {
   # records that directory before this interruptible planner runs, so every
   # return path can remove the exact invocation scratch without a glob.
   # Empty per-file plans are legitimate skips, not failures.
-  local out_dir="$1"
+  local out_dir="$1" manifest
   shift
-  _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint -- "$@"
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  # Keep the common one-file edit hook direct. Every multi-file request uses a
+  # manifest: relative paths can grow substantially when normalization makes
+  # them absolute, so a fixed byte threshold cannot guarantee that the second
+  # exec still fits alongside an arbitrarily large inherited environment.
+  if [ "${_autolint_force_manifest:-0}" -eq 0 ] && [ "$#" -eq 1 ]; then
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+    _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint -- "$@"
+    return
+  fi
+  # Sley can hand autolint thousands of files through a manifest, but expanding
+  # the normalized array into the Python planner's argv would merely move the
+  # same ARG_MAX failure one process deeper. Stage a private manifest inside the
+  # already-owned plan directory so the planner still runs exactly once with a
+  # bounded argv. mktemp supplies mode 0600 independent of the caller's umask.
+  manifest=$(mktemp "$out_dir/files0.XXXXXX") || {
+    echo "autolint: could not create registry input manifest" >&2
+    return 125
+  }
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  if ! printf '%s\0' "$@" >"$manifest"; then
+    echo "autolint: could not write registry input manifest" >&2
+    return 125
+  fi
+  # A trap can latch while the shell builtin is writing a large manifest. Do
+  # not start a new planner after that signal: it was not alive to receive the
+  # already-delivered process-group cancellation and could otherwise hang.
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint \
+    --files0-from "$manifest"
 }
 
 _lint_dispatch() {
@@ -1229,24 +1263,102 @@ _autolint_run_parallel_supervised() {
 
 _autolint_main() {
   local fix=0 json=0 rc=0 jobs file lint_file arg
+  local files0_from="" files0_seen=0 parse_options=1 _autolint_force_manifest=0
   local -a file_args=() lint_files=()
 
-  for arg in "$@"; do
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    if [ "$parse_options" -eq 0 ]; then
+      file_args+=("$arg")
+      continue
+    fi
     case "$arg" in
+      --) parse_options=0 ;;
       --fix) fix=1 ;;
       --json) json=1 ;;
+      --files0-from)
+        if [ "$files0_seen" -eq 1 ]; then
+          echo "autolint: --files0-from may be provided only once" >&2
+          return 2
+        fi
+        if [ "$#" -eq 0 ]; then
+          echo "autolint: --files0-from requires a file" >&2
+          return 2
+        fi
+        files0_from=$1
+        files0_seen=1
+        shift
+        ;;
+      --files0-from=*)
+        if [ "$files0_seen" -eq 1 ]; then
+          echo "autolint: --files0-from may be provided only once" >&2
+          return 2
+        fi
+        files0_from=${arg#*=}
+        files0_seen=1
+        [ -n "$files0_from" ] || {
+          echo "autolint: --files0-from requires a file" >&2
+          return 2
+        }
+        ;;
       -h | --help)
         _autolint_usage
         return 0
+        ;;
+      -*)
+        if [ -f "$arg" ]; then
+          # Before this parser grew manifest support, option-shaped existing
+          # paths were ordinary file arguments. Preserve that compatibility;
+          # only unknown non-files are usage errors.
+          file_args+=("$arg")
+        else
+          echo "autolint: unknown option: $arg" >&2
+          return 2
+        fi
         ;;
       *) file_args+=("$arg") ;;
     esac
   done
 
+  if [ "$files0_seen" -eq 1 ] && [ "${#file_args[@]}" -ne 0 ]; then
+    echo "autolint: --files0-from cannot be combined with positional files" >&2
+    return 2
+  fi
+  if [ "$files0_seen" -eq 1 ]; then
+    if [ ! -f "$files0_from" ] || [ ! -r "$files0_from" ]; then
+      echo "autolint: --files0-from requires a readable regular file: $files0_from" >&2
+      return 2
+    fi
+    # read -d '' preserves spaces, newlines, and raw filesystem bytes in Bash.
+    # Reset `file` before each attempt so a failed read with remaining bytes is
+    # distinguishable from the clean EOF after a correctly terminated record.
+    while :; do
+      file=""
+      if IFS= read -r -d '' file; then
+        if [ -z "$file" ]; then
+          echo "autolint: --files0-from contains an empty path: $files0_from" >&2
+          return 2
+        fi
+        file_args+=("$file")
+      else
+        if [ -n "$file" ]; then
+          echo "autolint: --files0-from must end with NUL: $files0_from" >&2
+          return 2
+        fi
+        break
+      fi
+    done <"$files0_from"
+  fi
+  # A manifest-backed caller may have a large inherited environment even when
+  # the decoded path payload is below the ordinary argv threshold. Keep the
+  # second planner boundary manifest-backed unconditionally in that mode.
+  _autolint_force_manifest=$files0_seen
+
   [ "${#file_args[@]}" -eq 0 ] && return 0
 
   for file in "${file_args[@]}"; do
-    if lint_file=$(_lintable_path "$file"); then
+    if _lintable_path_into lint_file "$file"; then
       lint_files+=("$lint_file")
     fi
   done
