@@ -539,7 +539,9 @@ items = registry_mod.plan(
 )["files"]
 for item, directory in zip(items, (left, right)):
     steps = {step["adapter"]: step for step in item["lint"]["steps"]}
-    assert steps["ruff-lint"]["config"]["path"] == str(directory / "ruff.toml")
+    assert steps["ruff-lint"]["config"]["path"] == str(
+        (directory / "ruff.toml").resolve()
+    )
 PY
 _assert_exit "registry: planning caches filesystem work for one operation only" 0 "$?"
 
@@ -567,7 +569,10 @@ import os
 import sys
 from pathlib import Path
 
-first, second = map(os.fsencode, sys.argv[1:3])
+# macOS fixture roots commonly use /var -> /private/var. Checkrun has always
+# canonicalized planner paths, so compare canonical filesystem bytes rather
+# than the caller's possibly symlinked spelling.
+first, second = (os.fsencode(Path(arg).resolve()) for arg in sys.argv[1:3])
 plan_dir = Path(sys.argv[3])
 
 
