@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "associations": [
+    {
+      "name": "Example application config",
+      "format": "json",
+      "schema": "application.schema.json",
+      "matches": [".config/example/application.json"],
+      "enforce": true,
+      "note": "A host-owned schema payload installed below the Checkrun XDG data directory."
+    },
+    {
+      "name": "Dependency-owned tool config",
+      "format": "toml",
+      "dependency": "example/tool",
+      "schema": "share/example/schemas/config.schema.json",
+      "matches": ["example.toml"],
+      "enforce": true,
+      "note": "A reusable schema that travels with the dependency which defines the config."
+    },
+    {
+      "name": "Editor-native settings",
+      "format": "yaml",
+      "editorSource": "vscode://schemas/example/settings",
+      "matches": [".config/example/settings.yaml"],
+      "enforce": false,
+      "note": "An editor-only association is not used by offline Checkrun validation."
+    }
+  ]
+}

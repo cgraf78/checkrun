@@ -101,6 +101,14 @@ default. Set `CHECKRUN_TEST_JOBS` to a positive integer to tune that bound for a
 specific host. Cancellation and hook-latency suites always run alone so faster
 feedback does not weaken their timing and process-lifecycle assertions.
 
+## Examples
+
+[`examples/`](examples/) contains checked, copyable examples for schema
+association policy, a shfmt fallback, and a Shdeps-backed Neovim integration.
+Their tests exercise Checkrun's real policy parser, metadata generator, TOML
+reader, and Neovim adapter so documentation cannot silently drift from the
+public interfaces it demonstrates.
+
 ## Public API
 
 - `bin/checkrun`, `bin/autoformat`, and `bin/autolint` are the PATH-visible
