@@ -12,9 +12,19 @@ CLIs as their formatting and linting policy surface.
 `shdeps` installs the `bin/` entry points as PATH-visible symlinks and links
 the bundled `man/man1/` pages into the user-local manpath.
 
-## Install from a checkout
+## Install
 
-Keep the checkout at a stable path and run:
+```bash
+curl -fsSL https://raw.githubusercontent.com/cgraf78/checkrun/main/install.sh | bash
+```
+
+This keeps a durable managed checkout under `$XDG_DATA_HOME` when that path is
+absolute, or under `$HOME/.local/share` otherwise, and publishes links to its
+commands and manual pages. Rerunning the curl command safely updates the clean
+managed checkout before republishing the links.
+
+To choose and manage the checkout yourself instead, keep it at a stable path
+and run:
 
 ```bash
 ./install.sh

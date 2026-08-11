@@ -4,6 +4,8 @@ program	bin/autoformat
 program	bin/autolint
 program	bin/checkrun
 program	install.sh
+program	scripts/checkout-installer.conf
+program	support/install-checkout.sh
 program	lib/checkrun/autoformat.sh
 program	lib/checkrun/autolint.sh
 program	lib/checkrun/common.sh
