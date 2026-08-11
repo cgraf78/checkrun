@@ -14,6 +14,9 @@ the focused suites under `test/suites/`.
 - `autoformat-test` and `autolint-test` protect the compatibility commands.
 - `hook-performance-test` protects the process count and coarse p95 latency of
   unsupported-file autoformat and autolint paths used by edit hooks.
+- `install-test` covers the standalone checkout-backed command and manpage
+  links, idempotent retargeting, custom destinations, complete source
+  preflight, and refusal to overwrite user-owned paths.
 - The required shared Actions gate scans tracked and non-ignored untracked
   files, validates `test/shellcheck-files.txt`, and runs ShellCheck once.
   Inventory records use `program<TAB>path`; reviewed shell fixture exclusions
