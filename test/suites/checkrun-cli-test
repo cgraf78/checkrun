@@ -34,6 +34,24 @@ rc=$?
 _assert_exit "check alias: --help exits 0" 0 "$rc"
 _assert_contains "check alias: dispatches to autolint" "Usage: autolint" "$output"
 
+# The alias is a public compatibility surface, so preserve argument boundaries
+# and ordering here at the provider rather than relying on a consumer's test.
+_alias_root=$(_tmpdir)
+_alias_log="$_alias_root/arguments.log"
+mkdir -p "$_alias_root/bin" "$_alias_root/lib/checkrun"
+cp "$CHECKRUN" "$_alias_root/bin/checkrun"
+cp "$CHECKRUN_REPO_ROOT/lib/checkrun/common.sh" \
+  "$_alias_root/lib/checkrun/common.sh"
+cat >"$_alias_root/bin/autolint" <<'EOF'
+#!/usr/bin/env bash
+printf '<%s>\n' "$@" >"$CHECKRUN_ALIAS_LOG"
+EOF
+chmod +x "$_alias_root/bin/checkrun" "$_alias_root/bin/autolint"
+CHECKRUN_ALIAS_LOG="$_alias_log" \
+  "$_alias_root/bin/checkrun" check -- "file with spaces.py" --json
+_assert_file_content "check alias: forwards arguments exactly" \
+  $'<-->\n<file with spaces.py>\n<--json>' "$_alias_log"
+
 output=$("$CHECKRUN" schema --help 2>&1)
 rc=$?
 _assert_exit "schema help: --help exits 0" 0 "$rc"
