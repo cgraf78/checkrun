@@ -9,7 +9,6 @@ lockfile = true
 lockfile_platforms = ["linux-x64", "macos-arm64"]
 
 [tools]
-"core:python" = "3.12"
 "aqua:astral-sh/ruff" = "latest"
 "aqua:bazelbuild/buildtools/buildifier" = "latest"
 "aqua:biomejs/biome" = "latest"
