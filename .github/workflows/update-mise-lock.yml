@@ -13,7 +13,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: cgraf78/actions/.github/workflows/mise-lock-refresh.yml@de3f6086e36a77eec8ee62f2c9871266e4b5c05c
+    uses: cgraf78/actions/.github/workflows/mise-lock-refresh.yml@dc7be3dcf6da264083f229d78818c2ad087a3d34
     with:
       project_name: Checkrun
       mise_config_file: .github/mise/checkrun-ci.toml
