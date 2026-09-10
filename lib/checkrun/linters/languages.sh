@@ -24,24 +24,32 @@ _lint_ruby() {
 # for every candidate on PATH plus the homebrew/system fallbacks, which is the
 # bulk of `_lint_php`'s cost. Sentinel "__none__" prevents repeating the probe
 # when no usable PHP exists on this host.
+#
+# Reports the path via REPLY (not stdout) so callers can invoke this without
+# command substitution: a $() subshell would discard the cache assignment.
 _CHECKRUN_PHP_CLI_CACHE=""
 
 _php_cli() {
   if [ -n "$_CHECKRUN_PHP_CLI_CACHE" ]; then
     [ "$_CHECKRUN_PHP_CLI_CACHE" = "__none__" ] && return 1
-    echo "$_CHECKRUN_PHP_CLI_CACHE"
+    REPLY="$_CHECKRUN_PHP_CLI_CACHE"
     return 0
   fi
 
-  local candidate
+  # `out` is declared apart from its assignment so a failing `-v` probe keeps
+  # a nonzero status; `local out=$(...)` would mask it as 0.
+  local candidate out
 
   # Managed hosts can put a non-PHP compatibility shim ahead of PHP on PATH.
   # Probe every candidate so project/user PHP still wins when deliberately first.
+  # Candidates whose own `-v` probe fails are skipped like the HHVM shim: a
+  # broken first-on-PATH php must not poison every later `php -l` invocation.
   while IFS= read -r candidate; do
     [[ -n "$candidate" && -x "$candidate" ]] || continue
-    "$candidate" -v 2>&1 | grep -q 'HipHop VM' && continue
+    out=$("$candidate" -v 2>&1) || continue
+    [[ "$out" == *"HipHop VM"* ]] && continue
     _CHECKRUN_PHP_CLI_CACHE="$candidate"
-    echo "$candidate"
+    REPLY="$candidate"
     return 0
   done < <(type -P -a php 2>/dev/null | awk '!seen[$0]++')
 
@@ -51,9 +59,10 @@ _php_cli() {
     /usr/bin/php \
     /usr/local/bin/php; do
     [[ -x "$candidate" ]] || continue
-    "$candidate" -v 2>&1 | grep -q 'HipHop VM' && continue
+    out=$("$candidate" -v 2>&1) || continue
+    [[ "$out" == *"HipHop VM"* ]] && continue
     _CHECKRUN_PHP_CLI_CACHE="$candidate"
-    echo "$candidate"
+    REPLY="$candidate"
     return 0
   done
 
@@ -63,7 +72,8 @@ _php_cli() {
 
 _lint_php() {
   local file="$1" php
-  php=$(_php_cli) || return 0
+  _php_cli || return 0
+  php=$REPLY
   _lint_text_command "php" "$file" "$php" -l "$file"
 }
 
