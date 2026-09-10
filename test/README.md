@@ -24,6 +24,8 @@ the focused suites under `test/suites/`.
 - `nvim-test` covers the optional Neovim Lua adapter, including host
   materialization of checked editor metadata, dependency URLs, HOME paths, and
   TOML regex keys.
+- `linter-probes-test` unit-tests linter adapter probing with mock tools:
+  the shellcheckrc fallback translator and the PHP binary probe.
 
 Prefer adding assertions to the suite that owns the API being changed. Registry
 changes usually need both registry-level coverage and one behavior test proving

@@ -641,10 +641,11 @@ _assert_eq "clean batch fallback: Ruff runs once speculatively and once per file
 # Schema validation is policy-driven and cross-cutting: fixture JSON
 # and YAML names should be checked before extension dispatch decides which
 # language linter, if any, also applies.
-if python3 - <<'PY' >/dev/null 2>&1; then
+if python3 - <<'PY' >/dev/null 2>&1
 import jsonschema
 import yaml
 PY
+then
   _schema_td=$(_tmpdir)
   _schema_dir="$_schema_td/copy/.config/example/schema.d"
   mkdir -p "$_schema_dir" "$_schema_td/schemas"
@@ -1913,6 +1914,11 @@ echo "=== PHP lint ==="
 _php_mock=$(_mock_bin)
 cat >"$_php_mock/php" <<'EOF'
 #!/usr/bin/env bash
+# A working php answers `-v` with exit 0; only the `-l` invocation fails here.
+if [[ "${1:-}" == "-v" ]]; then
+  echo "PHP 8.3.0 test"
+  exit 0
+fi
 echo "MOCK-PHP-ARGS: $*"
 exit 13
 EOF

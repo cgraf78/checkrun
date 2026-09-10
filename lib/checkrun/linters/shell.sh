@@ -4,6 +4,12 @@
 #
 # Adapter helpers read the current invocation's dynamically scoped `json` flag.
 
+# Fallback shellcheckrc path already warned about this process. The
+# translator below only maps `disable=` to `-e`; anything else is reported
+# once per process for the active fallback path (single-slot record, so
+# switching paths re-warns) rather than once per linted file.
+_CHECKRUN_SHELLCHECK_FALLBACK_WARNED=""
+
 _shellcheck_lang_hint() {
   case "${1##*/}" in
     .bashrc | .bash_profile | .profile | .envrc | envrc | envrc-*)
@@ -25,13 +31,54 @@ _lint_sh() {
   # Project `.shellcheckrc` is still left to ShellCheck's native discovery, but
   # the decision to suppress the fallback comes from the registry plan. That
   # keeps `checkrun plan`, explain output, and execution on the same policy path.
+  #
+  # Only `disable=` is translatable (`-e`); any other directive is reported
+  # instead of silently dropped so fallback authors learn it did not apply.
   if [ "$config_source" = "fallback" ] && [ -f "$config_path" ]; then
-    local key val
-    while IFS='=' read -r key val; do
-      case "$key" in
-        disable) args+=(-e "$val") ;;
+    local key val line unsupported=" "
+    while IFS= read -r line || [ -n "$line" ]; do
+      # Tolerate CRLF files, surrounding whitespace, and trailing comments so
+      # an innocent `disable=SC2086 # reason` does not become a garbage `-e`
+      # value (shellcheck rejects it with `Invalid number`, rc 3). Keys and
+      # disable values never contain `#`, so comment stripping is safe here.
+      line=${line%$'\r'}
+      line=${line%%#*}
+      line=${line#"${line%%[![:space:]]*}"}
+      line=${line%"${line##*[![:space:]]}"}
+      [ -n "$line" ] || continue
+      case "$line" in
+        *=*)
+          key=${line%%=*}
+          val=${line#*=}
+          ;;
+        *)
+          key="$line"
+          val=""
+          ;;
       esac
-    done < <(grep -E '^[a-z-]+=' "$config_path")
+      # Allow `key = value` spacing around the separator.
+      key=${key%"${key##*[![:space:]]}"}
+      val=${val#"${val%%[![:space:]]*}"}
+      val=${val%"${val##*[![:space:]]}"}
+      # An empty key is malformed input; report the raw line, not nothing.
+      [ -n "$key" ] || key="$line"
+      case "$key" in
+        disable) [ -n "$val" ] && args+=(-e "$val") ;;
+        *)
+          # Deduplicate so one warning line names each ignored directive once.
+          case "$unsupported" in
+            *" $key "*) ;;
+            *) unsupported="$unsupported$key " ;;
+          esac
+          ;;
+      esac
+    done <"$config_path"
+    if [ "$unsupported" != " " ] &&
+      [ "$_CHECKRUN_SHELLCHECK_FALLBACK_WARNED" != "$config_path" ]; then
+      printf 'checkrun: warning: %s: only %s is translated; ignoring:%s\n' \
+        "$config_path" "'disable='" "${unsupported% }" >&2
+      _CHECKRUN_SHELLCHECK_FALLBACK_WARNED="$config_path"
+    fi
   fi
   if [ "$json" -eq 1 ]; then
     local out tool_rc

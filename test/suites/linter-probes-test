@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# linter-probes-test — unit tests for linter adapter probing and fallback config.
+#
+# Covers the shellcheckrc fallback translator (`_lint_sh`) and the PHP binary
+# probe (`_php_cli`/`_lint_php`) with mock tools on PATH: comment/whitespace/
+# CRLF handling, loud warnings for untranslatable directives, broken-candidate
+# skipping, and in-process memoization.
+#
+# Usage: linter-probes-test
+#
+# Adapter helpers read the caller's dynamically scoped `json`/`fix` flags;
+# this suite assigns those contract variables without reading them back.
+# shellcheck disable=SC2034
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+json=0
+fix=0
+
+# shellcheck source=../../lib/checkrun/linters/core.sh
+. "$CHECKRUN_TEST_ROOT/lib/checkrun/linters/core.sh"
+# shellcheck source=../../lib/checkrun/linters/shell.sh
+. "$CHECKRUN_TEST_ROOT/lib/checkrun/linters/shell.sh"
+# shellcheck source=../../lib/checkrun/linters/languages.sh
+. "$CHECKRUN_TEST_ROOT/lib/checkrun/linters/languages.sh"
+
+REAL_PATH="$PATH"
+
+echo "=== shellcheckrc fallback translator ==="
+
+shell_bin=$(_mock_bin)
+export PATH="$shell_bin:$PATH"
+shellcheck_log=$(_tmpdir)/shellcheck-args.log
+cat >"$shell_bin/shellcheck" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$shellcheck_log"
+exit 0
+EOF
+chmod +x "$shell_bin/shellcheck"
+
+shell_target_dir=$(_tmpdir)
+shell_target="$shell_target_dir/target.sh"
+printf 'echo hi\n' >"$shell_target"
+
+# Trailing comments, trailing whitespace, CRLF endings, and spacing around
+# `=` must all yield clean `-e` values instead of garbage shellcheck rejects.
+shell_rc=$(_tmpdir)/shellcheckrc
+printf '%s\n' '# a full-line comment' 'disable=SC2086 # trailing reason' 'disable=SC1091   ' >"$shell_rc"
+printf 'disable=SC2016\r\n' >>"$shell_rc"
+printf '   disable = SC2034  \n' >>"$shell_rc"
+
+: >"$shellcheck_log"
+_lint_sh "$shell_target" "" "" "fallback" "$shell_rc"
+_assert_exit "shellcheckrc: clean file lints successfully" 0 "$?"
+_logged=$(cat "$shellcheck_log")
+_expected_excludes=$'-e\nSC2086\n-e\nSC1091\n-e\nSC2016\n-e\nSC2034\n'
+_assert_eq "shellcheckrc: strips comments/whitespace/CR from disable values" \
+  "$_expected_excludes$shell_target" "$_logged"
+
+# Directives the translator cannot map must warn loudly instead of being
+# silently dropped; the translatable `disable=` line still applies.
+shell_warn_rc=$(_tmpdir)/warn-shellcheckrc
+printf '%s\n' 'disable=SC2086' 'enable=avoid-nullary-conditions' 'source-path=/opt/sh' 'severity=warning' >"$shell_warn_rc"
+shell_err=$(_tmpdir)/shellcheck-stderr.log
+_CHECKRUN_SHELLCHECK_FALLBACK_WARNED=""
+: >"$shellcheck_log"
+_lint_sh "$shell_target" "" "" "fallback" "$shell_warn_rc" 2>"$shell_err"
+_warn_output=$(cat "$shell_err")
+_assert_contains "shellcheckrc: warns about untranslatable directives" \
+  "checkrun: warning" "$_warn_output"
+_assert_contains "shellcheckrc: warning names enable" "enable" "$_warn_output"
+_assert_contains "shellcheckrc: warning names source-path" "source-path" "$_warn_output"
+_assert_contains "shellcheckrc: warning names severity" "severity" "$_warn_output"
+_logged=$(cat "$shellcheck_log")
+_assert_contains "shellcheckrc: disable still translates alongside warnings" \
+  "SC2086" "$_logged"
+
+# The warning fires once per process per config path, not once per linted file.
+_CHECKRUN_SHELLCHECK_FALLBACK_WARNED=""
+: >"$shell_err"
+_lint_sh "$shell_target" "" "" "fallback" "$shell_warn_rc" 2>>"$shell_err"
+_lint_sh "$shell_target" "" "" "fallback" "$shell_warn_rc" 2>>"$shell_err"
+_assert_eq "shellcheckrc: warning fires once per process" \
+  "1" "$(grep -c 'checkrun: warning' "$shell_err")"
+shell_warn_rc2=$(_tmpdir)/warn-shellcheckrc2
+printf '%s\n' 'external-sources=true' >"$shell_warn_rc2"
+_lint_sh "$shell_target" "" "" "fallback" "$shell_warn_rc2" 2>>"$shell_err"
+_assert_eq "shellcheckrc: a second config path warns again" \
+  "2" "$(grep -c 'checkrun: warning' "$shell_err")"
+
+# Empty `disable=` values add no `-e` flag rather than an empty one.
+shell_empty_rc=$(_tmpdir)/empty-shellcheckrc
+printf '%s\n' 'disable=' 'disable=   ' >"$shell_empty_rc"
+_CHECKRUN_SHELLCHECK_FALLBACK_WARNED=""
+: >"$shellcheck_log"
+_lint_sh "$shell_target" "" "" "fallback" "$shell_empty_rc" 2>"$shell_err"
+_assert_eq "shellcheckrc: empty disable adds no flags" \
+  "$shell_target" "$(cat "$shellcheck_log")"
+
+# Project configs are left to shellcheck's native discovery: no translation,
+# no warnings.
+_CHECKRUN_SHELLCHECK_FALLBACK_WARNED=""
+: >"$shellcheck_log"
+_lint_sh "$shell_target" "" "" "project" "$shell_warn_rc" 2>"$shell_err"
+_assert_eq "shellcheckrc: project source adds no flags" \
+  "$shell_target" "$(cat "$shellcheck_log")"
+_assert_eq "shellcheckrc: project source warns about nothing" "" "$(cat "$shell_err")"
+
+echo ""
+echo "=== PHP binary probe ==="
+
+probe_log=$(_tmpdir)/php-probes.log
+export PROBE_LOG="$probe_log"
+
+php_first=$(_mock_bin)
+cat >"$php_first/php" <<'EOF'
+#!/usr/bin/env bash
+printf 'first-probe\n' >>"$PROBE_LOG"
+exit 1
+EOF
+chmod +x "$php_first/php"
+
+php_second=$(_mock_bin)
+cat >"$php_second/php" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-v" ]]; then
+  printf 'second-probe\n' >>"$PROBE_LOG"
+  printf 'PHP 8.2.0 (cli) (built: test)\n'
+  exit 0
+fi
+if [[ "${1:-}" == "-l" ]]; then
+  printf 'No syntax errors detected in %s\n' "${2:-unknown}"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$php_second/php"
+
+hhvm_bin=$(_mock_bin)
+cat >"$hhvm_bin/php" <<'EOF'
+#!/usr/bin/env bash
+printf 'hhvm-probe\n' >>"$PROBE_LOG"
+printf 'HipHop VM 4.0.0 (rel)\n'
+exit 0
+EOF
+chmod +x "$hhvm_bin/php"
+
+lintfail_bin=$(_mock_bin)
+cat >"$lintfail_bin/php" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-v" ]]; then
+  printf 'PHP 8.1.0 (cli)\n'
+  exit 0
+fi
+printf 'Parse error: syntax error in %s on line 1\n' "${2:-unknown}"
+exit 255
+EOF
+chmod +x "$lintfail_bin/php"
+
+# A candidate whose own `-v` probe fails is skipped instead of selected.
+export PATH="$php_first:$php_second:$REAL_PATH"
+_CHECKRUN_PHP_CLI_CACHE=""
+: >"$probe_log"
+if _php_cli; then
+  _assert_eq "php: skips candidate whose -v probe fails" "$php_second/php" "$REPLY"
+else
+  _fail "php: skips candidate whose -v probe fails (probe reported none)"
+fi
+_assert_eq "php: broken first candidate was attempted then skipped" \
+  $'first-probe\nsecond-probe' "$(cat "$probe_log")"
+
+# The cache assignment persists in the caller's shell: no subshell, no re-probe.
+_probes_before=$(cat "$probe_log")
+if _php_cli; then
+  _assert_eq "php: cached call resolves identically" "$php_second/php" "$REPLY"
+else
+  _fail "php: cached call resolves identically (probe reported none)"
+fi
+_assert_eq "php: cache holds the resolved binary" \
+  "$php_second/php" "$_CHECKRUN_PHP_CLI_CACHE"
+_assert_eq "php: cached call spawns no new probes" \
+  "$_probes_before" "$(cat "$probe_log")"
+
+# The HHVM compatibility shim is still skipped.
+export PATH="$hhvm_bin:$php_second:$REAL_PATH"
+_CHECKRUN_PHP_CLI_CACHE=""
+: >"$probe_log"
+if _php_cli; then
+  _assert_eq "php: skips the HHVM shim" "$php_second/php" "$REPLY"
+else
+  _fail "php: skips the HHVM shim (probe reported none)"
+fi
+_assert_eq "php: HHVM candidate was attempted then skipped" \
+  $'hhvm-probe\nsecond-probe' "$(cat "$probe_log")"
+
+# Whether "no usable PHP" is reachable depends on the host's hardcoded
+# fallback paths; skip the negative tests when a working fallback exists.
+host_fallback_php=0
+for _cand in \
+  /opt/homebrew/opt/php/bin/php \
+  /usr/local/opt/php/bin/php \
+  /usr/bin/php \
+  /usr/local/bin/php; do
+  if [[ -x "$_cand" ]] && _out=$("$_cand" -v 2>&1); then
+    [[ "$_out" == *"HipHop VM"* ]] || host_fallback_php=1
+  fi
+done
+
+none_bin=$(_tmpdir)
+ln -s "$(command -v awk)" "$none_bin/awk"
+ln -s "$(command -v bash)" "$none_bin/bash"
+
+# A cached negative result reports none without probing. Seeded directly so
+# this holds on hosts with a working fallback php too.
+export PATH="$php_first:$hhvm_bin:$none_bin"
+_CHECKRUN_PHP_CLI_CACHE="__none__"
+: >"$probe_log"
+if _php_cli; then
+  _fail "php: negative cache still reports none"
+else
+  _pass "php: negative cache still reports none"
+fi
+# PATH is restricted here, so read the log without forking `cat`.
+_assert_eq "php: negative cache spawns no new probes" "" "$(<"$probe_log")"
+
+if [[ "$host_fallback_php" -eq 1 ]]; then
+  _pass "php: none-case skipped (host has a working fallback php)"
+else
+  export PATH="$php_first:$hhvm_bin:$none_bin"
+  _CHECKRUN_PHP_CLI_CACHE=""
+  : >"$probe_log"
+  if _php_cli; then
+    _fail "php: reports none when every candidate is unusable"
+  else
+    _pass "php: reports none when every candidate is unusable"
+  fi
+  _assert_eq "php: caches the negative result" "__none__" "$_CHECKRUN_PHP_CLI_CACHE"
+fi
+
+# End to end: the selected binary actually lints, and tool failure propagates.
+export PATH="$php_second:$REAL_PATH"
+_CHECKRUN_PHP_CLI_CACHE=""
+php_target=$(_tmpdir)/ok.php
+printf '<?php echo "hi";\n' >"$php_target"
+_lint_out=$(_lint_php "$php_target")
+_assert_exit "php: clean file exits 0" 0 "$?"
+_assert_eq "php: clean file is silent" "" "$_lint_out"
+
+export PATH="$lintfail_bin:$REAL_PATH"
+_CHECKRUN_PHP_CLI_CACHE=""
+_lint_out=$(_lint_php "$php_target")
+_assert_exit "php: syntax error propagates the tool exit" 255 "$?"
+_assert_contains "php: syntax error surfaces tool output" "Parse error" "$_lint_out"
+
+if [[ "$host_fallback_php" -eq 1 ]]; then
+  _pass "php: missing-tool no-op skipped (host has a working fallback php)"
+else
+  export PATH="$php_first:$hhvm_bin:$none_bin"
+  _CHECKRUN_PHP_CLI_CACHE=""
+  _lint_out=$(_lint_php "$php_target")
+  _assert_exit "php: missing tool is a silent no-op" 0 "$?"
+  _assert_eq "php: missing tool prints nothing" "" "$_lint_out"
+fi
+export PATH="$REAL_PATH"
+
+_test_summary
