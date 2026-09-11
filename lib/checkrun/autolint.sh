@@ -316,68 +316,214 @@ _autolint_run_clean_batch_step() {
   done
 }
 
+_autolint_is_batchable_adapter() {
+  # Single source of truth for speculative batching. ShellCheck is
+  # intentionally absent: giving it multiple inputs changes
+  # source-following diagnostics, so process batching is not equivalent to
+  # the established independent-file checks.
+  case "$1" in
+    ruff-lint | selene | typos) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_autolint_flush_clean_batch_run() {
+  # Run one accumulated homogeneous record run as part of the speculative
+  # clean batch. The run key matches the registry grouping (adapter, config
+  # source, config path); filetype and phase vary within a run and are
+  # ignored by every batch backend. Stdout is discarded and stderr buffered:
+  # any failure abandons the whole probe and the authoritative per-file path
+  # reproduces diagnostics, so buffered output only survives when every run
+  # succeeds. Returns the cancellation status when latched, else 1 on failure.
+  local stderr_file="$1" adapter="$2" _filetype="$3" _step_phase="$4"
+  local config_source="$5" config_path="$6"
+  shift 6
+
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  _autolint_is_batchable_adapter "$adapter" || return 1
+  _autolint_run_clean_batch_step "$adapter" "$_filetype" "$_step_phase" \
+    "$config_source" "$config_path" "$@" >/dev/null 2>>"$stderr_file" || return 1
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  return 0
+}
+
+_autolint_build_residual_plans() {
+  # Copy each per-file plan with batchable-adapter records removed, so the
+  # speculative probe can dispatch residuals through the established per-file
+  # machinery. Files with no residuals get no plan file, which the pool,
+  # barrier, and sequential dispatchers all skip the same way they skip
+  # empty plans.
+  local plan_dir="$1" residual_dir="$2" count="$3"
+  local index path filetype step_phase adapter config_source config_path
+
+  mkdir "$residual_dir" || return 1
+  index=0
+  while [ "$index" -lt "$count" ]; do
+    if [ -s "$plan_dir/$index.plan" ]; then
+      while IFS= read -r -d '' path &&
+        IFS= read -r -d '' filetype &&
+        IFS= read -r -d '' step_phase &&
+        IFS= read -r -d '' adapter &&
+        IFS= read -r -d '' config_source &&
+        IFS= read -r -d '' config_path; do
+        if _autolint_is_batchable_adapter "$adapter"; then
+          continue
+        fi
+        printf '%s\0' "$path" "$filetype" "$step_phase" \
+          "$adapter" "$config_source" "$config_path" \
+          >>"$residual_dir/$index.plan" || return 1
+      done <"$plan_dir/$index.plan"
+    fi
+    index=$((index + 1))
+  done
+  return 0
+}
+
 _autolint_try_clean_batch() {
-  local plan_dir="$1"
-  local filetype step_phase adapter config_source config_path index batch_stderr
-  local -a files batch_filetypes batch_phases batch_adapters batch_sources batch_paths
-  shift
+  local plan_dir="$1" jobs="$2" allow_parallel="$3"
+  local path filetype step_phase adapter config_source config_path batch_stderr
+  local residual_dir residual_stdout residual_stderr
+  local run_adapter="" run_filetype="" run_phase="" run_source="" run_config=""
+  local expected_count="" actual_count=0 flush_rc res_rc batch_rc start
+  local residual_seen=0
+  local -a files run_files
+  shift 3
   files=("$@")
 
   [ "${#files[@]}" -gt 1 ] || return 1
   [ -s "$plan_dir/batch.plan" ] || return 1
+  [ -s "$plan_dir/batch.count" ] || return 1
   command -v yq >/dev/null 2>&1 || return 1
+  IFS= read -r expected_count <"$plan_dir/batch.count" || return 1
+  case "$expected_count" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
 
-  # Validate the complete manifest before running any backend. This keeps a
-  # future non-batchable adapter from causing partial speculative work before
-  # the established per-file path takes over.
-  while IFS= read -r -d '' filetype &&
+  # The manifest carries every step of every file grouped by (adapter,
+  # config), so mixed sets batch per adapter group instead of abandoning the
+  # probe when one file needs a non-batchable adapter. Batchable runs share
+  # one backend invocation; residuals dispatch per file through the same
+  # pool, barrier, or sequential path the authoritative run would use. A
+  # failed probe discards all buffers and reruns the authoritative per-file
+  # path so diagnostic order and attribution stay unchanged.
+  batch_stderr="$plan_dir/batch.stderr"
+  residual_stdout="$plan_dir/residual.stdout"
+  residual_stderr="$plan_dir/residual.stderr"
+  residual_dir="$plan_dir/residual"
+  : >"$batch_stderr" || return 1
+  run_files=()
+  while IFS= read -r -d '' path &&
+    IFS= read -r -d '' filetype &&
     IFS= read -r -d '' step_phase &&
     IFS= read -r -d '' adapter &&
     IFS= read -r -d '' config_source &&
     IFS= read -r -d '' config_path; do
-    # ShellCheck is intentionally absent: giving it multiple inputs changes
-    # source-following diagnostics, so process batching is not equivalent to
-    # the established independent-file checks.
-    case "$adapter" in
-      ruff-lint | selene | typos) ;;
-      *) return 1 ;;
-    esac
-    batch_filetypes+=("$filetype")
-    batch_phases+=("$step_phase")
-    batch_adapters+=("$adapter")
-    batch_sources+=("$config_source")
-    batch_paths+=("$config_path")
+    actual_count=$((actual_count + 1))
+    if _autolint_is_batchable_adapter "$adapter"; then
+      if [ "${#run_files[@]}" -gt 0 ] && {
+        [ "$adapter" != "$run_adapter" ] ||
+          [ "$config_source" != "$run_source" ] ||
+          [ "$config_path" != "$run_config" ]
+      }; then
+        _autolint_flush_clean_batch_run "$batch_stderr" \
+          "$run_adapter" "$run_filetype" "$run_phase" \
+          "$run_source" "$run_config" "${run_files[@]}" || {
+          flush_rc=$?
+          rm -f "$batch_stderr"
+          return "$flush_rc"
+        }
+        run_files=()
+      fi
+      if [ "${#run_files[@]}" -eq 0 ]; then
+        run_adapter="$adapter"
+        run_filetype="$filetype"
+        run_phase="$step_phase"
+        run_source="$config_source"
+        run_config="$config_path"
+      fi
+      run_files+=("$path")
+    else
+      residual_seen=1
+    fi
   done <"$plan_dir/batch.plan"
 
-  [ "${#batch_adapters[@]}" -gt 0 ] || return 1
-  batch_stderr="$plan_dir/batch.stderr"
-  : >"$batch_stderr" || return 1
-  for index in "${!batch_adapters[@]}"; do
-    [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+  if [ "${#run_files[@]}" -gt 0 ]; then
+    _autolint_flush_clean_batch_run "$batch_stderr" \
+      "$run_adapter" "$run_filetype" "$run_phase" \
+      "$run_source" "$run_config" "${run_files[@]}" || {
+      flush_rc=$?
       rm -f "$batch_stderr"
-      return "$_autolint_cancel_status"
+      return "$flush_rc"
     }
-    # Routine clean stdout is intentionally quiet. Buffer exit-0 warnings until
-    # every adapter succeeds; a failed probe discards both streams and reruns
-    # the authoritative per-file path so diagnostic order and attribution stay
-    # unchanged.
-    _autolint_run_clean_batch_step \
-      "${batch_adapters[$index]}" \
-      "${batch_filetypes[$index]}" \
-      "${batch_phases[$index]}" \
-      "${batch_sources[$index]}" \
-      "${batch_paths[$index]}" \
-      "${files[@]}" >/dev/null 2>>"$batch_stderr" || {
-      rm -f "$batch_stderr"
-      return 1
-    }
-    [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
-      rm -f "$batch_stderr"
-      return "$_autolint_cancel_status"
-    }
-  done
+  fi
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    rm -f "$batch_stderr"
+    return "$_autolint_cancel_status"
+  }
+  # A short or over-long manifest must never become a silent partial lint.
+  if [ "$actual_count" -ne "$expected_count" ]; then
+    rm -f "$batch_stderr"
+    return 1
+  fi
+
+  if [ "$residual_seen" -eq 0 ]; then
+    [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
+    rm -f "$batch_stderr" || true
+    return 0
+  fi
+
+  if ! _autolint_build_residual_plans \
+    "$plan_dir" "$residual_dir" "${#files[@]}"; then
+    rm -f "$batch_stderr"
+    return 1
+  fi
+  : >"$residual_stdout" || {
+    rm -f "$batch_stderr"
+    return 1
+  }
+  : >"$residual_stderr" || {
+    rm -f "$batch_stderr" "$residual_stdout"
+    return 1
+  }
+  if [ "$allow_parallel" -eq 1 ]; then
+    if _autolint_supports_pool; then
+      if _autolint_run_files_pool "$jobs" "$residual_dir" "${files[@]}" \
+        >>"$residual_stdout" 2>>"$residual_stderr"; then
+        res_rc=0
+      else
+        res_rc=$?
+      fi
+    else
+      res_rc=0
+      for ((start = 0; start < ${#files[@]}; start += jobs)); do
+        [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
+        if _autolint_run_file_batch "$residual_dir" "$start" \
+          "${files[@]:start:jobs}" >>"$residual_stdout" 2>>"$residual_stderr"; then
+          batch_rc=0
+        else
+          batch_rc=$?
+        fi
+        res_rc=$(_autolint_merge_rc "$res_rc" "$batch_rc")
+      done
+    fi
+  elif _autolint_run_plans_sequential \
+    "$residual_dir" "${#files[@]}" >>"$residual_stdout" 2>>"$residual_stderr"; then
+    res_rc=0
+  else
+    res_rc=$?
+  fi
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    rm -f "$batch_stderr" "$residual_stdout" "$residual_stderr"
+    return "$_autolint_cancel_status"
+  }
+  if [ "$res_rc" -ne 0 ]; then
+    rm -f "$batch_stderr" "$residual_stdout" "$residual_stderr"
+    return 1
+  fi
   [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
-  rm -f "$batch_stderr" || true
+  [ -s "$residual_stdout" ] && cat "$residual_stdout"
+  [ -s "$residual_stderr" ] && cat "$residual_stderr" >&2
+  rm -f "$batch_stderr" "$residual_stdout" "$residual_stderr" || true
   return 0
 }
 
@@ -983,7 +1129,8 @@ _autolint_run_read_only_pipeline() {
   [ "$plan_rc" -eq 0 ] || return "$plan_rc"
 
   if [ "$json" -eq 0 ]; then
-    if _autolint_try_clean_batch "$plan_dir" "${files[@]}"; then
+    if _autolint_try_clean_batch \
+      "$plan_dir" "$jobs" "$allow_parallel" "${files[@]}"; then
       return 0
     fi
     [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
