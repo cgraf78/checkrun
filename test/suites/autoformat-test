@@ -1627,11 +1627,17 @@ ok = (
     and any(first in call and last in call for call in calls)
     and any(call == [middle] for call in calls)
 )
+ordered = ok and first in calls[0] and last in calls[0]
 print("match" if ok else "mismatch")
+print("ordered" if ordered else "unordered")
 PY
 )
+_batch_config_verdict=$(printf '%s\n' "$_batch_config_order" | sed -n '1p')
+_batch_config_sequence=$(printf '%s\n' "$_batch_config_order" | sed -n '2p')
 _assert_eq "batch: separated config groups keep config membership" \
-  "match" "$_batch_config_order"
+  "match" "$_batch_config_verdict"
+_assert_eq "batch: buckets dispatch in first-seen config order" \
+  "ordered" "$_batch_config_sequence"
 
 _batch_cap_files=()
 _batch_cap_i=1

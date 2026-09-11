@@ -3668,6 +3668,110 @@ else
   _fail "minimal PATH planning: one registry process handles all files (got $_minplan_calls, want <= 2)"
 fi
 
+echo "=== All-residual probe skips batching entirely ==="
+
+_noresid_cfg=$(_tmpdir)
+printf '%s\n' '*/envrc-1' '*/envrc-2' >"$_noresid_cfg/spell-ignore"
+: >"$_clean_batch_log"
+set +e
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR="$_noresid_cfg" \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/shell/envrc-1" \
+  "$_clean_batch_dir/shell/envrc-2" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "all-residual: shell plans exit 0" 0 "$rc"
+_assert_eq "all-residual: Typos never runs" "0" \
+  "$(grep -c '^typos:' "$_clean_batch_log")"
+_assert_eq "all-residual: ShellCheck runs once per file" "2" \
+  "$(grep -c '^shellcheck:' "$_clean_batch_log")"
+
+echo "=== Missing mkdir falls back to the historical per-file loop ==="
+
+_nocreate_bin=$(_tmpdir)
+for _nocreate_tool in bash dirname python3 yq; do
+  ln -s "$(command -v "$_nocreate_tool")" "$_nocreate_bin/$_nocreate_tool"
+done
+cat >"$_nocreate_bin/typos" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *needs-typo.txt) echo "error: typo in $arg"; exit 1 ;;
+  esac
+done
+exit 0
+EOF
+chmod +x "$_nocreate_bin/typos"
+_nocreate_dir=$(_tmpdir)
+printf 'clean content here\n' >"$_nocreate_dir/clean.txt"
+printf 'clean content here\n' >"$_nocreate_dir/needs-typo.txt"
+set +e
+_nocreate_out=$(PATH="$_nocreate_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "$_nocreate_dir/clean.txt" "$_nocreate_dir/needs-typo.txt" 2>&1)
+_nocreate_rc=$?
+set -e
+_assert_exit "no-mkdir PATH: typo finding exits 1" 1 "$_nocreate_rc"
+_assert_contains "no-mkdir PATH: typo diagnostic present" "needs-typo.txt" "$_nocreate_out"
+set +e
+PATH="$_nocreate_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "$_nocreate_dir/clean.txt" >/dev/null 2>&1
+_nocreate_clean_rc=$?
+set -e
+_assert_exit "no-mkdir PATH: clean file exits 0" 0 "$_nocreate_clean_rc"
+
+echo "=== Corrupt batch manifest falls back without partial lint ==="
+
+# shellcheck source=../../lib/checkrun/autolint.sh
+. "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh"
+_count_guard_write() { # $1=dir [$2=count] [$3=plan-spec]; plan-spec: full|truncated
+  local dir="$1" count="${2:-}" spec="${3:-full}"
+  : >"$dir/batch.plan"
+  _count_guard_rec "$dir" "f1.sh" "sh" "lint" "shellcheck" "none" "none"
+  if [ "$spec" = "full" ]; then
+    _count_guard_rec "$dir" "f2.sh" "sh" "lint" "shellcheck" "none" "none"
+  else
+    printf 'f2.sh\0sh\0lint\0' >>"$dir/batch.plan"
+  fi
+  if [ -n "$count" ]; then
+    printf '%s\n' "$count" >"$dir/batch.count"
+  else
+    rm -f "$dir/batch.count"
+  fi
+}
+_count_guard_rec() { # $1=dir $2..$7=record fields
+  printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$2" "$3" "$4" "$5" "$6" "$7" >>"$1/batch.plan"
+}
+_count_guard_try() { # $1=desc $2=dir — expect rc 1, empty stdout, no leak
+  local desc="$1" dir="$2" out rc
+  set +e
+  out=$(_autolint_try_clean_batch "$dir" 1 0 "$dir/f1.sh" "$dir/f2.sh" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "$desc: refuses corrupt manifest" 1 "$rc"
+  _assert_eq "$desc: no stdout leaks" "" "$out"
+  if [ ! -e "$dir/batch.stderr" ]; then
+    _pass "$desc: probe scratch removed"
+  else
+    _fail "$desc: probe scratch left behind ($dir/batch.stderr)"
+  fi
+}
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "5" full
+_count_guard_try "count guard: wrong-high count" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "1" full
+_count_guard_try "count guard: wrong-low count" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "two" full
+_count_guard_try "count guard: non-numeric count" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "" full
+_count_guard_try "count guard: missing count file" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "2" truncated
+_count_guard_try "count guard: truncated plan" "$_count_guard_dir"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
