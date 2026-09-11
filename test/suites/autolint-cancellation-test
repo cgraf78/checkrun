@@ -515,6 +515,14 @@ case "$mode" in
   wave)
     _autolint_supports_pool() { return 1; }
     ;;
+  normal-no-probe)
+    # Failure-composition scenarios use single-shot FIFO backends that cannot
+    # run twice. The speculative probe plus authoritative fallback would
+    # execute them once each; stub the probe so these cases keep testing the
+    # pool's status merge and ordered replay. Probe composition itself is
+    # covered by autolint-test with re-runnable mocks.
+    _autolint_try_clean_batch() { return 1; }
+    ;;
 esac
 
 case "$mode" in
@@ -766,8 +774,8 @@ case = {
     "restore-signal": ("restore-signal", 2, 2, 143),
     "planner-signal": ("planner-signal", 2, 2, 143),
     "success": ("normal", 2, 2, 0),
-    "failure": ("normal", 2, 2, 7),
-    "precedence": ("normal", 3, 3, 125),
+    "failure": ("normal-no-probe", 2, 2, 7),
+    "precedence": ("normal-no-probe", 3, 3, 125),
     "wave": ("wave", 2, 2, 0),
     "fallback": ("validation-fallback", 2, 2, 0),
     "validation-fallback-signal": ("validation-fallback-signal", 2, 2, 143),
