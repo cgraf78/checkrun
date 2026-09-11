@@ -554,12 +554,27 @@ _autoformat_run_preplanned() {
   local plan_dir="$1" plan_count="$2" idx=0 rc=0 dispatch_rc
   local path filetype adapter config_source config_path record_count
   local record_path record_filetype _record_phase record_adapter record_source record_config
-  local batch_adapter="" batch_filetype="" batch_source="" batch_path="" batch_scope=""
   local candidate_scope=""
-  local batch_files=()
+  # Batchable plans are grouped by (adapter, config, rustfmt scope) across the
+  # whole input instead of batching consecutive runs only: sorted VCS order
+  # interleaves adapters, so consecutive batching degrades to one dispatch per
+  # file on mixed changes. Buckets dispatch in first-seen order with the same
+  # 64-file chunks and the same rc merge; formatting is per-file independent,
+  # so only dispatch grouping changes, never file results. Indexed arrays with
+  # a linear key search keep this compatible with Bash 3.2 (no assoc arrays).
+  local -a _af_adapter=() _af_filetype=() _af_source=() _af_config=()
+  local -a _af_scope=() _af_path=() _af_bucket=()
+  local -a _bucket_adapter=() _bucket_filetype=() _bucket_source=()
+  local -a _bucket_config=() _bucket_scope=() _bucket_done=()
+  local -a _bucket_files=() _bucket_chunk=()
+  local bucket candidate member start
 
+  # Pass 1: read every plan once and assign buckets. A -1 bucket dispatches
+  # through the established per-file path in input position; -2 skips an empty
+  # plan exactly like the historical loop did.
   while [ "$idx" -lt "$plan_count" ]; do
     if [ ! -s "$plan_dir/$idx.plan" ]; then
+      _af_bucket[idx]="-2"
       idx=$((idx + 1))
       continue
     fi
@@ -584,45 +599,76 @@ _autoformat_run_preplanned() {
     if [ "$adapter" = "rustfmt" ]; then
       _checkrun_path_dir candidate_scope "$path"
     fi
+    _af_adapter[idx]="$adapter"
+    _af_filetype[idx]="$filetype"
+    _af_source[idx]="$config_source"
+    _af_config[idx]="$config_path"
+    _af_scope[idx]="$candidate_scope"
+    _af_path[idx]="$path"
     if [[ "$adapter" =~ ^(clang-format|ruff-format|rustfmt|shfmt|shfmt-zsh|stylua)$ ]] &&
       [ "$record_count" -eq 1 ]; then
-      if [ "${#batch_files[@]}" -gt 0 ] && {
-        [ "$adapter" != "$batch_adapter" ] ||
-          [ "$config_source" != "$batch_source" ] ||
-          [ "$config_path" != "$batch_path" ] ||
-          [ "$candidate_scope" != "$batch_scope" ] ||
-          [ "${#batch_files[@]}" -ge 64 ]
-      }; then
-        _format_batch_group "$batch_adapter" "$batch_filetype" \
-          "$batch_source" "$batch_path" "${batch_files[@]}" || rc=$?
-        batch_files=()
+      bucket=-1
+      for ((candidate = 0; candidate < ${#_bucket_adapter[@]}; candidate++)); do
+        if [ "$adapter" = "${_bucket_adapter[candidate]}" ] &&
+          [ "$config_source" = "${_bucket_source[candidate]}" ] &&
+          [ "$config_path" = "${_bucket_config[candidate]}" ] &&
+          [ "$candidate_scope" = "${_bucket_scope[candidate]}" ]; then
+          bucket=$candidate
+          break
+        fi
+      done
+      if [ "$bucket" -eq -1 ]; then
+        bucket=${#_bucket_adapter[@]}
+        _bucket_adapter[bucket]="$adapter"
+        _bucket_filetype[bucket]="$filetype"
+        _bucket_source[bucket]="$config_source"
+        _bucket_config[bucket]="$config_path"
+        _bucket_scope[bucket]="$candidate_scope"
+        _bucket_done[bucket]=0
       fi
-      if [ "${#batch_files[@]}" -eq 0 ]; then
-        batch_adapter="$adapter"
-        batch_filetype="$filetype"
-        batch_source="$config_source"
-        batch_path="$config_path"
-        batch_scope="$candidate_scope"
-      fi
-      batch_files+=("$path")
+      _af_bucket[idx]="$bucket"
     else
-      if [ "${#batch_files[@]}" -gt 0 ]; then
-        _format_batch_group "$batch_adapter" "$batch_filetype" \
-          "$batch_source" "$batch_path" "${batch_files[@]}" || rc=$?
-        batch_files=()
-      fi
-      _format_one_with_plan "$plan_dir/$idx.plan" || {
-        dispatch_rc=$?
-        rc=$dispatch_rc
-      }
+      _af_bucket[idx]="-1"
     fi
     idx=$((idx + 1))
   done
 
-  if [ "${#batch_files[@]}" -gt 0 ]; then
-    _format_batch_group "$batch_adapter" "$batch_filetype" \
-      "$batch_source" "$batch_path" "${batch_files[@]}" || rc=$?
-  fi
+  # Pass 2: dispatch each bucket once at first sight, keeping singletons in
+  # input position. Members stay in input order inside every 64-file chunk.
+  idx=0
+  while [ "$idx" -lt "$plan_count" ]; do
+    bucket="${_af_bucket[idx]}"
+    if [ "$bucket" = "-2" ]; then
+      idx=$((idx + 1))
+      continue
+    fi
+    if [ "$bucket" = "-1" ]; then
+      _format_one_with_plan "$plan_dir/$idx.plan" || {
+        dispatch_rc=$?
+        rc=$dispatch_rc
+      }
+      idx=$((idx + 1))
+      continue
+    fi
+    if [ "${_bucket_done[bucket]}" -eq 0 ]; then
+      _bucket_done[bucket]=1
+      _bucket_files=()
+      for ((member = 0; member < plan_count; member++)); do
+        if [ "${_af_bucket[member]}" = "$bucket" ]; then
+          _bucket_files+=("${_af_path[member]}")
+        fi
+      done
+      start=0
+      while [ "$start" -lt "${#_bucket_files[@]}" ]; do
+        _bucket_chunk=("${_bucket_files[@]:$start:64}")
+        _format_batch_group "${_bucket_adapter[bucket]}" "${_bucket_filetype[bucket]}" \
+          "${_bucket_source[bucket]}" "${_bucket_config[bucket]}" \
+          "${_bucket_chunk[@]}" || rc=$?
+        start=$((start + 64))
+      done
+    fi
+    idx=$((idx + 1))
+  done
   return "$rc"
 }
 
@@ -670,10 +716,11 @@ _autoformat_main() {
 
   # Pre-plan all files in one Python invocation, then dispatch each file from
   # its pre-built plan. Most adapters remain sequential because some operate on
-  # shared project caches. Consecutive equivalent shfmt, Stylua, Ruff, and
-  # clang-format plans use bounded multi-file invocations; rustfmt additionally
-  # requires a shared source directory so one Cargo edition applies to the
-  # whole batch. Every other ordering boundary is retained.
+  # shared project caches. Equivalent shfmt, Stylua, Ruff, and clang-format
+  # plans use bounded multi-file invocations grouped across the whole input;
+  # rustfmt additionally requires a shared source directory so one Cargo
+  # edition applies to the whole batch. Buckets dispatch in first-seen order
+  # and every other ordering boundary is retained.
   # If the batch scratch directory cannot be created, fall back to per-file
   # planning. A registry failure is authoritative and must not be retried just
   # to repeat its diagnostic. We can pass "$@" directly because any -h/--help

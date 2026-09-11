@@ -1595,8 +1595,8 @@ CHECKRUN_BATCH_CALL_LOG="$_batch_log" CHECKRUN_BATCH_ARG_LOG="$_batch_config_arg
   "$_batch_config_a/first.lua" \
   "$_batch_config_b/middle.lua" \
   "$_batch_config_a/last.lua"
-_assert_eq "batch: separated config groups retain execution order" \
-  "3" "$(wc -l <"$_batch_log" | tr -d ' ')"
+_assert_eq "batch: separated config groups merge into one process per config" \
+  "2" "$(wc -l <"$_batch_log" | tr -d ' ')"
 _batch_config_order=$(
   python3 - "$_batch_config_arg_log" \
     "$(_canonical_test_path "$_batch_config_a/first.lua")" \
@@ -1605,13 +1605,39 @@ _batch_config_order=$(
 import os
 import sys
 
-fields = open(sys.argv[1], "rb").read().split(b"\0")
-paths = [field for field in fields if field.endswith(b".lua")]
-print("match" if paths == [os.fsencode(path) for path in sys.argv[2:]] else "mismatch")
+raw = open(sys.argv[1], "rb").read().split(b"\0")
+calls = []
+current = None
+for field in raw:
+    if field == b"call":
+        current = []
+    elif field == b"end":
+        calls.append(current)
+        current = None
+    elif current is not None:
+        current.append(field)
+first = os.fsencode(sys.argv[2])
+middle = os.fsencode(sys.argv[3])
+last = os.fsencode(sys.argv[4])
+# Project configs stay native (no --config-path flag), so grouping is proven
+# by membership: config-A files share one call, the config-B file stands alone.
+ok = (
+    len(calls) == 2
+    and sorted(len(call) for call in calls) == [1, 2]
+    and any(first in call and last in call for call in calls)
+    and any(call == [middle] for call in calls)
+)
+ordered = ok and first in calls[0] and last in calls[0]
+print("match" if ok else "mismatch")
+print("ordered" if ordered else "unordered")
 PY
 )
-_assert_eq "batch: separated config groups preserve path order" \
-  "match" "$_batch_config_order"
+_batch_config_verdict=$(printf '%s\n' "$_batch_config_order" | sed -n '1p')
+_batch_config_sequence=$(printf '%s\n' "$_batch_config_order" | sed -n '2p')
+_assert_eq "batch: separated config groups keep config membership" \
+  "match" "$_batch_config_verdict"
+_assert_eq "batch: buckets dispatch in first-seen config order" \
+  "ordered" "$_batch_config_sequence"
 
 _batch_cap_files=()
 _batch_cap_i=1
@@ -2003,6 +2029,131 @@ cd - >/dev/null
 set -e
 _assert_exit "rel lua: terminates" 0 "$rc"
 _assert_contains "rel lua: formatted via relative path" "  print" "$(cat "$_reldir/rel.lua")"
+
+echo "=== Interleaved input formats identically to grouped input ==="
+
+_parity_dir=$(_tmpdir)
+_parity_files=(a1.py a1.sh a2.py a2.sh)
+_parity_reset() {
+  for _parity_n in 1 2; do
+    printf 'import  os\nimport sys\nx  =  %s\nprint(  x  )\n' "$_parity_n" \
+      >"$_parity_dir/a$_parity_n.py"
+    cat >"$_parity_dir/a$_parity_n.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = foo ]; then
+echo  hi
+fi
+EOF
+  done
+}
+_parity_reset
+set +e
+(cd "$_parity_dir" && CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOFORMAT" \
+  a1.py a1.sh a2.py a2.sh >"$_parity_dir/interleaved.out" 2>"$_parity_dir/interleaved.err")
+_parity_rc_interleaved=$?
+set -e
+for _parity_f in "${_parity_files[@]}"; do
+  cp "$_parity_dir/$_parity_f" "$_parity_dir/interleaved-$_parity_f"
+done
+_parity_reset
+set +e
+(cd "$_parity_dir" && CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOFORMAT" \
+  a1.py a2.py a1.sh a2.sh >"$_parity_dir/grouped.out" 2>"$_parity_dir/grouped.err")
+_parity_rc_grouped=$?
+set -e
+_assert_exit "order parity: interleaved exits 0" 0 "$_parity_rc_interleaved"
+_assert_exit "order parity: grouped exits 0" 0 "$_parity_rc_grouped"
+_assert_eq "order parity: stdout identical" \
+  "$(cat "$_parity_dir/interleaved.out")" "$(cat "$_parity_dir/grouped.out")"
+_assert_eq "order parity: stderr identical" \
+  "$(cat "$_parity_dir/interleaved.err")" "$(cat "$_parity_dir/grouped.err")"
+for _parity_f in "${_parity_files[@]}"; do
+  _assert_eq "order parity: $_parity_f formatted identically" \
+    "$(cat "$_parity_dir/interleaved-$_parity_f")" "$(cat "$_parity_dir/$_parity_f")"
+done
+_assert_contains "order parity: python spacing normalized" "x = 1" \
+  "$(cat "$_parity_dir/a1.py")"
+_assert_contains "order parity: shell spacing normalized" "echo hi" \
+  "$(cat "$_parity_dir/a1.sh")"
+
+echo "=== Interleaved input dispatches per adapter group ==="
+
+_group_dir=$(_tmpdir)
+_group_mock=$(_mock_bin)
+_group_log=$_group_dir/calls.log
+: >"$_group_log"
+cat >"$_group_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+printf 'ruff:%s:%s\n' "$1" "$*" >>"$AUTOFORMAT_GROUP_LOG"
+exit 0
+EOF
+cat >"$_group_mock/shfmt" <<'EOF'
+#!/usr/bin/env bash
+printf 'shfmt:%s\n' "$*" >>"$AUTOFORMAT_GROUP_LOG"
+exit 0
+EOF
+chmod +x "$_group_mock/ruff" "$_group_mock/shfmt"
+_group_args=()
+for _group_n in 1 2 3; do
+  printf 'value_%s = %s\n' "$_group_n" "$_group_n" >"$_group_dir/g$_group_n.py"
+  printf '#!/usr/bin/env bash\nvalue=%s\n' "$_group_n" >"$_group_dir/g$_group_n.sh"
+  _group_args+=("$_group_dir/g$_group_n.py" "$_group_dir/g$_group_n.sh")
+done
+AUTOFORMAT_GROUP_LOG="$_group_log" CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_group_mock:$PATH" "$AUTOFORMAT" "${_group_args[@]}" >/dev/null 2>&1
+_group_ruff_format=$(grep -c '^ruff:format:' "$_group_log")
+_group_ruff_check=$(grep -c '^ruff:check:' "$_group_log")
+_group_shfmt=$(grep -c '^shfmt:' "$_group_log")
+# Ceilings stay generous (loaded-run safe): one batch per adapter plus margin.
+# Interleaved single-file dispatch would need 3 format + 3 check + 3 shfmt.
+if [ "$_group_ruff_format" -le 2 ]; then
+  _pass "group batching: ruff format batches interleaved files ($_group_ruff_format)"
+else
+  _fail "group batching: ruff format batches interleaved files (got $_group_ruff_format, want <= 2)"
+fi
+if [ "$_group_ruff_check" -le 2 ]; then
+  _pass "group batching: ruff check batches interleaved files ($_group_ruff_check)"
+else
+  _fail "group batching: ruff check batches interleaved files (got $_group_ruff_check, want <= 2)"
+fi
+if [ "$_group_shfmt" -le 2 ]; then
+  _pass "group batching: shfmt batches interleaved files ($_group_shfmt)"
+else
+  _fail "group batching: shfmt batches interleaved files (got $_group_shfmt, want <= 2)"
+fi
+for _group_n in 1 2 3; do
+  _assert_contains "group batching: g$_group_n.py reaches ruff" \
+    "$_group_dir/g$_group_n.py" "$(cat "$_group_log")"
+  _assert_contains "group batching: g$_group_n.sh reaches shfmt" \
+    "$_group_dir/g$_group_n.sh" "$(cat "$_group_log")"
+done
+
+echo "=== Grouped dispatch keeps the 64-file chunk bound ==="
+
+_chunk_log=$_group_dir/chunk-calls.log
+: >"$_chunk_log"
+_chunk_args=()
+for _chunk_n in {1..65}; do
+  printf 'value_%s = %s\n' "$_chunk_n" "$_chunk_n" >"$_group_dir/c$_chunk_n.py"
+  printf '#!/usr/bin/env bash\nvalue=%s\n' "$_chunk_n" >"$_group_dir/c$_chunk_n.sh"
+  _chunk_args+=("$_group_dir/c$_chunk_n.py" "$_group_dir/c$_chunk_n.sh")
+done
+AUTOFORMAT_GROUP_LOG="$_chunk_log" CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_group_mock:$PATH" "$AUTOFORMAT" "${_chunk_args[@]}" >/dev/null 2>&1
+_chunk_ruff_format=$(grep -c '^ruff:format:' "$_chunk_log")
+_chunk_shfmt=$(grep -c '^shfmt:' "$_chunk_log")
+# 65 files need at least two chunks at the 64 bound; single-file dispatch
+# would need 65. Both directions use margins, not exact counts.
+if [ "$_chunk_ruff_format" -ge 2 ] && [ "$_chunk_ruff_format" -le 3 ]; then
+  _pass "chunk bound: ruff format splits 65 files ($_chunk_ruff_format)"
+else
+  _fail "chunk bound: ruff format splits 65 files (got $_chunk_ruff_format, want 2..3)"
+fi
+if [ "$_chunk_shfmt" -ge 2 ] && [ "$_chunk_shfmt" -le 3 ]; then
+  _pass "chunk bound: shfmt splits 65 files ($_chunk_shfmt)"
+else
+  _fail "chunk bound: shfmt splits 65 files (got $_chunk_shfmt, want 2..3)"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary

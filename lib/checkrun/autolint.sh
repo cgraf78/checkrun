@@ -184,10 +184,10 @@ _lint_one_with_plan() {
 }
 
 _lint_one() {
-  # Plan one file inline (one Python invocation per call) and dispatch. Used by
-  # --fix mode and read-only fallbacks without planner scratch. Normal read-only
-  # paths use _autolint_pre_plan plus _lint_one_with_plan so the Python planner
-  # runs once total, including when jobs=1.
+  # Plan one file inline (one Python invocation per call) and dispatch. Used
+  # only when no planner scratch can be allocated at all. Every other path,
+  # including --fix and the minimal-PATH fallback, uses _autolint_pre_plan
+  # plus _lint_one_with_plan so the Python planner runs once total.
   local file="$1"
   local rc tool_rc plan_file
 
@@ -214,7 +214,7 @@ _autolint_pre_plan() {
   # records that directory before this interruptible planner runs, so every
   # return path can remove the exact invocation scratch without a glob.
   # Empty per-file plans are legitimate skips, not failures.
-  local out_dir="$1" manifest
+  local out_dir="$1" manifest manifest_outside=0 plan_rc=0
   shift
   [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
   # Keep the common one-file edit hook direct. Every multi-file request uses a
@@ -231,21 +231,119 @@ _autolint_pre_plan() {
   # same ARG_MAX failure one process deeper. Stage a private manifest inside the
   # already-owned plan directory so the planner still runs exactly once with a
   # bounded argv. mktemp supplies mode 0600 independent of the caller's umask.
-  manifest=$(mktemp "$out_dir/files0.XXXXXX") || {
+  # Without mktemp (minimal PATH), use the noclobber tempfile helper and
+  # remove the manifest once the planner has consumed it, since it lives
+  # outside the caller-owned directory on that path. A present-but-failing
+  # mktemp keeps its historical 125 diagnostic.
+  if command -v mktemp >/dev/null 2>&1; then
+    manifest=$(mktemp "$out_dir/files0.XXXXXX") || {
+      echo "autolint: could not create registry input manifest" >&2
+      return 125
+    }
+  elif manifest=$(_checkrun_tempfile); then
+    manifest_outside=1
+  else
     echo "autolint: could not create registry input manifest" >&2
     return 125
+  fi
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
+    return "$_autolint_cancel_status"
   }
-  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
   if ! printf '%s\0' "$@" >"$manifest"; then
     echo "autolint: could not write registry input manifest" >&2
+    [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
     return 125
   fi
   # A trap can latch while the shell builtin is writing a large manifest. Do
   # not start a new planner after that signal: it was not alive to receive the
   # already-delivered process-group cancellation and could otherwise hang.
-  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
+    return "$_autolint_cancel_status"
+  }
   _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint \
     --files0-from "$manifest"
+  plan_rc=$?
+  [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
+  return "$plan_rc"
+}
+
+_autolint_make_plan_dir() {
+  # Allocate a caller-owned plan directory, storing the path in $1. Prefers
+  # mktemp; falls back to a mkdir loop so minimal-PATH environments without
+  # mktemp still plan once instead of once per file. Returns non-zero when no
+  # scratch can be allocated, in which case callers keep the historical
+  # per-file planning loop.
+  local _varname="$1" _dir="" _i
+  if command -v mktemp >/dev/null 2>&1; then
+    _dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-plans.XXXXXX" 2>/dev/null) && {
+      printf -v "$_varname" '%s' "$_dir"
+      return 0
+    }
+  fi
+  if command -v mkdir >/dev/null 2>&1; then
+    for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      _dir="${TMPDIR:-/tmp}/autolint-plans.$$.${RANDOM:-0}.$_i"
+      if mkdir "$_dir" 2>/dev/null; then
+        # Match mktemp -d's 0700 when chmod exists; in chmod-less minimal
+        # environments keep the umask-dependent dir rather than failing —
+        # this fallback exists precisely for tool-poor environments.
+        chmod 700 "$_dir" 2>/dev/null || true
+        printf -v "$_varname" '%s' "$_dir"
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+_autolint_remove_plan_dir() {
+  # Best-effort scratch cleanup. A missing rm (minimal PATH) or a transient
+  # removal failure must not rewrite the lint result already collected, so
+  # cleanup status is intentionally discarded like _checkrun_remove.
+  if command -v rm >/dev/null 2>&1; then
+    rm -rf "$1" 2>/dev/null || true
+  fi
+}
+
+_autolint_run_preplanned_sequential() {
+  # Plan all files in one Python invocation, then dispatch sequentially per
+  # file. Used by --fix (mutations must never run in parallel) and by the
+  # minimal-PATH read-only fallback. File order, output, and exit codes match
+  # the historical per-file _lint_one loop; only planner startups drop from N
+  # to 1. Without allocatable scratch, degrades to that same per-file loop.
+  local plan_dir="" plan_rc=0 file file_rc rc=0
+  local -a files=("$@")
+
+  [ "${#files[@]}" -eq 0 ] && return 0
+  if ! _autolint_make_plan_dir plan_dir; then
+    for file in "${files[@]}"; do
+      if _lint_one "$file"; then
+        file_rc=0
+      else
+        file_rc=$?
+      fi
+      rc=$(_autolint_merge_rc "$rc" "$file_rc")
+    done
+    return "$rc"
+  fi
+  _autolint_pre_plan "$plan_dir" "${files[@]}" || plan_rc=$?
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    _autolint_remove_plan_dir "$plan_dir"
+    return "$_autolint_cancel_status"
+  }
+  if [ "$plan_rc" -ne 0 ]; then
+    _autolint_remove_plan_dir "$plan_dir"
+    return "$plan_rc"
+  fi
+  if _autolint_run_plans_sequential "$plan_dir" "${#files[@]}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  _autolint_remove_plan_dir "$plan_dir"
+  return "$rc"
 }
 
 _lint_dispatch() {
@@ -316,68 +414,214 @@ _autolint_run_clean_batch_step() {
   done
 }
 
+_autolint_is_batchable_adapter() {
+  # Single source of truth for speculative batching. ShellCheck is
+  # intentionally absent: giving it multiple inputs changes
+  # source-following diagnostics, so process batching is not equivalent to
+  # the established independent-file checks.
+  case "$1" in
+    ruff-lint | selene | typos) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_autolint_flush_clean_batch_run() {
+  # Run one accumulated homogeneous record run as part of the speculative
+  # clean batch. The run key matches the registry grouping (adapter, config
+  # source, config path); filetype and phase vary within a run and are
+  # ignored by every batch backend. Stdout is discarded and stderr buffered:
+  # any failure abandons the whole probe and the authoritative per-file path
+  # reproduces diagnostics, so buffered output only survives when every run
+  # succeeds. Returns the cancellation status when latched, else 1 on failure.
+  local stderr_file="$1" adapter="$2" _filetype="$3" _step_phase="$4"
+  local config_source="$5" config_path="$6"
+  shift 6
+
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  _autolint_is_batchable_adapter "$adapter" || return 1
+  _autolint_run_clean_batch_step "$adapter" "$_filetype" "$_step_phase" \
+    "$config_source" "$config_path" "$@" >/dev/null 2>>"$stderr_file" || return 1
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  return 0
+}
+
+_autolint_build_residual_plans() {
+  # Copy each per-file plan with batchable-adapter records removed, so the
+  # speculative probe can dispatch residuals through the established per-file
+  # machinery. Files with no residuals get no plan file, which the pool,
+  # barrier, and sequential dispatchers all skip the same way they skip
+  # empty plans.
+  local plan_dir="$1" residual_dir="$2" count="$3"
+  local index path filetype step_phase adapter config_source config_path
+
+  mkdir "$residual_dir" || return 1
+  index=0
+  while [ "$index" -lt "$count" ]; do
+    if [ -s "$plan_dir/$index.plan" ]; then
+      while IFS= read -r -d '' path &&
+        IFS= read -r -d '' filetype &&
+        IFS= read -r -d '' step_phase &&
+        IFS= read -r -d '' adapter &&
+        IFS= read -r -d '' config_source &&
+        IFS= read -r -d '' config_path; do
+        if _autolint_is_batchable_adapter "$adapter"; then
+          continue
+        fi
+        printf '%s\0' "$path" "$filetype" "$step_phase" \
+          "$adapter" "$config_source" "$config_path" \
+          >>"$residual_dir/$index.plan" || return 1
+      done <"$plan_dir/$index.plan"
+    fi
+    index=$((index + 1))
+  done
+  return 0
+}
+
 _autolint_try_clean_batch() {
-  local plan_dir="$1"
-  local filetype step_phase adapter config_source config_path index batch_stderr
-  local -a files batch_filetypes batch_phases batch_adapters batch_sources batch_paths
-  shift
+  local plan_dir="$1" jobs="$2" allow_parallel="$3"
+  local path filetype step_phase adapter config_source config_path batch_stderr
+  local residual_dir residual_stdout residual_stderr
+  local run_adapter="" run_filetype="" run_phase="" run_source="" run_config=""
+  local expected_count="" actual_count=0 flush_rc res_rc batch_rc start
+  local residual_seen=0
+  local -a files run_files
+  shift 3
   files=("$@")
 
   [ "${#files[@]}" -gt 1 ] || return 1
   [ -s "$plan_dir/batch.plan" ] || return 1
+  [ -s "$plan_dir/batch.count" ] || return 1
   command -v yq >/dev/null 2>&1 || return 1
+  IFS= read -r expected_count <"$plan_dir/batch.count" || return 1
+  case "$expected_count" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
 
-  # Validate the complete manifest before running any backend. This keeps a
-  # future non-batchable adapter from causing partial speculative work before
-  # the established per-file path takes over.
-  while IFS= read -r -d '' filetype &&
+  # The manifest carries every step of every file grouped by (adapter,
+  # config), so mixed sets batch per adapter group instead of abandoning the
+  # probe when one file needs a non-batchable adapter. Batchable runs share
+  # one backend invocation; residuals dispatch per file through the same
+  # pool, barrier, or sequential path the authoritative run would use. A
+  # failed probe discards all buffers and reruns the authoritative per-file
+  # path so diagnostic order and attribution stay unchanged.
+  batch_stderr="$plan_dir/batch.stderr"
+  residual_stdout="$plan_dir/residual.stdout"
+  residual_stderr="$plan_dir/residual.stderr"
+  residual_dir="$plan_dir/residual"
+  : >"$batch_stderr" || return 1
+  run_files=()
+  while IFS= read -r -d '' path &&
+    IFS= read -r -d '' filetype &&
     IFS= read -r -d '' step_phase &&
     IFS= read -r -d '' adapter &&
     IFS= read -r -d '' config_source &&
     IFS= read -r -d '' config_path; do
-    # ShellCheck is intentionally absent: giving it multiple inputs changes
-    # source-following diagnostics, so process batching is not equivalent to
-    # the established independent-file checks.
-    case "$adapter" in
-      ruff-lint | selene | typos) ;;
-      *) return 1 ;;
-    esac
-    batch_filetypes+=("$filetype")
-    batch_phases+=("$step_phase")
-    batch_adapters+=("$adapter")
-    batch_sources+=("$config_source")
-    batch_paths+=("$config_path")
+    actual_count=$((actual_count + 1))
+    if _autolint_is_batchable_adapter "$adapter"; then
+      if [ "${#run_files[@]}" -gt 0 ] && {
+        [ "$adapter" != "$run_adapter" ] ||
+          [ "$config_source" != "$run_source" ] ||
+          [ "$config_path" != "$run_config" ]
+      }; then
+        _autolint_flush_clean_batch_run "$batch_stderr" \
+          "$run_adapter" "$run_filetype" "$run_phase" \
+          "$run_source" "$run_config" "${run_files[@]}" || {
+          flush_rc=$?
+          rm -f "$batch_stderr"
+          return "$flush_rc"
+        }
+        run_files=()
+      fi
+      if [ "${#run_files[@]}" -eq 0 ]; then
+        run_adapter="$adapter"
+        run_filetype="$filetype"
+        run_phase="$step_phase"
+        run_source="$config_source"
+        run_config="$config_path"
+      fi
+      run_files+=("$path")
+    else
+      residual_seen=1
+    fi
   done <"$plan_dir/batch.plan"
 
-  [ "${#batch_adapters[@]}" -gt 0 ] || return 1
-  batch_stderr="$plan_dir/batch.stderr"
-  : >"$batch_stderr" || return 1
-  for index in "${!batch_adapters[@]}"; do
-    [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+  if [ "${#run_files[@]}" -gt 0 ]; then
+    _autolint_flush_clean_batch_run "$batch_stderr" \
+      "$run_adapter" "$run_filetype" "$run_phase" \
+      "$run_source" "$run_config" "${run_files[@]}" || {
+      flush_rc=$?
       rm -f "$batch_stderr"
-      return "$_autolint_cancel_status"
+      return "$flush_rc"
     }
-    # Routine clean stdout is intentionally quiet. Buffer exit-0 warnings until
-    # every adapter succeeds; a failed probe discards both streams and reruns
-    # the authoritative per-file path so diagnostic order and attribution stay
-    # unchanged.
-    _autolint_run_clean_batch_step \
-      "${batch_adapters[$index]}" \
-      "${batch_filetypes[$index]}" \
-      "${batch_phases[$index]}" \
-      "${batch_sources[$index]}" \
-      "${batch_paths[$index]}" \
-      "${files[@]}" >/dev/null 2>>"$batch_stderr" || {
-      rm -f "$batch_stderr"
-      return 1
-    }
-    [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
-      rm -f "$batch_stderr"
-      return "$_autolint_cancel_status"
-    }
-  done
+  fi
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    rm -f "$batch_stderr"
+    return "$_autolint_cancel_status"
+  }
+  # A short or over-long manifest must never become a silent partial lint.
+  if [ "$actual_count" -ne "$expected_count" ]; then
+    rm -f "$batch_stderr"
+    return 1
+  fi
+
+  if [ "$residual_seen" -eq 0 ]; then
+    [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
+    rm -f "$batch_stderr" || true
+    return 0
+  fi
+
+  if ! _autolint_build_residual_plans \
+    "$plan_dir" "$residual_dir" "${#files[@]}"; then
+    rm -f "$batch_stderr"
+    return 1
+  fi
+  : >"$residual_stdout" || {
+    rm -f "$batch_stderr"
+    return 1
+  }
+  : >"$residual_stderr" || {
+    rm -f "$batch_stderr" "$residual_stdout"
+    return 1
+  }
+  if [ "$allow_parallel" -eq 1 ]; then
+    if _autolint_supports_pool; then
+      if _autolint_run_files_pool "$jobs" "$residual_dir" "${files[@]}" \
+        >>"$residual_stdout" 2>>"$residual_stderr"; then
+        res_rc=0
+      else
+        res_rc=$?
+      fi
+    else
+      res_rc=0
+      for ((start = 0; start < ${#files[@]}; start += jobs)); do
+        [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
+        if _autolint_run_file_batch "$residual_dir" "$start" \
+          "${files[@]:start:jobs}" >>"$residual_stdout" 2>>"$residual_stderr"; then
+          batch_rc=0
+        else
+          batch_rc=$?
+        fi
+        res_rc=$(_autolint_merge_rc "$res_rc" "$batch_rc")
+      done
+    fi
+  elif _autolint_run_plans_sequential \
+    "$residual_dir" "${#files[@]}" >>"$residual_stdout" 2>>"$residual_stderr"; then
+    res_rc=0
+  else
+    res_rc=$?
+  fi
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    rm -f "$batch_stderr" "$residual_stdout" "$residual_stderr"
+    return "$_autolint_cancel_status"
+  }
+  if [ "$res_rc" -ne 0 ]; then
+    rm -f "$batch_stderr" "$residual_stdout" "$residual_stderr"
+    return 1
+  fi
   [ -s "$batch_stderr" ] && cat "$batch_stderr" >&2
-  rm -f "$batch_stderr" || true
+  [ -s "$residual_stdout" ] && cat "$residual_stdout"
+  [ -s "$residual_stderr" ] && cat "$residual_stderr" >&2
+  rm -f "$batch_stderr" "$residual_stdout" "$residual_stderr" || true
   return 0
 }
 
@@ -983,7 +1227,8 @@ _autolint_run_read_only_pipeline() {
   [ "$plan_rc" -eq 0 ] || return "$plan_rc"
 
   if [ "$json" -eq 0 ]; then
-    if _autolint_try_clean_batch "$plan_dir" "${files[@]}"; then
+    if _autolint_try_clean_batch \
+      "$plan_dir" "$jobs" "$allow_parallel" "${files[@]}"; then
       return 0
     fi
     [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
@@ -1408,10 +1653,10 @@ _autolint_main() {
     # Keep mutation mode sequential. Several backends operate at package/project
     # scope even when they receive one file, so parallel fixes can race on shared
     # source files or tool caches. Read-only linting below is safe to overlap.
-    for file in "${lint_files[@]}"; do
-      _lint_one "$file"
-      rc=$(_autolint_merge_rc "$rc" "$?")
-    done
+    # Planning happens once for all files; only per-file dispatch stays
+    # sequential, preserving the no-parallel-mutation invariant.
+    _autolint_run_preplanned_sequential "${lint_files[@]}"
+    rc=$(_autolint_merge_rc "$rc" "$?")
   else
     jobs=${CHECKRUN_AUTOLINT_JOBS:-$(_autolint_default_jobs)}
     case "$jobs" in
@@ -1423,11 +1668,11 @@ _autolint_main() {
       ! command -v rm >/dev/null 2>&1; then
       # Tests and minimal hook environments sometimes constrain PATH to only the
       # backend being exercised. In that mode correctness is more important than
-      # concurrency, so fall back to the historical no-temp-file execution path.
-      for file in "${lint_files[@]}"; do
-        _lint_one "$file"
-        rc=$(_autolint_merge_rc "$rc" "$?")
-      done
+      # concurrency, so fall back to sequential pre-planned dispatch, which
+      # degrades to the historical per-file loop only when no planner scratch
+      # can be allocated at all.
+      _autolint_run_preplanned_sequential "${lint_files[@]}"
+      rc=$(_autolint_merge_rc "$rc" "$?")
     else
       # A multi-input/jobs>1 operation cannot know how many plans are nonempty
       # until the registry returns, so its validated group owns the complete

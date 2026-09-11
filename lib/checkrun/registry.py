@@ -1357,17 +1357,30 @@ def _write_shell_plan_dir(
             for chunk in _encode_shell_plan(records):
                 handle.write(chunk)
 
-    # Read-only lint may speculatively batch a homogeneous set. The manifest
-    # omits the path field because the Bash caller already retains the ordered
-    # path array. Any difference in filetype, step order, adapter, or resolved
-    # config leaves no manifest and therefore keeps the established per-file
-    # execution path.
-    if phase == "lint" and len(plan_items) > 1 and all(plan_items):
-        batch_records = [record[1:] for record in plan_items[0]]
-        if all([record[1:] for record in records] == batch_records for records in plan_items[1:]):
+    # Read-only lint may speculatively batch. Group every step across all
+    # files by (adapter, config source, config path) in first-seen order, with
+    # files in input order inside each group, so the shell can batch all typos
+    # steps, all ruff steps, and so on in one backend invocation per group
+    # while dispatching non-batchable groups per file. The grouping key omits
+    # filetype and phase because the batch backends provably ignore both (see
+    # _autolint_run_clean_batch_step); keep that contract if batching grows.
+    # batch.count carries the total record count so the shell can refuse a
+    # truncated or mismatched manifest instead of silently skipping steps.
+    if phase == "lint" and len(plan_items) > 1:
+        groups: dict[tuple[str, str, str], list[list[str]]] = {}
+        for records in plan_items:
+            for record in records:
+                key = (record[3], record[4], record[5])
+                groups.setdefault(key, []).append(record)
+        if groups:
+            total = 0
             with (out_dir / "batch.plan").open("wb") as handle:
-                for chunk in _encode_shell_plan(batch_records):
-                    handle.write(chunk)
+                for grouped in groups.values():
+                    for record in grouped:
+                        for chunk in _encode_shell_plan([record]):
+                            handle.write(chunk)
+                        total += 1
+            (out_dir / "batch.count").write_text(f"{total}\n")
 
 
 def _read_files0(path_arg: str) -> list[str]:

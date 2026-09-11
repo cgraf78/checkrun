@@ -454,7 +454,7 @@ AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
 rc=$?
 set -e
 _assert_exit "clean batch: equivalent shell plans exit 0" 0 "$rc"
-_assert_eq "clean batch: shell plans keep Typos per-file" "2" \
+_assert_eq "clean batch: shell plans batch Typos across ShellCheck residuals" "1" \
   "$(grep -c '^typos:' "$_clean_batch_log")"
 _assert_eq "clean batch: ShellCheck retains its parallel per-file model" "2" \
   "$(grep -c '^shellcheck:' "$_clean_batch_log")"
@@ -475,6 +475,52 @@ _assert_eq "clean batch: Typos receives both Lua files once" "1" \
   "$(grep -c '^typos:' "$_clean_batch_log")"
 _assert_eq "clean batch: Selene receives both Lua files once" "1" \
   "$(grep -c '^selene:' "$_clean_batch_log")"
+
+echo "=== Mixed sets batch per adapter group ==="
+
+_mixed_batch_dir=$_clean_batch_dir/mixed
+mkdir -p "$_mixed_batch_dir"
+_mixed_batch_args=()
+for _i in 1 2 3; do
+  printf 'value_%s = %s\n' "$_i" "$_i" >"$_mixed_batch_dir/file-$_i.py"
+  printf '#!/usr/bin/env bash\nvalue=%s\n' "$_i" >"$_mixed_batch_dir/file-$_i.sh"
+  _mixed_batch_args+=("$_mixed_batch_dir/file-$_i.py" "$_mixed_batch_dir/file-$_i.sh")
+done
+: >"$_clean_batch_log"
+set +e
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "${_mixed_batch_args[@]}" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "mixed batch: clean files exit 0" 0 "$rc"
+_mixed_typos=$(grep -c '^typos:' "$_clean_batch_log")
+_mixed_ruff=$(grep -c '^ruff:' "$_clean_batch_log")
+_mixed_shellcheck=$(grep -c '^shellcheck:' "$_clean_batch_log")
+# Ceilings stay generous (loaded-run safe): per-file dispatch would need
+# 6 Typos + 3 Ruff + 3 ShellCheck; grouped batching needs 1 + 1 + 3.
+if [ "$_mixed_typos" -le 3 ]; then
+  _pass "mixed batch: Typos batches mixed files ($_mixed_typos)"
+else
+  _fail "mixed batch: Typos batches mixed files (got $_mixed_typos, want <= 3)"
+fi
+if [ "$_mixed_ruff" -le 2 ]; then
+  _pass "mixed batch: Ruff batches mixed files ($_mixed_ruff)"
+else
+  _fail "mixed batch: Ruff batches mixed files (got $_mixed_ruff, want <= 2)"
+fi
+_assert_eq "mixed batch: ShellCheck stays per-file" "3" "$_mixed_shellcheck"
+for _i in 1 2 3; do
+  _assert_contains "mixed batch: file-$_i.py reaches Ruff" \
+    "$_mixed_batch_dir/file-$_i.py" "$(cat "$_clean_batch_log")"
+  _assert_contains "mixed batch: file-$_i.sh reaches ShellCheck" \
+    "$_mixed_batch_dir/file-$_i.sh" "$(cat "$_clean_batch_log")"
+  _assert_contains "mixed batch: file-$_i.py reaches Typos" \
+    "$_mixed_batch_dir/file-$_i.py" "$(cat "$_clean_batch_log")"
+  _assert_contains "mixed batch: file-$_i.sh reaches Typos" \
+    "$_mixed_batch_dir/file-$_i.sh" "$(cat "$_clean_batch_log")"
+done
 
 echo "=== JSON lint bypasses speculative clean batching ==="
 
@@ -637,6 +683,75 @@ _assert_eq "clean batch fallback: Typos runs once speculatively and once per fil
   "3" "$(grep -c '^typos:' "$_batch_fallback_log")"
 _assert_eq "clean batch fallback: Ruff runs once speculatively and once per file" \
   "3" "$(grep -c '^ruff:' "$_batch_fallback_log")"
+
+echo "=== Residual probe failure falls back without leaking ==="
+
+_residual_mock=$(_mock_bin)
+_residual_log=$_clean_batch_dir/residual-calls.log
+: >"$_residual_log"
+cat >"$_residual_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+printf 'typos:%s\n' "$*" >>"$AUTOLINT_RESIDUAL_LOG"
+exit 0
+EOF
+cat >"$_residual_mock/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+printf 'shellcheck:%s\n' "$*" >>"$AUTOLINT_RESIDUAL_LOG"
+for arg in "$@"; do
+  case "$arg" in
+    *.sh | *envrc-*) file=$arg ;;
+  esac
+done
+echo "mock-shell-diagnostic for ${file##*/}"
+exit 1
+EOF
+chmod +x "$_residual_mock/typos" "$_residual_mock/shellcheck"
+set +e
+output=$(AUTOLINT_RESIDUAL_LOG="$_residual_log" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_residual_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/shell/envrc-1" \
+  "$_clean_batch_dir/shell/envrc-2" 2>&1)
+rc=$?
+set -e
+_assert_exit "residual fallback: authoritative finding exits 1" 1 "$rc"
+_assert_eq "residual fallback: each diagnostic appears exactly once" "2" \
+  "$(printf '%s\n' "$output" | grep -c 'mock-shell-diagnostic')"
+_assert_eq "residual fallback: ShellCheck runs per file in probe and fallback" \
+  "4" "$(grep -c '^shellcheck:' "$_residual_log")"
+_assert_eq "residual fallback: Typos batches once then runs per file" \
+  "3" "$(grep -c '^typos:' "$_residual_log")"
+
+echo "=== Residual success replays exit-0 output ==="
+
+_residual_quiet_mock=$(_mock_bin)
+cat >"$_residual_quiet_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$_residual_quiet_mock/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *.sh | *envrc-*) file=$arg ;;
+  esac
+done
+echo "clean-chatter for ${file##*/}"
+exit 0
+EOF
+chmod +x "$_residual_quiet_mock/typos" "$_residual_quiet_mock/shellcheck"
+set +e
+output=$(CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_residual_quiet_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/shell/envrc-1" \
+  "$_clean_batch_dir/shell/envrc-2" 2>&1)
+rc=$?
+set -e
+_assert_exit "residual replay: clean files exit 0" 0 "$rc"
+case "$output" in
+  *envrc-1*envrc-2*) _pass "residual replay: per-file output in order" ;;
+  *) _fail "residual replay: per-file output in order (got '$output')" ;;
+esac
 
 # Schema validation is policy-driven and cross-cutting: fixture JSON
 # and YAML names should be checked before extension dispatch decides which
@@ -3393,6 +3508,269 @@ rc=$?
 set -e
 _assert_exit "json: missing jq exits 1" 1 "$rc"
 _assert_contains "json: missing jq error message" "jq is required for --json" "$output"
+
+echo "=== Mixed dirty diagnostics are deterministic ==="
+
+_lint_parity_dir=$(_tmpdir)
+printf 'import os\nimport sys\nprint(sys.argv)\n' >"$_lint_parity_dir/d1.py"
+printf 'import os\nprint(os.getcwd())\n' >"$_lint_parity_dir/d2.py"
+cat >"$_lint_parity_dir/d1.sh" <<'EOF'
+#!/usr/bin/env bash
+echo $UNQUOTED_VAR
+EOF
+cat >"$_lint_parity_dir/d2.sh" <<'EOF'
+#!/usr/bin/env bash
+value=1
+printf "%s\n" "$value"
+EOF
+set +e
+(cd "$_lint_parity_dir" && CHECKRUN_AUTOLINT_JOBS=8 CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" d1.py d1.sh d2.py d2.sh >"$_lint_parity_dir/run1.out" 2>"$_lint_parity_dir/run1.err")
+_lint_parity_rc1=$?
+(cd "$_lint_parity_dir" && CHECKRUN_AUTOLINT_JOBS=8 CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" d1.py d1.sh d2.py d2.sh >"$_lint_parity_dir/run2.out" 2>"$_lint_parity_dir/run2.err")
+_lint_parity_rc2=$?
+set -e
+_assert_exit "diagnostic parity: first run exits 1" 1 "$_lint_parity_rc1"
+_assert_exit "diagnostic parity: second run exits 1" 1 "$_lint_parity_rc2"
+_assert_eq "diagnostic parity: stdout deterministic" \
+  "$(cat "$_lint_parity_dir/run1.out")" "$(cat "$_lint_parity_dir/run2.out")"
+_assert_eq "diagnostic parity: stderr deterministic" \
+  "$(cat "$_lint_parity_dir/run1.err")" "$(cat "$_lint_parity_dir/run2.err")"
+_assert_contains "diagnostic parity: ruff finding present" "F401" \
+  "$(cat "$_lint_parity_dir/run1.out")"
+_assert_contains "diagnostic parity: shellcheck finding present" "SC2086" \
+  "$(cat "$_lint_parity_dir/run1.out")$(cat "$_lint_parity_dir/run1.err")"
+
+echo "=== Multi-file --fix results are golden ==="
+
+_fix_parity_dir=$(_tmpdir)
+printf 'import sys\nimport os\nprint(os.getcwd(), sys.argv)\n' >"$_fix_parity_dir/f1.py"
+printf 'import sys\nimport os\nprint(os.sep, sys.argv)\n' >"$_fix_parity_dir/f2.py"
+set +e
+_fix_parity_out=$(cd "$_fix_parity_dir" && CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" --fix f1.py f2.py 2>"$_fix_parity_dir/fix.err")
+_fix_parity_rc=$?
+set -e
+_assert_exit "fix parity: exits 0" 0 "$_fix_parity_rc"
+_assert_eq "fix parity: f1.py fixed content" \
+  "$(printf 'import os\nimport sys\n\nprint(os.getcwd(), sys.argv)\n')" \
+  "$(cat "$_fix_parity_dir/f1.py")"
+_assert_eq "fix parity: f2.py fixed content" \
+  "$(printf 'import os\nimport sys\n\nprint(os.sep, sys.argv)\n')" \
+  "$(cat "$_fix_parity_dir/f2.py")"
+_assert_eq "fix parity: one summary line per file in order" "2" \
+  "$(printf '%s\n' "$_fix_parity_out" | grep -c 'fixed')"
+_assert_eq "fix parity: stderr quiet" "" "$(cat "$_fix_parity_dir/fix.err")"
+
+echo "=== Missing mktemp/cat/rm keeps read-only lint working ==="
+
+_minpath_bin=$(_tmpdir)
+for _minpath_tool in bash dirname mkdir python3 yq; do
+  ln -s "$(command -v "$_minpath_tool")" "$_minpath_bin/$_minpath_tool"
+done
+cat >"$_minpath_bin/typos" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *needs-typo.txt) echo "error: typo in $arg"; exit 1 ;;
+  esac
+done
+exit 0
+EOF
+chmod +x "$_minpath_bin/typos"
+_minpath_dir=$(_tmpdir)
+printf 'clean content here\n' >"$_minpath_dir/clean.txt"
+printf 'clean content here\n' >"$_minpath_dir/needs-typo.txt"
+set +e
+_minpath_out=$(PATH="$_minpath_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "$_minpath_dir/clean.txt" "$_minpath_dir/needs-typo.txt" 2>&1)
+_minpath_rc=$?
+set -e
+_assert_exit "minimal PATH: typo finding exits 1" 1 "$_minpath_rc"
+_assert_contains "minimal PATH: typo diagnostic present" "needs-typo.txt" "$_minpath_out"
+set +e
+PATH="$_minpath_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "$_minpath_dir/clean.txt" >/dev/null 2>&1
+_minpath_clean_rc=$?
+set -e
+_assert_exit "minimal PATH: clean file exits 0" 0 "$_minpath_clean_rc"
+
+echo "=== Multi-file --fix plans once ==="
+
+_fix_plan_dir=$(_tmpdir)
+_fix_plan_args=()
+for _i in 1 2 3 4; do
+  printf 'value_%s = %s\n' "$_i" "$_i" >"$_fix_plan_dir/file-$_i.py"
+  _fix_plan_args+=("$_fix_plan_dir/file-$_i.py")
+done
+_fix_plan_log=$_fix_plan_dir/python.log
+_fix_plan_wrapper=$_fix_plan_dir/python-wrapper
+_fix_plan_real_python=$(python3 -c 'import sys; print(sys.executable)')
+_fix_plan_calls_log=$_fix_plan_dir/calls.log
+: >"$_fix_plan_log"
+: >"$_fix_plan_calls_log"
+cat >"$_fix_plan_wrapper" <<'EOF'
+#!/usr/bin/env bash
+printf 'python\n' >>"$AUTOLINT_FIX_PLAN_LOG"
+exec "$AUTOLINT_FIX_PLAN_REAL_PYTHON" "$@"
+EOF
+chmod +x "$_fix_plan_wrapper"
+set +e
+AUTOLINT_FIX_PLAN_LOG="$_fix_plan_log" \
+  AUTOLINT_FIX_PLAN_REAL_PYTHON="$_fix_plan_real_python" \
+  AUTOLINT_CLEAN_BATCH_LOG="$_fix_plan_calls_log" \
+  CHECKRUN_PYTHON="$_fix_plan_wrapper" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" --fix "${_fix_plan_args[@]}" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "fix planning: clean files exit 0" 0 "$rc"
+_fix_plan_calls=$(wc -l <"$_fix_plan_log" | tr -d '[:space:]')
+# Ceiling stays generous (loaded-run safe): per-file planning would need
+# 4 interpreter startups; pre-planning needs 1.
+if [ "$_fix_plan_calls" -le 2 ]; then
+  _pass "fix planning: one registry process handles all files ($_fix_plan_calls)"
+else
+  _fail "fix planning: one registry process handles all files (got $_fix_plan_calls, want <= 2)"
+fi
+
+echo "=== Minimal PATH without mktemp plans once ==="
+
+_minplan_log=$_minpath_dir/python.log
+_minplan_wrapper=$_minpath_dir/python-wrapper
+: >"$_minplan_log"
+cat >"$_minplan_wrapper" <<'EOF'
+#!/usr/bin/env bash
+printf 'python\n' >>"$AUTOLINT_MINPLAN_LOG"
+exec "$AUTOLINT_MINPLAN_REAL_PYTHON" "$@"
+EOF
+chmod +x "$_minplan_wrapper"
+_minplan_args=()
+for _i in 1 2 3 4; do
+  printf 'clean content %s\n' "$_i" >"$_minpath_dir/plan-$_i.txt"
+  _minplan_args+=("$_minpath_dir/plan-$_i.txt")
+done
+set +e
+AUTOLINT_MINPLAN_LOG="$_minplan_log" \
+  AUTOLINT_MINPLAN_REAL_PYTHON="$_fix_plan_real_python" \
+  CHECKRUN_PYTHON="$_minplan_wrapper" \
+  PATH="$_minpath_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "${_minplan_args[@]}" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "minimal PATH planning: clean files exit 0" 0 "$rc"
+_minplan_calls=$(wc -l <"$_minplan_log" | tr -d '[:space:]')
+if [ "$_minplan_calls" -le 2 ]; then
+  _pass "minimal PATH planning: one registry process handles all files ($_minplan_calls)"
+else
+  _fail "minimal PATH planning: one registry process handles all files (got $_minplan_calls, want <= 2)"
+fi
+
+echo "=== All-residual probe skips batching entirely ==="
+
+_noresid_cfg=$(_tmpdir)
+printf '%s\n' '*/envrc-1' '*/envrc-2' >"$_noresid_cfg/spell-ignore"
+: >"$_clean_batch_log"
+set +e
+AUTOLINT_CLEAN_BATCH_LOG="$_clean_batch_log" \
+  CHECKRUN_CONFIG_DIR="$_noresid_cfg" \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" "$_clean_batch_dir/shell/envrc-1" \
+  "$_clean_batch_dir/shell/envrc-2" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "all-residual: shell plans exit 0" 0 "$rc"
+_assert_eq "all-residual: Typos never runs" "0" \
+  "$(grep -c '^typos:' "$_clean_batch_log")"
+_assert_eq "all-residual: ShellCheck runs once per file" "2" \
+  "$(grep -c '^shellcheck:' "$_clean_batch_log")"
+
+echo "=== Missing mkdir falls back to the historical per-file loop ==="
+
+_nocreate_bin=$(_tmpdir)
+for _nocreate_tool in bash dirname python3 yq; do
+  ln -s "$(command -v "$_nocreate_tool")" "$_nocreate_bin/$_nocreate_tool"
+done
+cat >"$_nocreate_bin/typos" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *needs-typo.txt) echo "error: typo in $arg"; exit 1 ;;
+  esac
+done
+exit 0
+EOF
+chmod +x "$_nocreate_bin/typos"
+_nocreate_dir=$(_tmpdir)
+printf 'clean content here\n' >"$_nocreate_dir/clean.txt"
+printf 'clean content here\n' >"$_nocreate_dir/needs-typo.txt"
+set +e
+_nocreate_out=$(PATH="$_nocreate_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "$_nocreate_dir/clean.txt" "$_nocreate_dir/needs-typo.txt" 2>&1)
+_nocreate_rc=$?
+set -e
+_assert_exit "no-mkdir PATH: typo finding exits 1" 1 "$_nocreate_rc"
+_assert_contains "no-mkdir PATH: typo diagnostic present" "needs-typo.txt" "$_nocreate_out"
+set +e
+PATH="$_nocreate_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "$_nocreate_dir/clean.txt" >/dev/null 2>&1
+_nocreate_clean_rc=$?
+set -e
+_assert_exit "no-mkdir PATH: clean file exits 0" 0 "$_nocreate_clean_rc"
+
+echo "=== Corrupt batch manifest falls back without partial lint ==="
+
+# shellcheck source=../../lib/checkrun/autolint.sh
+. "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh"
+_count_guard_write() { # $1=dir [$2=count] [$3=plan-spec]; plan-spec: full|truncated
+  local dir="$1" count="${2:-}" spec="${3:-full}"
+  : >"$dir/batch.plan"
+  _count_guard_rec "$dir" "f1.sh" "sh" "lint" "shellcheck" "none" "none"
+  if [ "$spec" = "full" ]; then
+    _count_guard_rec "$dir" "f2.sh" "sh" "lint" "shellcheck" "none" "none"
+  else
+    printf 'f2.sh\0sh\0lint\0' >>"$dir/batch.plan"
+  fi
+  if [ -n "$count" ]; then
+    printf '%s\n' "$count" >"$dir/batch.count"
+  else
+    rm -f "$dir/batch.count"
+  fi
+}
+_count_guard_rec() { # $1=dir $2..$7=record fields
+  printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$2" "$3" "$4" "$5" "$6" "$7" >>"$1/batch.plan"
+}
+_count_guard_try() { # $1=desc $2=dir — expect rc 1, empty stdout, no leak
+  local desc="$1" dir="$2" out rc
+  set +e
+  out=$(_autolint_try_clean_batch "$dir" 1 0 "$dir/f1.sh" "$dir/f2.sh" 2>/dev/null)
+  rc=$?
+  set -e
+  _assert_exit "$desc: refuses corrupt manifest" 1 "$rc"
+  _assert_eq "$desc: no stdout leaks" "" "$out"
+  if [ ! -e "$dir/batch.stderr" ]; then
+    _pass "$desc: probe scratch removed"
+  else
+    _fail "$desc: probe scratch left behind ($dir/batch.stderr)"
+  fi
+}
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "5" full
+_count_guard_try "count guard: wrong-high count" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "1" full
+_count_guard_try "count guard: wrong-low count" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "two" full
+_count_guard_try "count guard: non-numeric count" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "" full
+_count_guard_try "count guard: missing count file" "$_count_guard_dir"
+_count_guard_dir=$(_tmpdir)
+_count_guard_write "$_count_guard_dir" "2" truncated
+_count_guard_try "count guard: truncated plan" "$_count_guard_dir"
 
 # ---------------------------------------------------------------------------
 # Summary

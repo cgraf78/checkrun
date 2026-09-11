@@ -448,7 +448,7 @@ CHECKRUN_PORTABLE_SHAPE_LOG="$portable_shape_log" \
       printf "plan:%s\n" "$(($# - 1))" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
     }
     _autolint_try_clean_batch() {
-      printf "batch:%s\n" "$(($# - 1))" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
+      printf "batch:%s\n" "$(($# - 3))" >>"$CHECKRUN_PORTABLE_SHAPE_LOG"
       return 0
     }
     _lint_one() {
