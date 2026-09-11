@@ -184,10 +184,10 @@ _lint_one_with_plan() {
 }
 
 _lint_one() {
-  # Plan one file inline (one Python invocation per call) and dispatch. Used by
-  # --fix mode and read-only fallbacks without planner scratch. Normal read-only
-  # paths use _autolint_pre_plan plus _lint_one_with_plan so the Python planner
-  # runs once total, including when jobs=1.
+  # Plan one file inline (one Python invocation per call) and dispatch. Used
+  # only when no planner scratch can be allocated at all. Every other path,
+  # including --fix and the minimal-PATH fallback, uses _autolint_pre_plan
+  # plus _lint_one_with_plan so the Python planner runs once total.
   local file="$1"
   local rc tool_rc plan_file
 
@@ -214,7 +214,7 @@ _autolint_pre_plan() {
   # records that directory before this interruptible planner runs, so every
   # return path can remove the exact invocation scratch without a glob.
   # Empty per-file plans are legitimate skips, not failures.
-  local out_dir="$1" manifest
+  local out_dir="$1" manifest manifest_outside=0 plan_rc=0
   shift
   [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
   # Keep the common one-file edit hook direct. Every multi-file request uses a
@@ -231,21 +231,119 @@ _autolint_pre_plan() {
   # same ARG_MAX failure one process deeper. Stage a private manifest inside the
   # already-owned plan directory so the planner still runs exactly once with a
   # bounded argv. mktemp supplies mode 0600 independent of the caller's umask.
-  manifest=$(mktemp "$out_dir/files0.XXXXXX") || {
+  # Without mktemp (minimal PATH), use the noclobber tempfile helper and
+  # remove the manifest once the planner has consumed it, since it lives
+  # outside the caller-owned directory on that path. A present-but-failing
+  # mktemp keeps its historical 125 diagnostic.
+  if command -v mktemp >/dev/null 2>&1; then
+    manifest=$(mktemp "$out_dir/files0.XXXXXX") || {
+      echo "autolint: could not create registry input manifest" >&2
+      return 125
+    }
+  elif manifest=$(_checkrun_tempfile); then
+    manifest_outside=1
+  else
     echo "autolint: could not create registry input manifest" >&2
     return 125
+  fi
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
+    return "$_autolint_cancel_status"
   }
-  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
   if ! printf '%s\0' "$@" >"$manifest"; then
     echo "autolint: could not write registry input manifest" >&2
+    [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
     return 125
   fi
   # A trap can latch while the shell builtin is writing a large manifest. Do
   # not start a new planner after that signal: it was not alive to receive the
   # already-delivered process-group cancellation and could otherwise hang.
-  [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
+    return "$_autolint_cancel_status"
+  }
   _checkrun_registry shell-plan --output-dir "$out_dir" --phase lint \
     --files0-from "$manifest"
+  plan_rc=$?
+  [ "$manifest_outside" -eq 1 ] && _checkrun_remove "$manifest"
+  return "$plan_rc"
+}
+
+_autolint_make_plan_dir() {
+  # Allocate a caller-owned plan directory, storing the path in $1. Prefers
+  # mktemp; falls back to a mkdir loop so minimal-PATH environments without
+  # mktemp still plan once instead of once per file. Returns non-zero when no
+  # scratch can be allocated, in which case callers keep the historical
+  # per-file planning loop.
+  local _varname="$1" _dir="" _i
+  if command -v mktemp >/dev/null 2>&1; then
+    _dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-plans.XXXXXX" 2>/dev/null) && {
+      printf -v "$_varname" '%s' "$_dir"
+      return 0
+    }
+  fi
+  if command -v mkdir >/dev/null 2>&1; then
+    for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      _dir="${TMPDIR:-/tmp}/autolint-plans.$$.${RANDOM:-0}.$_i"
+      if mkdir "$_dir" 2>/dev/null; then
+        # Match mktemp -d's 0700 when chmod exists; in chmod-less minimal
+        # environments keep the umask-dependent dir rather than failing —
+        # this fallback exists precisely for tool-poor environments.
+        chmod 700 "$_dir" 2>/dev/null || true
+        printf -v "$_varname" '%s' "$_dir"
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+_autolint_remove_plan_dir() {
+  # Best-effort scratch cleanup. A missing rm (minimal PATH) or a transient
+  # removal failure must not rewrite the lint result already collected, so
+  # cleanup status is intentionally discarded like _checkrun_remove.
+  if command -v rm >/dev/null 2>&1; then
+    rm -rf "$1" 2>/dev/null || true
+  fi
+}
+
+_autolint_run_preplanned_sequential() {
+  # Plan all files in one Python invocation, then dispatch sequentially per
+  # file. Used by --fix (mutations must never run in parallel) and by the
+  # minimal-PATH read-only fallback. File order, output, and exit codes match
+  # the historical per-file _lint_one loop; only planner startups drop from N
+  # to 1. Without allocatable scratch, degrades to that same per-file loop.
+  local plan_dir="" plan_rc=0 file file_rc rc=0
+  local -a files=("$@")
+
+  [ "${#files[@]}" -eq 0 ] && return 0
+  if ! _autolint_make_plan_dir plan_dir; then
+    for file in "${files[@]}"; do
+      if _lint_one "$file"; then
+        file_rc=0
+      else
+        file_rc=$?
+      fi
+      rc=$(_autolint_merge_rc "$rc" "$file_rc")
+    done
+    return "$rc"
+  fi
+  _autolint_pre_plan "$plan_dir" "${files[@]}" || plan_rc=$?
+  [ "${_autolint_cancel_status:-0}" -eq 0 ] || {
+    _autolint_remove_plan_dir "$plan_dir"
+    return "$_autolint_cancel_status"
+  }
+  if [ "$plan_rc" -ne 0 ]; then
+    _autolint_remove_plan_dir "$plan_dir"
+    return "$plan_rc"
+  fi
+  if _autolint_run_plans_sequential "$plan_dir" "${#files[@]}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  _autolint_remove_plan_dir "$plan_dir"
+  return "$rc"
 }
 
 _lint_dispatch() {
@@ -1555,10 +1653,10 @@ _autolint_main() {
     # Keep mutation mode sequential. Several backends operate at package/project
     # scope even when they receive one file, so parallel fixes can race on shared
     # source files or tool caches. Read-only linting below is safe to overlap.
-    for file in "${lint_files[@]}"; do
-      _lint_one "$file"
-      rc=$(_autolint_merge_rc "$rc" "$?")
-    done
+    # Planning happens once for all files; only per-file dispatch stays
+    # sequential, preserving the no-parallel-mutation invariant.
+    _autolint_run_preplanned_sequential "${lint_files[@]}"
+    rc=$(_autolint_merge_rc "$rc" "$?")
   else
     jobs=${CHECKRUN_AUTOLINT_JOBS:-$(_autolint_default_jobs)}
     case "$jobs" in
@@ -1570,11 +1668,11 @@ _autolint_main() {
       ! command -v rm >/dev/null 2>&1; then
       # Tests and minimal hook environments sometimes constrain PATH to only the
       # backend being exercised. In that mode correctness is more important than
-      # concurrency, so fall back to the historical no-temp-file execution path.
-      for file in "${lint_files[@]}"; do
-        _lint_one "$file"
-        rc=$(_autolint_merge_rc "$rc" "$?")
-      done
+      # concurrency, so fall back to sequential pre-planned dispatch, which
+      # degrades to the historical per-file loop only when no planner scratch
+      # can be allocated at all.
+      _autolint_run_preplanned_sequential "${lint_files[@]}"
+      rc=$(_autolint_merge_rc "$rc" "$?")
     else
       # A multi-input/jobs>1 operation cannot know how many plans are nonempty
       # until the registry returns, so its validated group owns the complete

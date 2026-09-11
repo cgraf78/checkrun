@@ -3596,6 +3596,78 @@ _minpath_clean_rc=$?
 set -e
 _assert_exit "minimal PATH: clean file exits 0" 0 "$_minpath_clean_rc"
 
+echo "=== Multi-file --fix plans once ==="
+
+_fix_plan_dir=$(_tmpdir)
+_fix_plan_args=()
+for _i in 1 2 3 4; do
+  printf 'value_%s = %s\n' "$_i" "$_i" >"$_fix_plan_dir/file-$_i.py"
+  _fix_plan_args+=("$_fix_plan_dir/file-$_i.py")
+done
+_fix_plan_log=$_fix_plan_dir/python.log
+_fix_plan_wrapper=$_fix_plan_dir/python-wrapper
+_fix_plan_real_python=$(python3 -c 'import sys; print(sys.executable)')
+_fix_plan_calls_log=$_fix_plan_dir/calls.log
+: >"$_fix_plan_log"
+: >"$_fix_plan_calls_log"
+cat >"$_fix_plan_wrapper" <<'EOF'
+#!/usr/bin/env bash
+printf 'python\n' >>"$AUTOLINT_FIX_PLAN_LOG"
+exec "$AUTOLINT_FIX_PLAN_REAL_PYTHON" "$@"
+EOF
+chmod +x "$_fix_plan_wrapper"
+set +e
+AUTOLINT_FIX_PLAN_LOG="$_fix_plan_log" \
+  AUTOLINT_FIX_PLAN_REAL_PYTHON="$_fix_plan_real_python" \
+  AUTOLINT_CLEAN_BATCH_LOG="$_fix_plan_calls_log" \
+  CHECKRUN_PYTHON="$_fix_plan_wrapper" \
+  CHECKRUN_CONFIG_DIR=/nonexistent \
+  PATH="$_clean_batch_mock:$PATH" \
+  "$AUTOLINT" --fix "${_fix_plan_args[@]}" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "fix planning: clean files exit 0" 0 "$rc"
+_fix_plan_calls=$(wc -l <"$_fix_plan_log" | tr -d '[:space:]')
+# Ceiling stays generous (loaded-run safe): per-file planning would need
+# 4 interpreter startups; pre-planning needs 1.
+if [ "$_fix_plan_calls" -le 2 ]; then
+  _pass "fix planning: one registry process handles all files ($_fix_plan_calls)"
+else
+  _fail "fix planning: one registry process handles all files (got $_fix_plan_calls, want <= 2)"
+fi
+
+echo "=== Minimal PATH without mktemp plans once ==="
+
+_minplan_log=$_minpath_dir/python.log
+_minplan_wrapper=$_minpath_dir/python-wrapper
+: >"$_minplan_log"
+cat >"$_minplan_wrapper" <<'EOF'
+#!/usr/bin/env bash
+printf 'python\n' >>"$AUTOLINT_MINPLAN_LOG"
+exec "$AUTOLINT_MINPLAN_REAL_PYTHON" "$@"
+EOF
+chmod +x "$_minplan_wrapper"
+_minplan_args=()
+for _i in 1 2 3 4; do
+  printf 'clean content %s\n' "$_i" >"$_minpath_dir/plan-$_i.txt"
+  _minplan_args+=("$_minpath_dir/plan-$_i.txt")
+done
+set +e
+AUTOLINT_MINPLAN_LOG="$_minplan_log" \
+  AUTOLINT_MINPLAN_REAL_PYTHON="$_fix_plan_real_python" \
+  CHECKRUN_PYTHON="$_minplan_wrapper" \
+  PATH="$_minpath_bin" CHECKRUN_CONFIG_DIR=/nonexistent \
+  "$AUTOLINT" "${_minplan_args[@]}" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "minimal PATH planning: clean files exit 0" 0 "$rc"
+_minplan_calls=$(wc -l <"$_minplan_log" | tr -d '[:space:]')
+if [ "$_minplan_calls" -le 2 ]; then
+  _pass "minimal PATH planning: one registry process handles all files ($_minplan_calls)"
+else
+  _fail "minimal PATH planning: one registry process handles all files (got $_minplan_calls, want <= 2)"
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
