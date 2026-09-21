@@ -29,49 +29,49 @@ url = "https://github.com/Kampfkarren/selene/releases/download/0.31.0/selene-0.3
 url_api = "https://api.github.com/repos/Kampfkarren/selene/releases/assets/425780014"
 
 [[tools."aqua:astral-sh/ruff"]]
-version = "0.16.7"
+version = "0.16.8"
 backend = "aqua:astral-sh/ruff"
 
 [tools."aqua:astral-sh/ruff"."platforms.linux-x64"]
-checksum = "sha256:8d28939cf5cabe54a2f8f7cbfab52c643436d1bc70474198181db9e48f504411"
-url = "https://github.com/astral-sh/ruff/releases/download/0.16.7/ruff-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/astral-sh/ruff/releases/assets/555530803"
+checksum = "sha256:e56aa612121de356f37d05f3284cd806081fb72d5dbd4814b3810c5a23c562cc"
+url = "https://github.com/astral-sh/ruff/releases/download/0.16.8/ruff-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/astral-sh/ruff/releases/assets/568294522"
 provenance = "github-attestations"
 
 [tools."aqua:astral-sh/ruff"."platforms.macos-arm64"]
-checksum = "sha256:80221a5e0b1ae29262a74496f2ad1380c1ab52b3edd8cee13ec76d8acff406ca"
-url = "https://github.com/astral-sh/ruff/releases/download/0.16.7/ruff-aarch64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/astral-sh/ruff/releases/assets/555530669"
+checksum = "sha256:0ffa53899f2970d24f14fbed8d8265c87180b159b7100794d97a1527dc60fa79"
+url = "https://github.com/astral-sh/ruff/releases/download/0.16.8/ruff-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/astral-sh/ruff/releases/assets/568294350"
 provenance = "github-attestations"
 
 [[tools."aqua:bazelbuild/buildtools/buildifier"]]
-version = "8.5.1"
+version = "10.0.1"
 backend = "aqua:bazelbuild/buildtools/buildifier"
 
 [tools."aqua:bazelbuild/buildtools/buildifier"."platforms.linux-x64"]
-checksum = "sha256:887377fc64d23a850f4d18a077b5db05b19913f4b99b270d193f3c7334b5a9a7"
-url = "https://github.com/bazelbuild/buildtools/releases/download/v8.5.1/buildifier-linux-amd64"
-url_api = "https://api.github.com/repos/bazelbuild/buildtools/releases/assets/348132197"
+checksum = "sha256:e0ea28e2d639347724435ebafe0531fd764fbf20eec6a23000c81edd0d58e51d"
+url = "https://github.com/bazel-contrib/buildtools/releases/download/v10.0.1/buildifier-linux-amd64"
+url_api = "https://api.github.com/repos/bazel-contrib/buildtools/releases/assets/565732869"
 
 [tools."aqua:bazelbuild/buildtools/buildifier"."platforms.macos-arm64"]
-checksum = "sha256:62836a9667fa0db309b0d91e840f0a3f2813a9c8ea3e44b9cd58187c90bc88ba"
-url = "https://github.com/bazelbuild/buildtools/releases/download/v8.5.1/buildifier-darwin-arm64"
-url_api = "https://api.github.com/repos/bazelbuild/buildtools/releases/assets/348132225"
+checksum = "sha256:afb78f350319b59cc51d6add3a5f3ba68e63e5d88f68c5a9ea6328a07084d319"
+url = "https://github.com/bazel-contrib/buildtools/releases/download/v10.0.1/buildifier-darwin-arm64"
+url_api = "https://api.github.com/repos/bazel-contrib/buildtools/releases/assets/565732874"
 
 [[tools."aqua:biomejs/biome"]]
-version = "2.5.13"
+version = "2.5.14"
 backend = "aqua:biomejs/biome"
 
 [tools."aqua:biomejs/biome"."platforms.linux-x64"]
-checksum = "sha256:2037af3d666febdb6e1a2f549938d6f0fe961bad0ac1a34c5fee3dec2db0b43e"
-url = "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.5.13/biome-linux-x64"
-url_api = "https://api.github.com/repos/biomejs/biome/releases/assets/554847323"
+checksum = "sha256:290c1c85deeaf01310d9187306060b53961574856a7e34f59d9662562e6f19fe"
+url = "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.5.14/biome-linux-x64"
+url_api = "https://api.github.com/repos/biomejs/biome/releases/assets/567471264"
 provenance = "github-attestations"
 
 [tools."aqua:biomejs/biome"."platforms.macos-arm64"]
-checksum = "sha256:3d0cff7e4cd35a1709c1f4f9568380e08b3551ecf6e7356b3a49a40e3611894b"
-url = "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.5.13/biome-darwin-arm64"
-url_api = "https://api.github.com/repos/biomejs/biome/releases/assets/554847319"
+checksum = "sha256:3d1194d0a7b720315fb6f8cbafeb5b18ca7100c3e635e8ce82ef46b315de9c0e"
+url = "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.5.14/biome-darwin-arm64"
+url_api = "https://api.github.com/repos/biomejs/biome/releases/assets/567471268"
 provenance = "github-attestations"
 
 [[tools."aqua:google/yamlfmt"]]
@@ -133,19 +133,19 @@ url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/3849248
 provenance = "github-attestations"
 
 [[tools."aqua:rvben/rumdl"]]
-version = "0.2.73"
+version = "0.2.74"
 backend = "aqua:rvben/rumdl"
 
 [tools."aqua:rvben/rumdl"."platforms.linux-x64"]
-checksum = "sha256:dc4aa9bf98f936f667039224a34fc2e26ddf6be3589bf59d63e4d6b038be4f5c"
-url = "https://github.com/rvben/rumdl/releases/download/v0.2.73/rumdl-v0.2.73-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/rvben/rumdl/releases/assets/557839615"
+checksum = "sha256:8720bd8b101048433c2058c54597fe6a300f1ff6b2692acfe66586573fc1815c"
+url = "https://github.com/rvben/rumdl/releases/download/v0.2.74/rumdl-v0.2.74-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/rvben/rumdl/releases/assets/573014015"
 provenance = "github-attestations"
 
 [tools."aqua:rvben/rumdl"."platforms.macos-arm64"]
-checksum = "sha256:54e0e7c3031b8bfa37e3c57104cc0c93988e02f5b7023c1804749fd180822f9e"
-url = "https://github.com/rvben/rumdl/releases/download/v0.2.73/rumdl-v0.2.73-aarch64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/rvben/rumdl/releases/assets/557839617"
+checksum = "sha256:6d623ffce778f3eeed50377284b9825dadc569cb1238bd52b3e774928be7dbe6"
+url = "https://github.com/rvben/rumdl/releases/download/v0.2.74/rumdl-v0.2.74-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/rvben/rumdl/releases/assets/573014012"
 provenance = "github-attestations"
 
 [[tools."aqua:tamasfe/taplo"]]
