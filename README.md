@@ -51,7 +51,7 @@ checkrun capabilities --has autolint-files0-stdin
 checkrun editor-metadata --json
 checkrun explain [--json] FILE [FILE...]
 checkrun plan --json [--phase format|lint] FILE [FILE...]
-checkrun schema refresh [--check] [--association NAME]
+checkrun schema refresh [--check] [--association NAME] [--timeout SECONDS]
 checkrun verify [--json] [--tool cargo-audit|cargo-clippy|clang-tidy|golangci-lint|govulncheck] [PATH...]
 checkrun format|fmt FILE [FILE...]
 checkrun lint|check [--fix] [--json] FILE [FILE...]

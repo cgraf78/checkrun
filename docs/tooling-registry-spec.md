@@ -228,10 +228,13 @@ hard-coded extension map in `explain.py`.
 Matching order should be deterministic:
 
 1. exact filename
-2. extension
-3. glob pattern
+2. glob pattern
+3. extension
 4. shebang for extensionless text files
 5. unknown
+
+Glob patterns precede extensions so narrow associations such as
+`*color-theme.json` can override a broad extension mapping.
 
 Extensionless binary files should be classified as unknown without reading them
 as text. Special extensionless files such as `.profile`, `.envrc`, `envrc-*`,

@@ -69,6 +69,7 @@ Commands:
   schema    schema maintenance commands
   verify    run explicit project verification checks
   format    run autoformat compatibility entry point
+  fmt       alias for format
   lint      run autolint compatibility entry point
   check     alias for lint
 EOF

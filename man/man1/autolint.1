@@ -16,8 +16,11 @@ autolint \- lint supported files through Checkrun policy
 .SH DESCRIPTION
 .B autolint
 lints each supplied file with the Checkrun-selected fast linter for that
-filetype. Unsupported files, ignored files, missing files, and files whose
-linter is not installed are skipped rather than treated as hard failures.
+filetype. Ignored files, missing files, and files whose linter is not
+installed are skipped rather than treated as hard failures.
+Files without a backend linter still receive
+.B typos
+spelling checks, when available, and any configured schema validation.
 .PP
 When
 .B --json
