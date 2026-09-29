@@ -11,6 +11,10 @@ reimplementing registry or schema-policy logic.
   behavior on top of the shared registry model.
 - `registry.py` is the registry interpreter used by `checkrun plan`,
   `checkrun explain`, and tests.
+- `verify.py` implements `checkrun verify`, the explicit project analyzers
+  kept off the save-time lint path.
+- `checkrun_paths.py` owns user config and data directory resolution shared by
+  the shell wrappers and Python modules.
 - `nvim.lua` is the Neovim adapter API for filetype and schema integration,
   including host materialization of the portable `editor-metadata` contract.
   Consumers supply dependency resolution as a callback so this provider-owned

@@ -28,6 +28,7 @@ _assert_contains "help: lists plan command" "plan" "$output"
 _assert_contains "help: lists explain command" "explain" "$output"
 _assert_contains "help: lists schema command" "schema" "$output"
 _assert_contains "help: lists check alias" "check     alias for lint" "$output"
+_assert_contains "help: lists fmt alias" "fmt       alias for format" "$output"
 
 output=$("$CHECKRUN" check --help 2>&1)
 rc=$?

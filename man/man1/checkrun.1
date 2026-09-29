@@ -56,8 +56,14 @@ Emit formatter and linter execution plans without running tools.
 .B explain [--json] FILE...
 Explain formatter, linter, and schema policy for paths.
 .TP
-.B schema
-Run schema maintenance commands such as refreshing pinned public schemas.
+.B schema refresh [--check] [--association NAME] [--timeout SECONDS]
+Refresh pinned public schema payloads from association sources.
+.B --check
+reports drift without writing payloads,
+.B --association
+limits the refresh to one exact policy name, and
+.B --timeout
+sets the per-source fetch timeout in seconds (default 20).
 .TP
 .B verify [--json] [--tool TOOL] [PATH...]
 Run explicit project verification checks selected from the changed-file scope.
@@ -95,6 +101,12 @@ Python interpreter used by Python-backed Checkrun helpers.
 .B CHECKRUN_AUTOLINT_JOBS
 Parallelism for
 .BR autolint (1).
+.TP
+.B CHECKRUN_SCHEMA_ASSOCIATIONS
+Schema association policy file to use instead of
+.I associations.json
+in the Checkrun config directory, for a single run, test fixture, or
+integration harness.
 .SH EXIT STATUS
 .TP
 .B 0

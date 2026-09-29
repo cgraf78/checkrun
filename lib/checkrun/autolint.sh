@@ -59,16 +59,17 @@ _autolint_usage() {
     "Usage: autolint [--fix] [--json] [-h|--help] <file> [file...]" \
     "       autolint [--fix] [--json] --files0-from FILE|-" \
     "" \
-    "Lint files by extension. Unsupported files, missing files, ignored files," \
-    "and files whose linter is not installed are skipped." \
+    "Lint files by extension. Missing files, ignored files, and files whose" \
+    "linter is not installed are skipped. Files without a backend linter below" \
+    "still get typos spelling checks and any configured schema validation." \
     "" \
     "Supported file types:" \
     "  Build:     .bzl, BUCK, BUILD, CMakeLists.txt, .cmake, Makefile, GNUmakefile, .mk, .mak" \
+    "  C/C++:     .c, .cc, .cpp, .cxx, .h, .hpp, .hxx (with compile_commands.json or compile_flags.txt in the file's directory or an ancestor)" \
     "  CI:        .github/workflows/*.yml, .github/workflows/*.yaml" \
     "  Config:    .editorconfig, .toml, git config, tmux.conf, crontab" \
     "  Container: Dockerfile, Containerfile" \
-    "  Docs/text: .md and plain text via typos when available" \
-    "  Go:        .go" \
+    "  Docs/text: .md" \
     "  Java:      .java" \
     "  Lua:       .lua" \
     "  Nix:       .nix" \
@@ -76,8 +77,8 @@ _autolint_usage() {
     "  Protobuf:  .proto" \
     "  Python:    .py" \
     "  Ruby:      .rb" \
-    "  Rust:      .rs" \
     "  Shell:     .sh, .bash, .zsh, extensionless files with a shell shebang, .bashrc, .zshrc, .envrc" \
+    "  Spelling:  all files via typos when available" \
     "  Systemd:   .automount, .device, .mount, .path, .scope, .service, .slice, .socket, .swap, .target, .timer" \
     "  Web/data:  .css, .scss, .less, .js, .jsx, .ts, .tsx, .json, .jsonc, .html, .htm" \
     "" \
