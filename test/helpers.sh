@@ -384,6 +384,21 @@ trap _cleanup EXIT
 # Common test setup
 # ---------------------------------------------------------------------------
 
+# Pin Checkrun's user config to an empty invocation-owned directory. Without
+# this, any suite that runs a public command without its own override reads
+# the developer's live ~/.config/checkrun (ignore lists, tool fallbacks,
+# associations.json), so local results depend on dotfiles state that CI
+# runners never have. CHECKRUN_CONFIG_DIR is the narrowest knob: redirecting
+# HOME or XDG_CONFIG_HOME would also hide mise, git, and tool configs the
+# suites rely on. Caller overrides are dropped so an exported value from the
+# developer's shell cannot leak in either. Suites that exercise HOME/XDG
+# resolution itself opt out per command with CHECKRUN_CONFIG_DIR=''.
+# _tmpdir's exit only leaves the substitution subshell; an empty value would
+# silently fall back to the live config, so fail the suite here instead.
+CHECKRUN_CONFIG_DIR=$(_tmpdir) || exit 1
+export CHECKRUN_CONFIG_DIR
+unset CHECKRUN_SCHEMA_ASSOCIATIONS
+
 # Create a mock HOME, saving the original. Sets TEST_HOME, REAL_HOME, HOME.
 _mock_home() {
   # shellcheck disable=SC2034  # REAL_HOME is used by callers

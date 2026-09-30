@@ -370,9 +370,11 @@ cat >"$_default_home/.config/example/settings.json" <<'JSON'
 { "enabled": "yes" }
 JSON
 
+# The harness pins CHECKRUN_CONFIG_DIR; clear it so these cases exercise the
+# XDG fallback that real installs use.
 set +e
 output=$(HOME="$_default_home" XDG_CONFIG_HOME="$_default_xdg_config" \
-  XDG_DATA_HOME="$_default_xdg_data" "$SCRIPT" \
+  XDG_DATA_HOME="$_default_xdg_data" CHECKRUN_CONFIG_DIR='' "$SCRIPT" \
   "$_default_home/.config/example/settings.json" 2>&1)
 rc=$?
 set -e
@@ -381,7 +383,7 @@ _assert_contains "default policy: checkrun schema data dir is used" "Default set
 
 set +e
 output=$(HOME="$_default_home" XDG_CONFIG_HOME="$_default_xdg_config" \
-  XDG_DATA_HOME="$_default_xdg_data" "$SCRIPT" \
+  XDG_DATA_HOME="$_default_xdg_data" CHECKRUN_CONFIG_DIR='' "$SCRIPT" \
   "$_default_xdg_config/checkrun/associations.json" 2>&1)
 rc=$?
 set -e
@@ -833,54 +835,10 @@ set -e
 _assert_exit "editor config: editor-source mode exits 0" 0 "$rc"
 _assert_contains "editor config: editor-source mode preserves editor-only schema urls" '"url":"vscode://schemas/settings/user"' "$output"
 
-echo "=== schema-lint: production config schemas ==="
-
-if [[ -f "$HOME/.config/checkrun/associations.json" ]]; then
-  set +e
-  output=$(python3 "$POLICY_SCRIPT" --lsp-schemas 2>/dev/null)
-  rc=$?
-  set -e
-  _assert_exit "production schemas: editor config emits successfully" 0 "$rc"
-  for expected in \
-    "share/checkrun/schemas/associations.schema.json" \
-    "share/sley/schemas/verify.schema.json" \
-    "https://raw.githubusercontent.com/jesseduffield/lazygit/master/schema/config.json" \
-    "https://biomejs.dev/schemas/latest/schema.json" \
-    "https://mise.jdx.dev/schema/mise.json" \
-    "https://raw.githubusercontent.com/ClementTsang/bottom/main/schema/v0.10/bottom.json" \
-    "https://raw.githubusercontent.com/hadolint/hadolint/master/contrib/hadolint.json" \
-    "https://www.schemastore.org/ruff.json" \
-    "https://www.schemastore.org/rustfmt.json" \
-    "https://www.schemastore.org/stylua.json" \
-    "https://www.schemastore.org/taplo.json" \
-    "https://raw.githubusercontent.com/crate-ci/typos/master/config.schema.json" \
-    "https://raw.githubusercontent.com/SchemaStore/schemastore/master/src/schemas/json/rumdl.json"; do
-    _assert_contains "production schemas: editor exposes $expected" \
-      "$expected" "$output"
-  done
-
-  for config_path in \
-    ".config/checkrun/associations.json" \
-    ".config/lazygit/config.yml" \
-    ".config/checkrun/biome.json" \
-    ".config/mise/config.toml" \
-    ".config/bottom/bottom.toml" \
-    ".config/checkrun/hadolint.yaml" \
-    ".config/checkrun/ruff.toml" \
-    ".config/checkrun/rustfmt.toml" \
-    ".config/checkrun/stylua.toml" \
-    ".config/checkrun/taplo.toml" \
-    ".config/checkrun/typos.toml" \
-    ".config/checkrun/rumdl.toml"; do
-    set +e
-    output=$("$SCRIPT" "$HOME/$config_path" 2>&1)
-    rc=$?
-    set -e
-    _assert_exit "production schemas: $config_path validates" 0 "$rc"
-    _assert_eq "production schemas: $config_path has no diagnostics" "" "$output"
-  done
-else
-  echo "  SKIP: production schema policy not present in this checkout"
-fi
+# Keep production policy assertions out of this repo. The deployed
+# associations.json, its pinned schema URLs, and the configs it enforces are
+# owned by dotfiles, which is where any validation of them belongs; asserting
+# them here made results depend on whichever overlay the developer had
+# deployed while CI always skipped them.
 
 _test_summary
