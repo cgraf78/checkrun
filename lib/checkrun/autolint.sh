@@ -178,7 +178,12 @@ _lint_one_with_plan() {
       rc=$tool_rc
       break
     fi
-    [ "$tool_rc" -ne 0 ] && rc=$tool_rc
+    # A tool/config failure (2) is sticky across steps of one file, as it is
+    # across files in _autolint_merge_rc, so a later step's ordinary finding
+    # cannot report a broken spelling config as a normal lint failure. Other
+    # statuses keep last-nonzero-wins. Inlined so the hot per-step loop does
+    # not fork a command substitution.
+    [ "$tool_rc" -ne 0 ] && [ "$rc" -ne 2 ] && rc=$tool_rc
   done <"$plan_file"
 
   return "$rc"
