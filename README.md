@@ -71,7 +71,10 @@ with a NUL-delimited regular file, or `--files0-from -` with NUL-delimited
 standard input, instead of expanding every path into argv; manifest input and
 positional paths are mutually exclusive. `checkrun capabilities --has
 autolint-files0-stdin` reports stdin-transport support through its exit status
-without starting the registry interpreter.
+without starting the registry interpreter. Exit 2 (a tool or structural
+failure) outranks ordinary findings; a caller that may tolerate tool failures
+can set `CHECKRUN_AUTOLINT_REPORT` to a file that receives `findings=0` or
+`findings=1` once the run completes.
 
 `checkrun verify` is the explicit project-check surface for work that should
 not run from save-time editor lint. Its project backends are deduplicated by
