@@ -296,7 +296,7 @@ _assert_contains "parallel: first file observes second" "a saw b" "$output"
 _assert_eq "parallel: output preserves input order" $'a saw b\nb started' "$output"
 
 # The batch runner forks worker subshells. Adapters intentionally read
-# `_autolint_main`'s local `json` flag via Bash dynamic scope, so this pins the
+# `_autolint_run`'s local `json` flag via Bash dynamic scope, so this pins the
 # non-obvious contract that `--json` still reaches parallel workers.
 _parallel_json_dir=$(_tmpdir)
 _parallel_json_sync=$(_tmpdir)
@@ -2140,7 +2140,7 @@ cat >"$_typos_mock/typos" <<'EOF'
 echo "MOCK-TYPOS-ARGS: $*"
 case "$*" in
   *--write-changes*) exit 0 ;;
-  *) exit 7 ;;
+  *) exit 2 ;;
 esac
 EOF
 chmod +x "$_typos_mock/typos"
@@ -2152,7 +2152,7 @@ set +e
 output=$(PATH="$_typos_mock:$PATH" CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" "$_td/typo.txt" 2>&1)
 rc=$?
 set -e
-_assert_exit "typos: invoked for plain text file" 7 "$rc"
+_assert_exit "typos: invoked for plain text file" 1 "$rc"
 _assert_contains "typos: command output shown" "MOCK-TYPOS-ARGS:" "$output"
 _assert_contains_path_arg "typos: target path passed" "" "$_td/typo.txt" "$output"
 
@@ -2189,6 +2189,293 @@ set -e
 _assert_exit "typos: per-repo config exits 0" 0 "$rc"
 _assert_not_contains_path_arg "typos: per-repo config suppresses fallback" \
   "--config " "$_typos_cfg_dir" "$output"
+
+# ---------------------------------------------------------------------------
+# Tests: typos exit-status classification
+# ---------------------------------------------------------------------------
+# typos exits 2 when it finds misspellings, 1 for per-file I/O errors, 64 for
+# usage errors, and 78 for invalid config (verified against typos-cli 1.50).
+# Checkrun reserves 1 for ordinary findings and 2 for tool/config failures, so
+# the adapter must translate rather than pass typos' status through.
+
+echo "=== typos exit-status classification ==="
+
+_typos_rc_mock=$(_mock_bin)
+cat >"$_typos_rc_mock/typos" <<'EOF'
+#!/usr/bin/env bash
+# Model typos-cli's exit contract. The config check runs first because typos
+# rejects an invalid config before reading any input file.
+[ -n "${MOCK_TYPOS_EXIT:-}" ] && exit "$MOCK_TYPOS_EXIT"
+if [ -n "${MOCK_TYPOS_IO_ERROR:-}" ]; then
+  # Per-file I/O errors arrive as structured records in JSON mode.
+  case " $* " in
+    *" --format json "*) printf '{"type":"error","path":"%s","msg":"Permission denied (os error 13)"}\n' "${*: -1}" ;;
+    *) echo "error: Permission denied (os error 13)" >&2 ;;
+  esac
+  exit 1
+fi
+config="" json=0 found=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config) config="$2"; shift 2; continue ;;
+    --format) [ "$2" = json ] && json=1; shift 2; continue ;;
+    --*) shift; continue ;;
+  esac
+  if grep -q 'zzword' "$1"; then
+    found=1
+    if [ "$json" -eq 1 ]; then
+      printf '{"type":"typo","path":"%s","line_num":1,"byte_offset":0,"typo":"zzword","corrections":["realword"]}\n' "$1"
+    else
+      echo "error: \`zzword\` should be \`realword\` in $1"
+    fi
+  fi
+  shift
+done
+if [ -n "$config" ] && grep -q 'INVALID' "$config"; then
+  echo "TOML parse error in $config" >&2
+  exit 78
+fi
+[ "$found" -eq 1 ] && exit 2
+exit 0
+EOF
+cat >"$_typos_rc_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+# Report one ordinary finding for any file containing "unused".
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    *) [ -f "$arg" ] && grep -q 'unused' "$arg" && { echo "$arg:1:1: F401 unused"; exit 1; } ;;
+  esac
+done
+exit 0
+EOF
+chmod +x "$_typos_rc_mock/typos" "$_typos_rc_mock/ruff"
+
+_typos_rc_dir=$(_tmpdir)
+_typos_rc_cfg=$(_tmpdir)
+printf 'all good here\n' >"$_typos_rc_dir/clean.txt"
+printf 'this is zzword thing\n' >"$_typos_rc_dir/typo.txt"
+printf 'import os  # unused\n' >"$_typos_rc_dir/finding.py"
+printf 'import os  # zzword unused\n' >"$_typos_rc_dir/both.py"
+_typos_bad_repo=$(_tmpdir)
+printf 'INVALID [ toml\n' >"$_typos_bad_repo/.typos.toml"
+printf 'all good here\n' >"$_typos_bad_repo/clean.txt"
+printf 'import os  # unused\n' >"$_typos_bad_repo/finding.py"
+
+_typos_rc_run() {
+  PATH="$_typos_rc_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" "$AUTOLINT" "$@" 2>&1
+}
+
+set +e
+output=$(_typos_rc_run "$_typos_rc_dir/clean.txt")
+rc=$?
+set -e
+_assert_exit "typos rc: clean file exits 0" 0 "$rc"
+
+set +e
+output=$(_typos_rc_run "$_typos_rc_dir/typo.txt")
+rc=$?
+set -e
+_assert_exit "typos rc: misspelling is an ordinary finding (1)" 1 "$rc"
+_assert_contains "typos rc: misspelling is reported" "should be" "$output"
+
+set +e
+output=$(_typos_rc_run --json "$_typos_rc_dir/typo.txt")
+rc=$?
+set -e
+_assert_exit "typos rc: json misspelling is an ordinary finding (1)" 1 "$rc"
+_assert_contains "typos rc: json misspelling emits a diagnostic" \
+  '"source":"typos"' "$output"
+
+set +e
+output=$(_typos_rc_run "$_typos_rc_dir/both.py")
+rc=$?
+set -e
+_assert_exit "typos rc: misspelling plus Ruff finding in one file exits 1" 1 "$rc"
+_assert_contains "typos rc: same-file Ruff finding still reported" "F401" "$output"
+_assert_contains "typos rc: same-file misspelling still reported" "should be" "$output"
+
+set +e
+output=$(_typos_rc_run "$_typos_rc_dir/typo.txt" "$_typos_rc_dir/finding.py")
+rc=$?
+set -e
+_assert_exit "typos rc: misspelling does not mask other files' findings" 1 "$rc"
+_assert_contains "typos rc: other file's Ruff finding still reported" "F401" "$output"
+_assert_contains "typos rc: multi-file misspelling still reported" "should be" "$output"
+
+set +e
+output=$(MOCK_TYPOS_EXIT=2 PATH="$_typos_rc_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" \
+  "$AUTOLINT" --fix "$_typos_rc_dir/typo.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "typos rc: --fix with unfixable misspellings exits 1" 1 "$rc"
+
+set +e
+output=$(_typos_rc_run "$_typos_bad_repo/clean.txt")
+rc=$?
+set -e
+_assert_exit "typos rc: invalid config is a tool error (2)" 2 "$rc"
+_assert_contains "typos rc: invalid config stderr surfaced" "TOML parse error" "$output"
+
+set +e
+output=$(PATH="$_typos_rc_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" \
+  "$AUTOLINT" --json "$_typos_bad_repo/clean.txt" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "typos rc: json invalid config is a tool error (2)" 2 "$rc"
+_assert_eq "typos rc: json invalid config emits one diagnostic line" "1" \
+  "$(printf '%s\n' "$output" | jq -c . | wc -l | tr -d '[:space:]')"
+_assert_contains "typos rc: json invalid config explains itself" \
+  '"severity":"error","message":"TOML parse error' "$output"
+
+set +e
+output=$(MOCK_TYPOS_IO_ERROR=1 PATH="$_typos_rc_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" \
+  "$AUTOLINT" --json "$_typos_rc_dir/clean.txt" 2>/dev/null)
+rc=$?
+set -e
+_assert_exit "typos rc: json I/O error is a tool error (2)" 2 "$rc"
+_assert_contains "typos rc: json I/O error uses typos' structured message" \
+  '"message":"Permission denied (os error 13)"' "$output"
+
+set +e
+output=$(_typos_rc_run "$_typos_bad_repo/finding.py")
+rc=$?
+set -e
+_assert_exit "typos rc: invalid config survives a later same-file finding" 2 "$rc"
+_assert_contains "typos rc: later same-file finding still reported" "F401" "$output"
+
+set +e
+output=$(_typos_rc_run "$_typos_rc_dir/finding.py" "$_typos_bad_repo/clean.txt")
+rc=$?
+set -e
+_assert_exit "typos rc: invalid config survives another file's finding" 2 "$rc"
+
+for _typos_tool_rc in 1 64 101; do
+  set +e
+  output=$(MOCK_TYPOS_EXIT="$_typos_tool_rc" PATH="$_typos_rc_mock:$PATH" \
+    CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" "$AUTOLINT" "$_typos_rc_dir/clean.txt" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "typos rc: typos exit $_typos_tool_rc is a tool error (2)" 2 "$rc"
+done
+
+set +e
+output=$(MOCK_TYPOS_EXIT=137 PATH="$_typos_rc_mock:$PATH" \
+  CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" "$AUTOLINT" "$_typos_rc_dir/clean.txt" 2>&1)
+rc=$?
+set -e
+_assert_exit "typos rc: signal status passes through" 137 "$rc"
+
+# ---------------------------------------------------------------------------
+# Tests: CHECKRUN_AUTOLINT_REPORT findings report
+# ---------------------------------------------------------------------------
+# Exit 2 outranks ordinary findings, so a caller that may tolerate tool
+# failures (Sley's commit-gate override) cannot tell "linter broken, nothing
+# found" from "linter broken, findings hidden". The report says whether any
+# lint step reported something other than clean (0) or a tool failure (2).
+
+echo "=== CHECKRUN_AUTOLINT_REPORT findings report ==="
+
+_report_dir=$(_tmpdir)
+_report_run() {
+  local report="$1"
+  shift
+  CHECKRUN_AUTOLINT_REPORT="$report" PATH="$_typos_rc_mock:$PATH" \
+    CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" "$AUTOLINT" "$@" >/dev/null 2>&1
+}
+
+_report="$_report_dir/clean"
+printf 'stale\n' >"$_report"
+rc=0
+_report_run "$_report" "$_typos_rc_dir/clean.txt" || rc=$?
+_assert_exit "report: clean run exits 0" 0 "$rc"
+_assert_file_content "report: clean run replaces a stale report" "findings=0" "$_report"
+
+_report="$_report_dir/finding"
+rc=0
+_report_run "$_report" "$_typos_rc_dir/finding.py" || rc=$?
+_assert_exit "report: finding exits 1" 1 "$rc"
+_assert_file_content "report: finding is reported" "findings=1" "$_report"
+
+_report="$_report_dir/tool-error"
+rc=0
+_report_run "$_report" "$_typos_bad_repo/clean.txt" || rc=$?
+_assert_exit "report: tool error alone exits 2" 2 "$rc"
+_assert_file_content "report: tool error alone reports no findings" \
+  "findings=0" "$_report"
+
+_report="$_report_dir/same-file"
+rc=0
+_report_run "$_report" "$_typos_bad_repo/finding.py" || rc=$?
+_assert_exit "report: tool error plus same-file finding exits 2" 2 "$rc"
+_assert_file_content "report: same-file finding hidden by exit 2 is reported" \
+  "findings=1" "$_report"
+
+for _report_jobs in 1 4; do
+  for _report_mode in plain --json; do
+    _report="$_report_dir/other-file-$_report_jobs$_report_mode"
+    _report_args=()
+    [[ "$_report_mode" == plain ]] || _report_args+=("$_report_mode")
+    rc=0
+    CHECKRUN_AUTOLINT_JOBS="$_report_jobs" _report_run "$_report" \
+      "${_report_args[@]+"${_report_args[@]}"}" \
+      "$_typos_rc_dir/finding.py" "$_typos_bad_repo/clean.txt" || rc=$?
+    _assert_exit "report: jobs=$_report_jobs $_report_mode tool error plus other-file finding exits 2" \
+      2 "$rc"
+    _assert_file_content "report: jobs=$_report_jobs $_report_mode other-file finding hidden by exit 2 is reported" \
+      "findings=1" "$_report"
+  done
+done
+
+_report="$_report_dir/fix"
+rc=0
+_report_run "$_report" --fix "$_typos_bad_repo/finding.py" || rc=$?
+_assert_exit "report: --fix tool error plus finding exits 2" 2 "$rc"
+_assert_file_content "report: --fix finding hidden by exit 2 is reported" \
+  "findings=1" "$_report"
+
+_report="$_report_dir/usage"
+rc=0
+_report_run "$_report" --bogus-option || rc=$?
+_assert_exit "report: usage error exits 2" 2 "$rc"
+_assert_file_content "report: usage error lints nothing and finds nothing" \
+  "findings=0" "$_report"
+
+set +e
+output=$(CHECKRUN_AUTOLINT_REPORT="$_report_dir/missing/report" \
+  PATH="$_typos_rc_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" \
+  "$AUTOLINT" "$_typos_rc_dir/finding.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "report: unwritable report keeps the lint status" 1 "$rc"
+_assert_contains "report: unwritable report is named" \
+  "could not write CHECKRUN_AUTOLINT_REPORT" "$output"
+_assert_contains "report: unwritable report still shows diagnostics" "F401" "$output"
+
+# A finding that cannot be recorded must not leave a report that a caller
+# would read as "no findings" next to another file's exit 2.
+_report_ro_mock=$(_mock_bin)
+cat >"$_report_ro_mock/ruff" <<'EOF'
+#!/usr/bin/env bash
+chmod a-w "$CHECKRUN_AUTOLINT_REPORT"
+echo "finding reported after the report became read-only"
+exit 1
+EOF
+chmod +x "$_report_ro_mock/ruff"
+_report="$_report_dir/read-only"
+rc=0
+CHECKRUN_AUTOLINT_REPORT="$_report" CHECKRUN_AUTOLINT_JOBS=1 \
+  PATH="$_report_ro_mock:$_typos_rc_mock:$PATH" CHECKRUN_CONFIG_DIR="$_typos_rc_cfg" \
+  "$AUTOLINT" "$_typos_rc_dir/finding.py" "$_typos_bad_repo/clean.txt" \
+  >/dev/null 2>&1 || rc=$?
+if [[ -w "$_report" ]]; then
+  # Root ignores file modes, so the failure cannot be simulated here.
+  _pass "report: unrecordable finding (skipped: report stays writable)"
+else
+  _assert_exit "report: unrecordable finding is an integrity error" 125 "$rc"
+  _assert_not_contains "report: unrecordable finding never reads as none" \
+    "findings=0" "$(cat "$_report")"
+fi
 
 # ---------------------------------------------------------------------------
 # Tests: fallback configs (CHECKRUN_CONFIG_DIR) applied when no per-repo config
@@ -2473,7 +2760,7 @@ EOF
 cat >"$_phase_ign_bin/typos" <<'EOF'
 #!/usr/bin/env bash
 echo "typos ran for ${*: -1}"
-exit 1
+exit 2
 EOF
 cat >"$_phase_ign_bin/shellcheck" <<'EOF'
 #!/usr/bin/env bash
@@ -3456,7 +3743,7 @@ set +e
 output=$(PATH="$_json_typos_mock:$PATH" CHECKRUN_CONFIG_DIR=/nonexistent "$AUTOLINT" --json "$_td/json-typo.txt" 2>/dev/null)
 rc=$?
 set -e
-_assert_exit "json typos: exits non-zero" 2 "$rc"
+_assert_exit "json typos: finding exits 1" 1 "$rc"
 _assert_json_lines_valid "json typos: valid unified schema" "$output" "typos"
 _assert_contains "json typos: typo code present" '"code":"zzword"' "$output"
 
@@ -3577,7 +3864,7 @@ cat >"$_minpath_bin/typos" <<'EOF'
 #!/usr/bin/env bash
 for arg in "$@"; do
   case "$arg" in
-    *needs-typo.txt) echo "error: typo in $arg"; exit 1 ;;
+    *needs-typo.txt) echo "error: typo in $arg"; exit 2 ;;
   esac
 done
 exit 0
@@ -3701,7 +3988,7 @@ cat >"$_nocreate_bin/typos" <<'EOF'
 #!/usr/bin/env bash
 for arg in "$@"; do
   case "$arg" in
-    *needs-typo.txt) echo "error: typo in $arg"; exit 1 ;;
+    *needs-typo.txt) echo "error: typo in $arg"; exit 2 ;;
   esac
 done
 exit 0

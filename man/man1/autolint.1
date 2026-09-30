@@ -51,6 +51,21 @@ Show usage and supported file types.
 .B CHECKRUN_AUTOLINT_JOBS
 Maximum number of lint jobs to run concurrently.
 .TP
+.B CHECKRUN_AUTOLINT_REPORT
+File that receives
+.B findings=0
+or
+.B findings=1
+when the run completes. Because exit status 2 outranks ordinary findings, a
+caller that may tolerate tool failures reads this to learn whether findings
+were hidden:
+.B findings=1
+means some lint step or file reported a status other than 0 or 2. The file is
+truncated when the run starts and never completed when a signal ends the run,
+so only a completed run can say
+.BR findings=0 .
+If a finding cannot be recorded, the run exits 125.
+.TP
 .B CHECKRUN_CONFIG_DIR
 Directory for local Checkrun ignore and schema policy. Defaults to
 .I $XDG_CONFIG_HOME/checkrun
@@ -66,15 +81,20 @@ Python interpreter used by Python-backed Checkrun helpers.
 Linting completed, or all files were skipped for non-fatal reasons.
 .TP
 .B 1
-One or more selected linters reported diagnostics or failed, or required lint
-infrastructure such as
+One or more selected linters reported diagnostics or failed without a distinct
+tool-failure status, or required lint infrastructure such as
 .B yq
 or
 .B jq
 was unavailable.
 .TP
 .B 2
-Usage error or registry planning failure.
+Usage error, registry planning failure, or a selected linter that could not
+run, such as
+.B typos
+rejecting its config. This status outranks ordinary lint findings; see
+.B CHECKRUN_AUTOLINT_REPORT
+to learn whether any were hidden.
 .TP
 .B 127
 A required runtime dependency, such as a suitable Python interpreter, is missing.

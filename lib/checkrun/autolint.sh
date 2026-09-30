@@ -21,7 +21,7 @@ CHECKRUN_LIB_DIR="${BASH_SOURCE[0]%/*}"
 # - missing tools are silent no-ops so hooks keep working across partial hosts
 # - diagnostics go to stdout/stderr in the caller's selected format
 # - non-zero returns mean findings or tool errors, not "tool unavailable"
-# - adapters read `fix` and `json` from `_autolint_main` via Bash dynamic scope
+# - adapters read `fix` and `json` from `_autolint_run` via Bash dynamic scope
 # Keep backend adapters grouped by domain. `core.sh` must load first because the
 # other adapters share its diagnostic helpers and severity normalizer.
 # shellcheck source=linters/core.sh
@@ -97,7 +97,7 @@ _autolint_usage() {
 
 _autolint_read_files0() {
   local display="$1" file
-  # `_autolint_main` owns this dynamically scoped array. Keeping it local to
+  # `_autolint_run` owns this dynamically scoped array. Keeping it local to
   # the complete invocation prevents repeated calls in one sourced shell from
   # sharing decoded paths while still supporting Bash 3.2 without namerefs.
   _autolint_files0_args=()
@@ -178,7 +178,22 @@ _lint_one_with_plan() {
       rc=$tool_rc
       break
     fi
-    [ "$tool_rc" -ne 0 ] && rc=$tool_rc
+    # Any status other than clean or tool failure may be a finding. Record it
+    # before the sticky 2 below can hide it from CHECKRUN_AUTOLINT_REPORT. If
+    # the record cannot be written, fail as an integrity error: a report that
+    # silently misses a finding would let a caller tolerate this file's exit 2.
+    if [ "$tool_rc" -ne 0 ] && [ "$tool_rc" -ne 2 ]; then
+      _autolint_note_findings || {
+        rc=125
+        break
+      }
+    fi
+    # A tool/config failure (2) is sticky across steps of one file, as it is
+    # across files in _autolint_merge_rc, so a later step's ordinary finding
+    # cannot report a broken spelling config as a normal lint failure. Other
+    # statuses keep last-nonzero-wins. Inlined so the hot per-step loop does
+    # not fork a command substitution.
+    [ "$tool_rc" -ne 0 ] && [ "$rc" -ne 2 ] && rc=$tool_rc
   done <"$plan_file"
 
   return "$rc"
@@ -653,6 +668,16 @@ _autolint_default_jobs() {
 _autolint_merge_rc() {
   local current="$1" incoming="$2"
 
+  # Every file result funnels through here, including file-level statuses
+  # that never reach a lint step (missing yq, planner scratch failures). A
+  # status that would block as a finding is recorded before the 2-wins rule
+  # below can hide it; if that record fails, report an integrity error.
+  if [ "$incoming" -ne 0 ] && [ "$incoming" -ne 2 ]; then
+    _autolint_note_findings || {
+      printf '125\n'
+      return
+    }
+  fi
   # Ordinary lint findings use exit 1, while registry/plumbing failures use
   # stronger codes such as 2 or the private unknown-adapter sentinel 125. In a
   # multi-file run those structural failures must survive later lint findings so
@@ -1548,7 +1573,7 @@ _autolint_run_parallel_supervised() {
   return "$rc"
 }
 
-_autolint_main() {
+_autolint_run() {
   local fix=0 json=0 rc=0 jobs file lint_file arg
   local files0_from="" files0_seen=0 parse_options=1 _autolint_force_manifest=0
   local -a file_args=() lint_files=() _autolint_files0_args=()
@@ -1826,5 +1851,50 @@ _autolint_main() {
     fi
   fi
 
+  return "$rc"
+}
+
+_autolint_note_findings() {
+  # Workers are subshells, so the only state they share with the invocation
+  # is the filesystem: append to the report itself. `_autolint_finish_report`
+  # turns any appended content into `findings=1`.
+  [ -n "${_autolint_report:-}" ] || return 0
+  printf 'finding\n' 2>/dev/null >>"$_autolint_report"
+}
+
+_autolint_finish_report() {
+  local rc="$1" findings=0
+  [ -n "${_autolint_report:-}" ] || return 0
+  # A signal status proves nothing about the files, so leave the truncated
+  # report, which readers must not trust, rather than claim a complete run.
+  [ "$rc" -le 128 ] || return 0
+  [ -s "$_autolint_report" ] && findings=1
+  printf 'findings=%s\n' "$findings" 2>/dev/null >"$_autolint_report" || {
+    echo "autolint: could not write CHECKRUN_AUTOLINT_REPORT: $_autolint_report" >&2
+    return 0
+  }
+}
+
+# Entry point. CHECKRUN_AUTOLINT_REPORT names a file that receives
+# `findings=0` or `findings=1` once the run completes. Exit 2 (a tool or
+# structural failure) outranks ordinary findings, so a caller that may
+# tolerate tool failures needs to know whether findings were hidden behind
+# it; `findings=1` means some lint step or file reported a status other than
+# 0 (clean) or 2 (tool failure). The file is truncated first, so an
+# interrupted run leaves no `findings=0` behind, and nothing is written when
+# the variable is unset. A report that cannot be written only warns; a
+# finding that cannot be recorded mid-run fails the run with status 125.
+_autolint_main() {
+  local rc=0 _autolint_report=""
+  if [ -n "${CHECKRUN_AUTOLINT_REPORT:-}" ]; then
+    if : 2>/dev/null >"$CHECKRUN_AUTOLINT_REPORT"; then
+      _autolint_report=$CHECKRUN_AUTOLINT_REPORT
+    else
+      echo "autolint: could not write CHECKRUN_AUTOLINT_REPORT: $CHECKRUN_AUTOLINT_REPORT" >&2
+    fi
+  fi
+  _autolint_run "$@"
+  rc=$?
+  _autolint_finish_report "$rc"
   return "$rc"
 }
