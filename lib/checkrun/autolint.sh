@@ -824,6 +824,27 @@ _autolint_supports_pool() {
   return 1
 }
 
+_autolint_live_jobs() {
+  local snapshot="$1" line live=" " complete=0
+  # List the jobs that have not terminated, as " pid pid ... ", so a caller
+  # can match exact PIDs. A redirected builtin forks nothing; the snapshot
+  # lives in invocation-owned scratch, so cleanup needs no extra command.
+  # `jobs` reports success even when its output cannot be written, and a
+  # truncated listing would make running workers look finished, so accept
+  # the snapshot only with its terminator, as `_autolint_job_is_running` does.
+  { jobs -rp && jobs -sp && printf '%s\n' end; } 2>/dev/null >|"$snapshot" ||
+    return 1
+  while IFS= read -r line; do
+    if [ "$line" = end ]; then
+      complete=1
+      break
+    fi
+    live="$live$line "
+  done <"$snapshot"
+  [ "$complete" -eq 1 ] || return 1
+  REPLY=$live
+}
+
 _autolint_run_files_pool() {
   # Pool-style: maintain up to ${jobs} workers in flight. When any worker
   # finishes (via `wait -n`), spawn the next file immediately rather than
@@ -840,8 +861,8 @@ _autolint_run_files_pool() {
   shift 2
   local -a files=("$@")
   local n=${#files[@]}
-  local -a pids=() stdouts=() stderrs=()
-  local rc=0 file_rc i next=0 in_flight=0 stdout_file stderr_file
+  local -a pids=() stdouts=() stderrs=() active=()
+  local rc=0 file_rc i next=0 in_flight=0 stdout_file stderr_file live
   local REPLY=""
 
   # Spawn-and-reap loop. `wait -n` blocks until any one child finishes; its
@@ -875,8 +896,9 @@ _autolint_run_files_pool() {
       pids[next]=$!
       stdouts[next]=$stdout_file
       stderrs[next]=$stderr_file
+      active+=("$next")
       next=$((next + 1))
-      in_flight=$((in_flight + 1))
+      in_flight=${#active[@]}
       [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
     done
 
@@ -885,18 +907,51 @@ _autolint_run_files_pool() {
       return "$_autolint_cancel_status"
     fi
 
-    if [ "$in_flight" -gt 0 ]; then
-      # `wait -n` is only backpressure, so its status is ignored: statuses
-      # come from the worker records. It can return 127 even with a child in
-      # flight, when Bash already reaped that worker and dropped it from its
-      # job table before this call. That worker did finish, so it still
-      # leaves the in-flight count.
-      wait -n 2>/dev/null || :
-      if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
-        _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
-        return "$_autolint_cancel_status"
+    [ "$in_flight" -gt 0 ] || continue
+    # `wait -n` cannot count completions. Bash can drop a job it has already
+    # reaped from its job table, and no later `wait -n` returns it: Bash 5.1
+    # does so when `wait -n` reports another job, when the shell forks, and,
+    # in a `bash -c` caller, when it parses a compound array assignment.
+    # Retiring one worker per call then held a finished worker's slot until
+    # the last running worker ended. Recount from Bash's job table instead,
+    # right before blocking: a worker stays in flight only while its job is
+    # still running or stopped. Between this snapshot and `wait -n`, use only
+    # builtins that cannot drop a job (no forks, no compound assignments), so
+    # a worker that ends after the snapshot stays reportable and `wait -n`
+    # returns at once rather than blocking on the others.
+    if _autolint_live_jobs "$plan_dir/.live-jobs"; then
+      live=$REPLY
+      for i in "${!active[@]}"; do
+        case "$live" in
+          *" ${pids[active[i]]} "*) ;;
+          *) unset 'active[i]' ;;
+        esac
+      done
+      in_flight=${#active[@]}
+      # Refill freed slots before blocking; with nothing left to start,
+      # block only while a worker is still running.
+      if [ "$next" -lt "$n" ] && [ "$in_flight" -lt "$jobs" ]; then
+        continue
       fi
-      in_flight=$((in_flight - 1))
+      [ "$in_flight" -gt 0 ] || continue
+      wait -n 2>/dev/null || :
+    else
+      # Without a snapshot, fall back to assuming the job `wait -n` returned
+      # was one worker. A lost report can then lower concurrency until the
+      # pool drains, but can never exceed the cap. `active` may be sparse, so
+      # retire its first remaining element rather than slicing by index.
+      wait -n 2>/dev/null || :
+      for i in "${!active[@]}"; do
+        unset 'active[i]'
+        break
+      done
+      in_flight=${#active[@]}
+    fi
+    # `wait -n` is only backpressure, so its status is ignored: statuses come
+    # from the worker records.
+    if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+      _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
+      return "$_autolint_cancel_status"
     fi
   done
 
