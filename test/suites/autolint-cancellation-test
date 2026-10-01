@@ -218,14 +218,51 @@ export AUTOLINT_CANCEL_PARENT_PID=${BASHPID:-$$}
 # shellcheck source=/dev/null
 . "$impl"
 
-# Record every pause the parent itself takes, so the harness can check that
-# it polls finely without measuring wall time. Bash 3.2 has no BASHPID to
-# tell the parent from a subshell, so it records nothing.
+# Record, in order, every pause the parent itself takes and every group
+# signal, so the harness can check how cancellation escalates without
+# measuring wall time. Bash 3.2 has no BASHPID to tell the parent from a
+# subshell, so it records no pauses there; only the parent signals a group.
 sleep() {
   if [ -n "${BASHPID:-}" ] && [ "$BASHPID" = "$AUTOLINT_CANCEL_PARENT_PID" ]; then
-    printf '%s\n' "$1" >>"$root/parent-pauses"
+    printf 'pause %s\n' "$1" >>"$root/parent-events"
   fi
   command sleep "$@"
+}
+kill() {
+  local owned owned_pid attempt pending
+  case "${2:-}" in
+    -[1-9]*) printf 'kill %s %s\n' "$1" "$2" >>"$root/parent-events" ;;
+  esac
+  if { [ "$mode" = normal ] || [ "$mode" = planner-signal ]; } &&
+    [ "${1:-}" = -KILL ] && [[ "${2:-}" == -[1-9]* ]]; then
+    # The parent KILLs the group once the supervisor has reaped its workers,
+    # which die on TERM at once, or after its 200 ms grace. Either can come
+    # before a starved backend or planner runs its TERM handler. Hold the
+    # KILL, boundedly, until each one has observed the TERM or is gone, so
+    # the harness can require cooperative delivery on any host. This only
+    # delays KILL: a TERM that never reached them still fails. It also means
+    # these cases no longer see whether a grace exists at all; the
+    # escalation check below drives the real loop for that.
+    for ((attempt = 0; attempt < 500; attempt++)); do
+      pending=0
+      for owned in "$root"/backend-*.pid "$root/planner.pid"; do
+        [ -e "$owned" ] || continue
+        [ ! -e "${owned%.pid}.term" ] || continue
+        # The PID file has no trailing newline, so `read` reports EOF.
+        owned_pid=""
+        IFS= read -r owned_pid <"$owned" 2>/dev/null
+        [ -n "$owned_pid" ] || continue
+        if builtin kill -0 "$owned_pid" 2>/dev/null; then
+          pending=1
+          break
+        fi
+      done
+      [ "$pending" -eq 1 ] || break
+      command sleep 0.01
+    done
+    printf 'held %s\n' "$attempt" >>"$root/parent-events"
+  fi
+  builtin kill "$@"
 }
 
 case "$mode" in
@@ -983,6 +1020,14 @@ def release(index):
         gate.write(b"x")
 
 
+def parent_events():
+    # ("pause", seconds) and ("kill", signal, target) records from the driver.
+    path = root / "parent-events"
+    if not path.exists():
+        return []
+    return [tuple(line.split()) for line in path.read_text(encoding="ascii").splitlines()]
+
+
 def release_if_waiting(index):
     # A cancelled backend may already be gone, and opening a FIFO with no
     # reader would block, so release only a backend that still waits.
@@ -1221,9 +1266,7 @@ try:
     if scenario in ("success", "signal", "planner-signal", "pre-wait-signal"):
         # Promptness without wall time: every pause the parent takes while it
         # waits for or cancels the supervisor must stay at the 10 ms poll.
-        pauses_path = root / "parent-pauses"
-        pauses = pauses_path.read_text(encoding="ascii").split() \
-            if pauses_path.exists() else []
+        pauses = [event[1] for event in parent_events() if event[0] == "pause"]
         long_pauses = [pause for pause in pauses if float(pause) > 0.01]
         if long_pauses:
             raise RuntimeError(f"parent paused longer than 10 ms: {long_pauses!r}")
@@ -1409,10 +1452,22 @@ try:
         time.sleep(0.02)
     if live_remaining and not direct_signal:
         raise RuntimeError(f"owned process survived: {live_remaining!r}")
-    if scenario in ("signal", "repeat") and not all(
-        (root / f"backend-{index}.term").is_file() for index in range(count)
-    ):
-        raise RuntimeError("owned backend did not observe cooperative TERM")
+    if scenario == "signal":
+        # The parent must signal the group cooperatively before any KILL. The
+        # driver holds that KILL until each backend, already in its TERM-ready
+        # wait, has observed the TERM, so a missing observation means the TERM
+        # never reached it, not that a loaded host starved its handler.
+        group_signals = [event[1] for event in parent_events() if event[0] == "kill"]
+        if not group_signals or group_signals[0] != "-TERM":
+            raise RuntimeError(f"group signals {group_signals!r} did not start with TERM")
+    unobserved = [
+        index for index in range(count) if not (root / f"backend-{index}.term").is_file()
+    ]
+    if scenario in ("signal", "repeat") and unobserved:
+        raise RuntimeError(
+            f"owned backends {unobserved!r} did not observe cooperative TERM; "
+            f"group signals and KILL hold {[e for e in parent_events() if e[0] != 'pause']!r}"
+        )
     if scenario == "planner-signal" and not (root / "planner.term").is_file():
         raise RuntimeError("owned registry planner did not observe TERM")
     if not alive(unrelated.pid):
