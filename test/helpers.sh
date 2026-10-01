@@ -384,6 +384,14 @@ trap _cleanup EXIT
 # Common test setup
 # ---------------------------------------------------------------------------
 
+# Every product entry point and many fixtures are non-interactive Bash, which
+# sources BASH_ENV (and ENV in POSIX mode) at startup. Keep child shells from
+# sourcing a developer's startup file, which could add functions, traps or
+# options to the code under test. This shell already sourced it, so anything
+# that file exported still reaches them; run `env -u BASH_ENV` to rule that
+# out too.
+unset BASH_ENV ENV
+
 # Pin Checkrun's user config to an empty invocation-owned directory. Without
 # this, any suite that runs a public command without its own override reads
 # the developer's live ~/.config/checkrun (ignore lists, tool fallbacks,
@@ -397,7 +405,14 @@ trap _cleanup EXIT
 # silently fall back to the live config, so fail the suite here instead.
 CHECKRUN_CONFIG_DIR=$(_tmpdir) || exit 1
 export CHECKRUN_CONFIG_DIR
-unset CHECKRUN_SCHEMA_ASSOCIATIONS
+# Drop the other behavior knobs a developer's shell may export, too. An
+# exported CHECKRUN_REGISTRY points every planner at a different registry, and
+# CHECKRUN_AUTOLINT_REPORT makes each autolint run truncate the developer's
+# report file. Suites that test a knob set it per command. CHECKRUN_PYTHON is
+# kept: like PATH, it only selects an interpreter the host may need.
+unset CHECKRUN_SCHEMA_ASSOCIATIONS CHECKRUN_REGISTRY CHECKRUN_AUTOLINT_JOBS \
+  CHECKRUN_AUTOLINT_REPORT CHECKRUN_SCHEMA_LINT \
+  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP
 
 # Create a mock HOME, saving the original. Sets TEST_HOME, REAL_HOME, HOME.
 _mock_home() {

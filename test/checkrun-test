@@ -2,6 +2,9 @@
 # Run all repo-owned checkrun test suites.
 
 set -euo pipefail
+# Start every suite without sourcing the developer's Bash startup file;
+# helpers.sh repeats this for child shells of a suite run directly.
+unset BASH_ENV ENV
 
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
