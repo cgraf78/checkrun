@@ -3,6 +3,10 @@
 
 set -o pipefail
 export NO_COLOR=1
+# Every fixture below is a fresh non-interactive Bash (or a Python harness
+# that launches one). An inherited BASH_ENV or ENV would be sourced into each
+# of them and could install traps, functions or options under test.
+unset BASH_ENV ENV
 
 CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
@@ -1430,7 +1434,34 @@ kill() {
     state=stale
   fi
   printf '%s %s %s\n' "$sig" "$target" "$state" >>"$root/signals"
-  builtin kill "$@"
+  builtin kill "$@" || return
+  case "$sig:$target" in
+    -TERM:-*) : >"$root/group-term-sent" ;;
+  esac
+}
+
+# Bash reaps an exited job asynchronously; wait (bounded) until it is gone
+# from the running-job table, as the parent's own liveness checks see it.
+# Read the listing from a file, as the product does: whether a command
+# substitution still sees this shell's job table depends on its exact form
+# (`$(builtin jobs | tr ...)` always reads empty) and on the Bash version.
+_pgid_await_unlisted() {
+  local attempt job found
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    builtin jobs -pr >|"$root/await-jobs" || return 1
+    found=0
+    while IFS= read -r job; do
+      [ "$job" != "$1" ] || found=1
+    done <"$root/await-jobs"
+    [ "$found" -eq 1 ] || return 0
+    sleep 0.01
+  done
+  return 1
+}
+
+# The parent publishes the supervisor's exact PID here before the gate opens.
+_pgid_leader() {
+  IFS= read -r REPLY <"$plan_dir/.supervisor/leader"
 }
 
 # The supervisor's work is irrelevant to identity; a visible marker proves
@@ -1447,6 +1478,26 @@ _autolint_run_read_only_pipeline() {
 eval "_pgid_real_validate() $(declare -f _autolint_validate_private_group | tail -n +2)"
 eval "_pgid_real_job_is_running() $(declare -f _autolint_job_is_running | tail -n +2)"
 eval "_pgid_real_supervisor() $(declare -f _autolint_parallel_supervisor | tail -n +2)"
+eval "_pgid_real_await_armed() $(declare -f _autolint_await_armed | tail -n +2)"
+eval "_pgid_real_cancel() $(declare -f _autolint_cancel_private_group | tail -n +2)"
+eval "_pgid_real_quiesced() $(declare -f _autolint_supervisor_quiesced | tail -n +2)"
+
+# Late-arming scenarios hold the supervisor's latch installation until the
+# parent has started waiting for it. Without that wait in the parent, the
+# supervisor arms only after a full second, long after the kill wrapper's own
+# 300 ms delay, so a TERM or gate sent too early is always observable.
+_autolint_await_armed() {
+  : >"$root/await-armed"
+  _pgid_real_await_armed "$@"
+}
+_pgid_arm_late() {
+  local attempt
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    [ -e "$root/await-armed" ] && break
+    sleep 0.01
+  done
+  sleep 0.1
+}
 
 case "$scenario" in
   pre-gate-signal)
@@ -1517,17 +1568,122 @@ case "$scenario" in
     }
     ;;
   slow-arming)
-    # The supervisor installs its latches late, after the kill wrapper's own
-    # delay. A TERM before then is never recorded as a cancellation: it kills
-    # the supervisor or makes its EXIT trap publish completion instead.
+    # The supervisor installs its latches late. A TERM before then is never
+    # recorded as a cancellation: it kills the supervisor or makes its EXIT
+    # trap publish completion instead.
     _autolint_parallel_supervisor() {
-      sleep 0.8
+      _pgid_arm_late
       _pgid_real_supervisor "$@"
     }
     _autolint_validate_private_group() {
       _pgid_real_validate "$@" || return
       builtin kill -TERM "$parent"
       return 0
+    }
+    ;;
+  slow-arming-gate)
+    # Without any signal, the gate must still wait for the latches: a group
+    # TERM after an unarmed gate opened would kill the identity anchor.
+    _autolint_parallel_supervisor() {
+      _pgid_arm_late
+      _pgid_real_supervisor "$@"
+    }
+    mkdir() {
+      local arg
+      for arg in "$@"; do
+        case "$arg" in
+          */.supervisor/gate)
+            [ -e "${arg%/gate}/armed" ] || : >"$root/gate-before-armed"
+            ;;
+        esac
+      done
+      command mkdir "$@"
+    }
+    ;;
+  external-kill-before-cancel)
+    # The supervisor is killed from outside after the parent latched a
+    # cancellation but before it acted on it. The supervisor's group is then
+    # empty and its number free, so it must not receive the group TERM.
+    _autolint_run_read_only_pipeline() {
+      : >"$root/work-started"
+      builtin kill -TERM "$parent"
+      # Block in a builtin so the supervisor is its group's only member.
+      read -r -t 10 _ <>"$root/block" || :
+    }
+    _autolint_cancel_private_group() {
+      builtin kill -KILL "$1"
+      _pgid_await_unlisted "$1" || return 1
+      _pgid_real_cancel "$@"
+    }
+    ;;
+  external-kill-during-grace)
+    # The supervisor survives the cooperative group TERM and is then killed
+    # from outside during the parent's grace, without publishing anything.
+    # Its released group must not receive the escalating KILL.
+    _autolint_run_read_only_pipeline() {
+      : >"$root/work-started"
+      trap '' TERM
+      builtin kill -TERM "$parent"
+      read -r -t 10 _ <>"$root/block" || :
+    }
+    _autolint_supervisor_quiesced() {
+      if [ ! -e "$root/externally-killed" ]; then
+        : >"$root/externally-killed"
+        _pgid_leader
+        builtin kill -KILL "$REPLY"
+        _pgid_await_unlisted "$REPLY" || return 1
+      fi
+      _pgid_real_quiesced "$@"
+    }
+    ;;
+  jobs-false-exit-cancel)
+    # Once the group TERM is sent, the job table misreports the cancelled
+    # supervisor as exited. The parent sends nothing more, but must still
+    # release the hold, or the supervisor holds and the exact wait never ends.
+    _autolint_run_read_only_pipeline() {
+      local attempt
+      : >"$root/work-started"
+      builtin kill -TERM "$parent"
+      for ((attempt = 0; attempt < 500; attempt++)); do
+        [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
+        sleep 0.01
+      done
+    }
+    jobs() {
+      if [ "${1:-}" = -pr ] && [ -e "$root/group-term-sent" ]; then
+        return 0
+      fi
+      builtin jobs "$@"
+    }
+    ;;
+  jobs-false-exit-signal)
+    # The job table misreports a working supervisor as exited, so the parent
+    # releases it and waits for it, and a TERM then interrupts that wait. The
+    # parent must wait again rather than return with the supervisor running.
+    _autolint_run_read_only_pipeline() {
+      local attempt
+      : >"$root/work-started"
+      for ((attempt = 0; attempt < 500; attempt++)); do
+        [ -e "$root/parent-waiting" ] && break
+        sleep 0.01
+      done
+      sleep 0.1
+      builtin kill -TERM "$parent"
+      # Outlive a parent that returns from the interrupted wait at once.
+      sleep 0.5
+    }
+    jobs() {
+      if [ "${1:-}" = -pr ] && [ -d "$plan_dir/.supervisor/gate" ]; then
+        return 0
+      fi
+      builtin jobs "$@"
+    }
+    # Mark the parent's first exact wait so the TERM lands inside it.
+    wait() {
+      if [ "$#" -eq 1 ] && [ -d "$plan_dir/.supervisor/gate" ]; then
+        : >"$root/parent-waiting"
+      fi
+      builtin wait "$@"
     }
     ;;
   unarmed-death)
@@ -1594,6 +1750,7 @@ case "$scenario" in
     ;;
 esac
 
+mkfifo "$root/block"
 plan_dir=$(mktemp -d "$TMPDIR/pgid-plans.XXXXXX")
 _autolint_run_parallel_supervised 2 "$plan_dir" first.sh second.sh
 status=$?
@@ -1608,6 +1765,8 @@ chmod +x "$_pgid_fixture"
 _run_pgid_case() {
   local description="$1" scenario="$2" expected="$3" root rc=0 pid attempt
   root="$_fixture_root/pgid-$scenario-$RANDOM"
+  # Follow-up assertions on this case's artifacts read it from here.
+  _pgid_case_root=$root
   mkdir -p "$root"
   # Without monitor mode, an asynchronous command starts with INT ignored,
   # which no trap can override. Give the fixture its own job like a
@@ -1644,9 +1803,15 @@ _run_pgid_case() {
   _assert_eq "$description: no running job remains" "" \
     "$(cat "$root/jobs-after" 2>/dev/null)"
   case "$scenario" in
-    pre-gate-* | noclobber-pre-gate-* | unarmed-death | jobs-false-exit)
+    pre-gate-* | noclobber-pre-gate-* | slow-arming | unarmed-death | \
+      jobs-false-exit)
       _assert_file_missing "$description: gate never opened" \
         "$root/work-started"
+      ;;
+    *)
+      # A run that quietly declined parallelism also reports status 0, so
+      # only the supervisor's own work proves that the parallel path ran.
+      _assert_file_exists "$description: gate opened" "$root/work-started"
       ;;
   esac
 }
@@ -1664,11 +1829,15 @@ _run_pgid_case "unremovable hold marker escalates only while pinned" \
 _run_pgid_case "unacknowledged pre-gate TERM escalates to the exact pinned PID" \
   pre-gate-unacknowledged 130
 _assert_contains "unacknowledged pre-gate TERM: KILL reached the live PID" \
-  "live" "$(grep -- '^-KILL [1-9]' "$_fixture_root"/pgid-pre-gate-unacknowledged-*/signals)"
+  "live" "$(grep -- '^-KILL [1-9]' "$_pgid_case_root/signals")"
 _run_pgid_case "pre-gate TERM waits until the supervisor is armed" \
   slow-arming 143
 _assert_eq "pre-gate TERM is latched by the supervisor's handler" "143" \
-  "$(cat "$_fixture_root"/pgid-slow-arming-*/exited 2>/dev/null)"
+  "$(cat "$_pgid_case_root/exited" 2>/dev/null)"
+_run_pgid_case "gate opens only after the supervisor is armed" \
+  slow-arming-gate 0
+_assert_file_missing "gate stays closed until the supervisor is armed" \
+  "$_pgid_case_root/gate-before-armed"
 _run_pgid_case "lost job listing is an inspection failure, not an exit" \
   jobs-unlisted 0
 _run_pgid_case "supervisor dying before it arms gets no pre-gate TERM" \
@@ -1677,6 +1846,14 @@ _run_pgid_case "job table misreporting a live supervisor cannot deadlock" \
   jobs-false-exit 0
 _run_pgid_case "job table misreporting a working supervisor cannot deadlock" \
   jobs-false-exit-after-gate 0
+_run_pgid_case "supervisor killed before cancellation gets no group TERM" \
+  external-kill-before-cancel 143
+_run_pgid_case "supervisor killed during the grace gets no group KILL" \
+  external-kill-during-grace 143
+_run_pgid_case "job table misreport during cancellation still releases" \
+  jobs-false-exit-cancel 143
+_run_pgid_case "TERM interrupting the wait for a misreported supervisor" \
+  jobs-false-exit-signal 143
 _run_pgid_case "noclobber caller still detects a lost pre-gate leader" \
   noclobber-pre-gate-leader-lost 0
 _run_pgid_case "noclobber caller still detects unpublished completion" \
@@ -1739,6 +1916,34 @@ _assert_exit "anchor without a leader marker releases after parent death" 0 \
   "$_dead_parent_rc"
 _assert_exit "anchor without a PPID probe releases after parent death" 0 \
   "$_dead_parent_ppid_rc"
+
+# A holding anchor whose parent is stopped (Ctrl-Z) polls until it resumes,
+# possibly for hours. Record the pause schedule instead of sleeping through
+# it: the first polls must stay fine-grained so the normal release handshake
+# is cheap, and the pause must reach, but never exceed, a 1 s cap after a few
+# seconds, so a long stop costs about one poll per second and a resumed
+# parent waits at most that long.
+_hold_schedule=$(
+  CHECKRUN_LIB_DIR="$CHECKRUN_TEST_ROOT/lib/checkrun"
+  # shellcheck source=../../lib/checkrun/autolint.sh
+  . "$CHECKRUN_LIB_DIR/autolint.sh"
+  # shellcheck disable=SC2329 # Invoked by the sourced pause helper.
+  sleep() { printf '%s\n' "$1"; }
+  _autolint_hold_polls=0
+  for ((_poll = 0; _poll < 400; _poll++)); do
+    _autolint_hold_pause
+  done
+)
+_assert_eq "held anchor starts with 1 ms polls" "0.001" \
+  "$(printf '%s\n' "$_hold_schedule" | head -n 1)"
+_assert_eq "held anchor backs off to a 1 s cap after a few seconds" \
+  "cap=1 before-cap-ok=1" \
+  "$(printf '%s\n' "$_hold_schedule" | awk '
+    { if ($1 > max) max = $1 }
+    !capped && $1 >= 1 { capped = 1 }
+    !capped { before += $1 }
+    END { printf "cap=%s before-cap-ok=%d", max, (before >= 3 && before <= 10) }
+  ')"
 
 set +e
 # shellcheck disable=SC2016 # This program is evaluated by the selected Bash.

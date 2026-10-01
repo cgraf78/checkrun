@@ -1285,9 +1285,13 @@ _autolint_cancel_private_group() {
 _autolint_hold_pause() {
   # Every successful run now ends with this hold, and the parent normally
   # releases it within one of its own 10 ms polls. Poll finely at first so
-  # that handshake stays cheap, then back off after about a second so a
-  # stopped (for example, Ctrl-Z) parent cannot make the anchor spin. The
-  # counter is the caller's dynamically scoped local.
+  # that handshake stays cheap, then back off so a stopped (for example,
+  # Ctrl-Z) parent cannot make the anchor spin: 100 ms after about a second,
+  # and 1 s after about five. Each poll forks `sleep`, and on hosts without
+  # procfs also `ps`, so a commit left suspended for hours costs one of each
+  # per second. A parent that resumes after that long waits at most one more
+  # second for the release. The counter is the caller's dynamically scoped
+  # local.
   _autolint_hold_polls=$((${_autolint_hold_polls:-0} + 1))
   # EXIT trap actions run with errexit active under a `set -e` caller, so a
   # failed sleep must not abort the hold and release the identity.
@@ -1295,8 +1299,10 @@ _autolint_hold_pause() {
     sleep 0.001 || :
   elif [ "$_autolint_hold_polls" -le 120 ]; then
     sleep 0.01 || :
-  else
+  elif [ "$_autolint_hold_polls" -le 160 ]; then
     sleep 0.1 || :
+  else
+    sleep 1 || :
   fi
 }
 
