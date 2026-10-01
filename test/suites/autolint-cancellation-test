@@ -154,6 +154,8 @@ import time
 root = Path(os.environ["AUTOLINT_CANCEL_ROOT"])
 source = Path(sys.argv[-1])
 index = source.stem.rsplit("-", 1)[-1]
+with (root / "backend-starts").open("a", encoding="ascii") as starts:
+    starts.write(f"{index}\n")
 (root / f"backend-{index}.pid").write_text(str(os.getpid()), encoding="ascii")
 (root / f"worker-{index}.pid").write_text(str(os.getppid()), encoding="ascii")
 group = os.getpgrp()
@@ -649,6 +651,18 @@ case "$mode" in
   wave | grace-wave)
     _autolint_supports_pool() { return 1; }
     ;;
+  sequential-steps)
+    # Give file 0 its real plan twice and file 1 none, so the supervisor runs
+    # the only nonempty plan itself, step after step, in its foreground.
+    _autolint_real_pre_plan=$(declare -f _autolint_pre_plan)
+    eval "_autolint_real_pre_plan${_autolint_real_pre_plan#_autolint_pre_plan}"
+    _autolint_pre_plan() {
+      _autolint_real_pre_plan "$@" || return
+      cat "$1/0.plan" "$1/0.plan" >"$1/0.plan.twice" &&
+        command mv -f "$1/0.plan.twice" "$1/0.plan" && : >"$1/1.plan"
+    }
+    _autolint_try_clean_batch() { return 1; }
+    ;;
   normal-no-probe)
     # Failure-composition scenarios use single-shot FIFO backends that cannot
     # run twice. The speculative probe plus authoritative fallback would
@@ -933,6 +947,7 @@ case = {
     "grace-cleanup-wave": ("grace-wave", 2, 2, 143),
     "grace-group-signal": ("grace", 2, 2, 143),
     "grace-stubborn-wave": ("grace-wave", 2, 2, 143),
+    "sequential-steps": ("sequential-steps", 2, 2, 143),
 }[scenario]
 GRACE_SCENARIOS = (
     "grace-cleanup", "grace-stubborn", "grace-cleanup-wave", "grace-group-signal",
@@ -1218,6 +1233,10 @@ try:
         wait_for(lambda: (root / "backend-0.ready").is_file(), "direct lint backend")
         signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "sequential-steps":
+        wait_for(lambda: (root / "backend-0.ready").is_file(), "first lint step")
+        signal_time = time.monotonic()
+        os.kill(process.pid, signal.SIGTERM)
     elif scenario == "monitor":
         pass
     elif count == 1:
@@ -1323,7 +1342,7 @@ try:
         "anchor-mismatch", "gate-visible-failure", "gate-visible-failure-signal",
         "monitor", "planner-signal",
         "direct-one-signal", "direct-jobs-one-signal", "pre-wait-signal", "signal", "repeat",
-        *GRACE_SCENARIOS,
+        *GRACE_SCENARIOS, "sequential-steps",
     ):
         expected_output = [f"backend:{index}" for index in range(count)]
         if stdout.splitlines() != expected_output:
@@ -1442,7 +1461,7 @@ try:
         "cleanup-failure-errexit", "cleanup-retry-signal", "gate-failure",
         "gate-visible-failure", "gate-visible-failure-signal", "monitor", "planner-signal", "success",
         "failure", "precedence", "restore-signal", "wave", "signal", "repeat",
-        *GRACE_SCENARIOS,
+        *GRACE_SCENARIOS, "sequential-steps",
         "pre-wait-signal",
         "malformed-pgid", "shared-pgid", "ps-pgid-success",
     )
@@ -1512,6 +1531,12 @@ try:
     unobserved = [
         index for index in range(count) if not (root / f"backend-{index}.term").is_file()
     ]
+    if scenario == "sequential-steps":
+        # The supervisor runs plan steps in its own foreground, so its TERM
+        # trap runs once the current linter exits. No later step may start.
+        starts = (root / "backend-starts").read_text(encoding="ascii").split()
+        if starts != ["0"]:
+            raise RuntimeError(f"lint steps started {starts!r}, expected only the first")
     if scenario in GRACE_SCENARIOS:
         # The parent TERMs the group, then polls for up to 20 grace checks
         # before it KILLs. Workers outlive TERM until their linter exits, so
@@ -1717,6 +1742,8 @@ _run_case "direct group TERM still KILLs a TERM-ignoring linter after the grace"
   grace-group-signal
 _run_case "wave runner KILLs a TERM-ignoring linter after the full grace" \
   grace-stubborn-wave
+_run_case "cancellation starts no later lint step of the same file" \
+  sequential-steps
 
 echo "=== Process-group identity on cancellation ==="
 

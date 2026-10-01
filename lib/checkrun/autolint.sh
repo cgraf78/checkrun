@@ -168,6 +168,10 @@ _lint_one_with_plan() {
     IFS= read -r -d '' adapter &&
     IFS= read -r -d '' config_source &&
     IFS= read -r -d '' config_path; do
+    # A supervisor that runs plans itself handles a cancellation signal only
+    # once the current linter exits. Start no further step after that: the
+    # step would receive no TERM and would only be KILLed when the grace ends.
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
     _checkrun_path_dir dir "$path"
     _lint_dispatch "$adapter" "$path" "$filetype" "$step_phase" "$config_source" "$config_path" "$dir"
     tool_rc=$?
