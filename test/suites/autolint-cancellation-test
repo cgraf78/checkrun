@@ -135,7 +135,12 @@ def terminate(_signum, _frame):
 
 signal.signal(signal.SIGTERM, terminate)
 (root / "planner.ready").touch(exist_ok=False)
-time.sleep(1.5)
+# This is the foreground work a cancellation must not wait for. It ends only
+# when the harness releases it, which it does only after a cancellation has
+# already failed to finish promptly, so waiting for it is unambiguous.
+deadline = time.monotonic() + 60
+while not (root / "foreground.release").exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
 PY
 cat >"$_tool_bin/shellcheck" <<'PY'
 #!/usr/bin/env python3
@@ -213,6 +218,16 @@ export AUTOLINT_CANCEL_PARENT_PID=${BASHPID:-$$}
 # shellcheck source=/dev/null
 . "$impl"
 
+# Record every pause the parent itself takes, so the harness can check that
+# it polls finely without measuring wall time. Bash 3.2 has no BASHPID to
+# tell the parent from a subshell, so it records nothing.
+sleep() {
+  if [ -n "${BASHPID:-}" ] && [ "$BASHPID" = "$AUTOLINT_CANCEL_PARENT_PID" ]; then
+    printf '%s\n' "$1" >>"$root/parent-pauses"
+  fi
+  command sleep "$@"
+}
+
 case "$mode" in
   capability-fallback)
     command() {
@@ -281,8 +296,9 @@ case "$mode" in
         if [ "$_autolint_cleanup_attempt" -eq 1 ]; then
           # Give the harness a live child wait to interrupt with a terminal-group
           # signal. A fast real rm would not prove that active cleanup returns
-          # the signal status which drives the managed retry.
-          sleep 30 &
+          # the signal status which drives the managed retry. `command` skips
+          # the driver's pause recorder so that the child itself runs sleep.
+          command sleep 30 &
           cleanup_child=$!
           printf '%s\n' "$cleanup_child" >"$root/cleanup-child.pid"
           # Publish readiness only once the child runs sleep itself. A group
@@ -614,7 +630,11 @@ case "$mode" in
         : >"$root/fallback-scratch-present"
       fi
       : >"$root/direct-fallback.ready"
-      sleep 30
+      # Foreground work that ends only when the harness releases it.
+      for ((probe_poll = 0; probe_poll < 3000; probe_poll++)); do
+        [ ! -e "$root/foreground.release" ] || break
+        command sleep 0.01
+      done
     }
     _autolint_pre_plan() { _autolint_direct_fallback_probe; }
     _lint_one() { _autolint_direct_fallback_probe; }
@@ -932,10 +952,9 @@ def driver_exit_status():
 
 def wait_for(predicate, description, seconds=20):
     # These waits are preconditions, not latency assertions; cancellation
-    # latency has its own deadlines (`signal_started`, the direct-path
-    # `process.wait`, and the `communicate` timeouts). Reaching a marker can
-    # take several interpreter startups, which took about 5 s at a load
-    # average of 4x the CPU count and has exceeded the former 6 s bound.
+    # promptness is asserted separately by `await_cancellation`. Reaching a
+    # marker can take several interpreter startups, which took about 5 s at a
+    # load average of 4x the CPU count and has exceeded the former 6 s bound.
     # Bound a real hang generously instead, and fail at once when the driver
     # exits: every marker comes from the driver or a descendant it is still
     # waiting for, so none can appear after that.
@@ -964,6 +983,74 @@ def release(index):
         gate.write(b"x")
 
 
+def release_if_waiting(index):
+    # A cancelled backend may already be gone, and opening a FIFO with no
+    # reader would block, so release only a backend that still waits.
+    try:
+        gate = os.open(root / f"gate-{index}", os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        os.write(gate, b"x")
+    except OSError:
+        pass
+    finally:
+        os.close(gate)
+
+
+# Cancellation must not wait for the foreground work that is running when the
+# signal arrives. Asserting that as wall time (formerly 0.8 s from the signal)
+# failed on slow and loaded hosts even though the bounded cancellation path,
+# whose escalation alone polls for 200 ms before KILL, was working: at a load
+# average of about 250 it took up to 0.9 s, measured without harness overhead.
+# Assert the ordering instead. The foreground work in these scenarios (the
+# slow planner, a backend, the direct-fallback probe) never finishes on its
+# own; the harness releases it only after this delay, so a cancellation that
+# ends later than that provably waited for it, while a merely slow one
+# passes. Passing runs never pay the delay. How finely the parent polls is
+# checked separately from recorded pauses, which load cannot stretch.
+FOREGROUND_RELEASE_DELAY = 5
+RELEASABLE_FOREGROUND = (
+    "allocation-fallback-signal", "capability-fallback-signal",
+    "validation-fallback-signal", "planner-signal", "pre-wait-signal",
+    "direct-one-signal", "direct-jobs-one-signal",
+)
+
+
+def release_foreground():
+    (root / "foreground.release").touch()
+    for index in range(count):
+        release_if_waiting(index)
+
+
+def await_cancellation(description, started):
+    """Wait for the driver after a cancellation signal, failing if it waited
+    for the foreground work or did not finish at all."""
+    try:
+        process.wait(timeout=FOREGROUND_RELEASE_DELAY)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    releasable = scenario in RELEASABLE_FOREGROUND
+    if releasable:
+        release_foreground()
+    try:
+        process.wait(timeout=8)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"{description} did not finish") from error
+    elapsed = time.monotonic() - started
+    if releasable:
+        raise RuntimeError(
+            f"{description} waited for foreground work: it finished "
+            f"{elapsed:.1f} s after the signal, only once that work was released "
+            f"after {FOREGROUND_RELEASE_DELAY} s"
+        )
+    raise RuntimeError(
+        f"{description} took {elapsed:.1f} s after the signal "
+        f"(limit {FOREGROUND_RELEASE_DELAY} s)"
+    )
+
+
 def read_pid(path):
     # A worker killed by group cancellation between creating its PID file and
     # writing it leaves the file empty; it has nothing left to clean up.
@@ -986,7 +1073,7 @@ def backend_finished(index):
 backend_pids = []
 worker_pids = []
 errors = []
-signal_started = None
+signal_time = None
 try:
     if scenario in (
         "allocation-fallback", "capability-fallback", "fallback", "jobs-one",
@@ -1005,6 +1092,7 @@ try:
         "validation-fallback-signal",
     ):
         wait_for(lambda: (root / "direct-fallback.ready").is_file(), "direct fallback")
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "allocation-signal":
         pass
@@ -1034,18 +1122,18 @@ try:
         os.kill(process.pid, signal.SIGCONT)
     elif scenario == "planner-signal":
         wait_for(lambda: (root / "planner.ready").is_file(), "registry planner")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "pre-wait-signal":
         wait_for(lambda: (root / "pre-wait-signal").is_file(), "pre-wait signal")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
     elif scenario == "direct-one-signal":
         wait_for(lambda: (root / "planner.ready").is_file(), "direct registry planner")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "direct-jobs-one-signal":
         wait_for(lambda: (root / "backend-0.ready").is_file(), "direct lint backend")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "monitor":
         pass
@@ -1089,7 +1177,7 @@ try:
                 os.killpg(process.pid, signal.SIGTERM)
             elif scenario == "cleanup-retry-signal":
                 wait_for(lambda: (root / "cleanup-retry-ready").is_file(), "cleanup retry")
-                signal_started = time.monotonic()
+                signal_time = time.monotonic()
                 os.kill(process.pid, signal.SIGTERM)
 
     direct_signal = scenario in (
@@ -1099,14 +1187,15 @@ try:
         "direct-one-signal",
         "direct-jobs-one-signal",
     )
+    if signal_time is not None or direct_signal:
+        await_cancellation(
+            "the direct driver" if direct_signal else "parent-only cancellation",
+            signal_time if signal_time is not None else time.monotonic(),
+        )
     if direct_signal:
         # A direct-path child retains the stdout/stderr pipe after its parent
-        # dies. Measure the driver itself first, then clean up that test-owned
-        # process group before draining pipes.
-        try:
-            process.wait(timeout=0.8)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("parent-only TERM did not stop the direct driver") from error
+        # dies. Wait for the driver itself first (above), then clean up that
+        # test-owned process group before draining pipes.
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -1114,8 +1203,7 @@ try:
         stdout, stderr = process.communicate(timeout=2)
     else:
         try:
-            timeout = 1.5 if scenario == "pre-wait-signal" else 8
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = process.communicate(timeout=8)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("autolint did not finish after its observable event") from error
 
@@ -1130,9 +1218,15 @@ try:
         actual_status = int((root / "operation-status").read_text(encoding="ascii"))
         if actual_status != expected_status:
             raise RuntimeError(f"operation status {actual_status}, expected {expected_status}")
-
-    if signal_started is not None and time.monotonic() - signal_started > 0.8:
-        raise RuntimeError("parent-only cancellation waited for foreground work")
+    if scenario in ("success", "signal", "planner-signal", "pre-wait-signal"):
+        # Promptness without wall time: every pause the parent takes while it
+        # waits for or cancels the supervisor must stay at the 10 ms poll.
+        pauses_path = root / "parent-pauses"
+        pauses = pauses_path.read_text(encoding="ascii").split() \
+            if pauses_path.exists() else []
+        long_pauses = [pause for pause in pauses if float(pause) > 0.01]
+        if long_pauses:
+            raise RuntimeError(f"parent paused longer than 10 ms: {long_pauses!r}")
 
     if not direct_signal and scenario not in (
         "allocation-fallback-signal", "allocation-signal", "anchor-hold",
@@ -2107,6 +2201,43 @@ _assert_eq "closed gate backs off to a 100 ms cap" "cap=0.1" \
     /^status=/ { next }
     { if ($1 > max) max = $1 }
     END { printf "cap=%s", max }
+  ')"
+
+# Cancellation promptness, independent of host load: a supervisor that never
+# quiesces must get a cooperative group TERM, at most 200 ms of 10 ms polls,
+# and then KILL. Record the real escalation's signals and pauses.
+_escalation_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-escalation.XXXXXX")
+printf '1\n' >"$_escalation_dir/busy"
+printf '1\n' >"$_escalation_dir/hold"
+: >"$_escalation_dir/exited"
+_escalation_schedule=$(
+  CHECKRUN_LIB_DIR="$CHECKRUN_TEST_ROOT/lib/checkrun"
+  # shellcheck source=../../lib/checkrun/autolint.sh
+  . "$CHECKRUN_LIB_DIR/autolint.sh"
+  # shellcheck disable=SC2329 # Invoked by the sourced escalation.
+  sleep() { printf 'sleep %s\n' "$1"; }
+  # shellcheck disable=SC2329 # Invoked by the sourced escalation.
+  kill() { printf 'kill %s\n' "$*"; }
+  # shellcheck disable=SC2329 # Invoked by the sourced escalation.
+  wait() { :; }
+  # shellcheck disable=SC2329 # The supervisor stays in Bash's running set.
+  _autolint_job_exited() { return 1; }
+  _autolint_signal_status=0
+  _autolint_cancel_status=143
+  _autolint_cancel_private_group 424242 424242 "$_escalation_dir/busy" \
+    "$_escalation_dir/exited" "$_escalation_dir/hold" "$_escalation_dir/jobs"
+)
+rm -rf "$_escalation_dir"
+_assert_eq "escalation TERMs the group, polls at most 200 ms, then KILLs" \
+  "term-first=1 longest=0.01 total-ok=1 kill-last=1" \
+  "$(printf '%s\n' "$_escalation_schedule" | awk '
+    NR == 1 { term_first = ($0 == "kill -TERM -424242") }
+    $1 == "sleep" { total += $2; if ($2 > longest) longest = $2 }
+    { last = $0 }
+    END {
+      printf "term-first=%d longest=%s total-ok=%d kill-last=%d", term_first,
+        longest, (total > 0 && total <= 0.2001), (last == "kill -KILL -424242")
+    }
   ')"
 
 set +e
