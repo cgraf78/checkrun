@@ -1994,6 +1994,48 @@ _assert_eq "held anchor backs off to a 1 s cap after a few seconds" \
     END { printf "cap=%s before-cap-ok=%d", max, (before >= 3 && before <= 10) }
   ')"
 
+# A supervisor whose parent is stopped during validation waits at a closed
+# gate just as long. Drive the real gate wait with a recording `sleep` that
+# withdraws the hold after 400 polls, which the wait treats as an abort. The
+# normal gate open must keep its 200 fast polls, the wait must then back off
+# rather than fork a thousand sleeps a second, and its pause must stay at
+# 100 ms so a TERM still lands within the parent's 200 ms cooperative grace.
+_gate_wait_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-gate-wait.XXXXXX")
+printf '1\n' >"$_gate_wait_dir/hold"
+set +e
+_gate_schedule=$(
+  CHECKRUN_LIB_DIR="$CHECKRUN_TEST_ROOT/lib/checkrun"
+  # shellcheck source=../../lib/checkrun/autolint.sh
+  . "$CHECKRUN_LIB_DIR/autolint.sh"
+  _gate_polls=0
+  # shellcheck disable=SC2329 # Invoked by the sourced gate wait.
+  sleep() {
+    printf '%s\n' "$1"
+    _gate_polls=$((_gate_polls + 1))
+    [ "$_gate_polls" -lt 400 ] || : >|"$_gate_wait_dir/hold"
+  }
+  _autolint_parallel_supervisor "$_gate_wait_dir/gate" \
+    "$_gate_wait_dir/armed" "$_gate_wait_dir/hold" "$$" 2 "$_gate_wait_dir"
+  printf 'status=%s\n' "$?"
+)
+set -e
+rm -rf "$_gate_wait_dir"
+_assert_eq "closed gate keeps 1 ms polls, then backs off in steps" \
+  "polls=400 fast=200 medium=100 status=125" \
+  "$(printf '%s\n' "$_gate_schedule" | awk '
+    /^status=/ { status = $0; next }
+    { polls++ }
+    NR <= 200 && $1 == 0.001 { fast++ }
+    NR > 200 && NR <= 300 && $1 == 0.01 { medium++ }
+    END { printf "polls=%d fast=%d medium=%d %s", polls, fast, medium, status }
+  ')"
+_assert_eq "closed gate backs off to a 100 ms cap" "cap=0.1" \
+  "$(printf '%s\n' "$_gate_schedule" | awk '
+    /^status=/ { next }
+    { if ($1 > max) max = $1 }
+    END { printf "cap=%s", max }
+  ')"
+
 set +e
 # shellcheck disable=SC2016 # This program is evaluated by the selected Bash.
 "$BASH" -c '

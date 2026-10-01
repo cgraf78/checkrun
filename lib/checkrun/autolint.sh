@@ -1564,7 +1564,7 @@ _autolint_parallel_supervisor() {
   local gate="$1" armed_file="$2" hold_file="$3" parent_pid="$4" jobs="$5"
   local plan_dir="$6"
   shift 6
-  local rc=0 _autolint_signal_status=0
+  local rc=0 _autolint_signal_status=0 gate_polls=0
   local -a files=("$@")
 
   # Install handlers before observing the gate so cancellation cannot be lost
@@ -1582,7 +1582,23 @@ _autolint_parallel_supervisor() {
     # An emptied hold before the gate is the parent's signal-free abort.
     [ -s "$hold_file" ] || return 125
     kill -0 "$parent_pid" 2>/dev/null || return 125
-    sleep 0.001
+    # Validation normally opens the gate within tens of milliseconds, even
+    # where it forks `ps` rather than reading procfs, so keep 1 ms polls for
+    # the first 200. Then back off like the anchor hold, so a parent stopped
+    # (for example, Ctrl-Z) during validation cannot make this child fork
+    # `sleep` a thousand times a second. Unlike the hold, this wait has live
+    # signal handlers, which Bash runs only once the foreground `sleep`
+    # returns, and the parent gives a TERMed candidate 200 ms to publish
+    # before it escalates to KILL. Cap the pause at 100 ms so cancellation
+    # by a resumed parent still completes cooperatively.
+    gate_polls=$((gate_polls + 1))
+    if [ "$gate_polls" -le 200 ]; then
+      sleep 0.001 || :
+    elif [ "$gate_polls" -le 300 ]; then
+      sleep 0.01 || :
+    else
+      sleep 0.1 || :
+    fi
   done
   [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
 
