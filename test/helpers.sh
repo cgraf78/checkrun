@@ -12,6 +12,7 @@
 
 PASS=0
 FAIL=0
+SKIP=0
 CLEANUP_DIRS=()
 
 # Mark every suite, including suites run directly, so code that can reach
@@ -54,6 +55,16 @@ _pass() {
     _test_style green "  ✓ $1"
   else
     echo "  PASS: $1"
+  fi
+}
+# Record a case the host cannot exercise. It counts toward neither total, so
+# a skipped assertion can never read as a pass.
+_skip() {
+  SKIP=$((SKIP + 1))
+  if $_TEST_PRETTY; then
+    _test_style yellow "  - $1"
+  else
+    echo "  SKIP: $1"
   fi
 }
 _fail() {
@@ -610,20 +621,22 @@ _require_compatible_libc() {
 # ---------------------------------------------------------------------------
 
 _test_summary() {
+  local results="$PASS passed, $FAIL failed"
+  [[ $SKIP -eq 0 ]] || results="$results, $SKIP skipped"
   echo ""
   if $_TEST_PRETTY; then
     local summary_color=green
     [[ $FAIL -ne 0 ]] && summary_color=red
     _test_style "$summary_color" "────────────────────────────────"
     if [[ $FAIL -eq 0 ]]; then
-      _test_style green "✓ Results: $PASS passed, $FAIL failed"
+      _test_style green "✓ Results: $results"
     else
-      _test_style red "✗ Results: $PASS passed, $FAIL failed"
+      _test_style red "✗ Results: $results"
     fi
     _test_style "$summary_color" "────────────────────────────────"
   else
     echo "================================"
-    echo "Results: $PASS passed, $FAIL failed"
+    echo "Results: $results"
     echo "================================"
   fi
   [[ $FAIL -eq 0 ]] && exit 0 || exit 1

@@ -2470,7 +2470,7 @@ CHECKRUN_AUTOLINT_REPORT="$_report" CHECKRUN_AUTOLINT_JOBS=1 \
   >/dev/null 2>&1 || rc=$?
 if [[ -w "$_report" ]]; then
   # Root ignores file modes, so the failure cannot be simulated here.
-  _pass "report: unrecordable finding (skipped: report stays writable)"
+  _skip "report: unrecordable finding (report stays writable)"
 else
   _assert_exit "report: unrecordable finding is an integrity error" 125 "$rc"
   _assert_not_contains "report: unrecordable finding never reads as none" \

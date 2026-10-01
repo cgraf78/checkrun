@@ -1417,7 +1417,7 @@ _run_case "parent-only TERM stays prompt during one-file planning" direct-one-si
 _run_case "parent-only TERM stays prompt during jobs=1 lint" direct-jobs-one-signal
 case " $_ignored_signals " in
   *" SIGHUP "*)
-    _pass "parent-only HUP cancels the complete backend group (skipped: SIGHUP ignored at start)"
+    _skip "parent-only HUP cancels the complete backend group (SIGHUP ignored at start)"
     ;;
   *) _run_case "parent-only HUP cancels the complete backend group" signal HUP ;;
 esac
