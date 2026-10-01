@@ -114,7 +114,9 @@ signal number). A run that lints two or more files with more than one job and
 without
 .B --fix
 catches these signals, stops the lint workers it started in the background,
-and exits with this status. Other runs, such as a single file,
+and exits with this status. Each running linter first receives SIGTERM and a
+short grace, at least 0.2 seconds, to exit before it is killed. Other runs,
+such as a single file,
 .BR CHECKRUN_AUTOLINT_JOBS=1 ,
 .BR --fix ,
 or a host that cannot supervise parallel workers, keep the default signal

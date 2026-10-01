@@ -165,10 +165,28 @@ if group != int(os.environ["AUTOLINT_CANCEL_PARENT_PID"]):
         pass
 
 
+def grace_polls():
+    try:
+        events = (root / "parent-events").read_text(encoding="ascii").splitlines()
+    except OSError:
+        return 0
+    return events.count("poll")
+
+
 def terminate(_signum, _frame):
     (root / f"backend-{index}.term").touch(exist_ok=True)
-    if os.environ.get("AUTOLINT_CANCEL_IGNORE_TERM") != "1":
-        raise SystemExit(143)
+    if os.environ.get("AUTOLINT_CANCEL_IGNORE_TERM") == "1":
+        return
+    if os.environ.get("AUTOLINT_CANCEL_TERM_CLEANUP") == "1":
+        # Model a linter that needs part of the parent's cancellation grace to
+        # clean up. Measure that grace in the parent's own polls, not wall
+        # time: an immediate KILL ends this before the third poll, while a real
+        # grace allows twenty.
+        deadline = time.monotonic() + 10
+        while grace_polls() < 3 and time.monotonic() < deadline:
+            time.sleep(0.002)
+        (root / f"backend-{index}.cleaned").touch(exist_ok=True)
+    raise SystemExit(143)
 
 
 signal.signal(signal.SIGTERM, terminate)
@@ -236,8 +254,8 @@ kill() {
   if { [ "$mode" = normal ] || [ "$mode" = planner-signal ]; } &&
     [ "${1:-}" = -KILL ] && [[ "${2:-}" == -[1-9]* ]]; then
     # The parent KILLs the group once the supervisor has reaped its workers,
-    # which die on TERM at once, or after its 200 ms grace. Either can come
-    # before a starved backend or planner runs its TERM handler. Hold the
+    # which outlive TERM only until their linter exits, or after its 200 ms
+    # grace, which a starved backend or planner can miss entirely. Hold the
     # KILL, boundedly, until each one has observed the TERM or is gone, so
     # the harness can require cooperative delivery on any host. This only
     # delays KILL: a TERM that never reached them still fails. It also means
@@ -263,6 +281,15 @@ kill() {
     printf 'held %s\n' "$attempt" >>"$root/parent-events"
   fi
   builtin kill "$@"
+}
+# Record each poll of the parent's cancellation grace, which checks whether the
+# supervisor has quiesced, so a fixture can measure the grace in polls on any
+# Bash.
+_autolint_real_supervisor_quiesced=$(declare -f _autolint_supervisor_quiesced)
+eval "_autolint_real_supervisor_quiesced${_autolint_real_supervisor_quiesced#_autolint_supervisor_quiesced}"
+_autolint_supervisor_quiesced() {
+  printf 'poll\n' >>"$root/parent-events"
+  _autolint_real_supervisor_quiesced "$@"
 }
 
 case "$mode" in
@@ -619,7 +646,7 @@ case "$mode" in
       builtin kill "$@"
     }
     ;;
-  wave)
+  wave | grace-wave)
     _autolint_supports_pool() { return 1; }
     ;;
   normal-no-probe)
@@ -901,7 +928,16 @@ case = {
     "direct-jobs-one-signal": ("direct-jobs-one-signal", 2, 1, 143),
     "signal": ("normal", 2, 2, 128 + getattr(signal, f"SIG{signal_name}")),
     "repeat": ("repeat", 2, 2, 143),
+    "grace-cleanup": ("grace", 2, 2, 143),
+    "grace-stubborn": ("grace", 2, 2, 143),
+    "grace-cleanup-wave": ("grace-wave", 2, 2, 143),
+    "grace-group-signal": ("grace", 2, 2, 143),
+    "grace-stubborn-wave": ("grace-wave", 2, 2, 143),
 }[scenario]
+GRACE_SCENARIOS = (
+    "grace-cleanup", "grace-stubborn", "grace-cleanup-wave", "grace-group-signal",
+    "grace-stubborn-wave",
+)
 mode, count, jobs, expected_status = case
 env = os.environ.copy()
 env["PATH"] = tool_bin + os.pathsep + env["PATH"]
@@ -915,8 +951,10 @@ if scenario == "precedence":
     env["AUTOLINT_CANCEL_EXIT_0"] = "1"
     env["AUTOLINT_CANCEL_EXIT_1"] = "2"
     env["AUTOLINT_CANCEL_EXIT_2"] = "125"
-if scenario == "repeat":
+if scenario in ("repeat", "grace-stubborn", "grace-group-signal", "grace-stubborn-wave"):
     env["AUTOLINT_CANCEL_IGNORE_TERM"] = "1"
+if scenario in ("grace-cleanup", "grace-cleanup-wave"):
+    env["AUTOLINT_CANCEL_TERM_CLEANUP"] = "1"
 if scenario == "shared-pgid":
     env["AUTOLINT_CANCEL_PGID_SNAPSHOT"] = "shared"
 if scenario == "malformed-pgid":
@@ -1190,7 +1228,16 @@ try:
             lambda: all((root / f"backend-{index}.ready").is_file() for index in range(count)),
             "all parallel backends",
         )
-        if scenario in ("signal", "repeat"):
+        if scenario == "grace-group-signal":
+            # Signal the private group directly, so the parent learns of the
+            # cancellation only from the supervisor.
+            supervisor_group = int((root / "supervisor.pid").read_text(encoding="ascii"))
+            signal_time = time.monotonic()
+            os.killpg(supervisor_group, signal.SIGTERM)
+        elif scenario in GRACE_SCENARIOS:
+            signal_time = time.monotonic()
+            os.kill(process.pid, signal.SIGTERM)
+        elif scenario in ("signal", "repeat"):
             os.kill(process.pid, getattr(signal, f"SIG{signal_name}"))
             if scenario == "repeat":
                 wait_for(
@@ -1276,6 +1323,7 @@ try:
         "anchor-mismatch", "gate-visible-failure", "gate-visible-failure-signal",
         "monitor", "planner-signal",
         "direct-one-signal", "direct-jobs-one-signal", "pre-wait-signal", "signal", "repeat",
+        *GRACE_SCENARIOS,
     ):
         expected_output = [f"backend:{index}" for index in range(count)]
         if stdout.splitlines() != expected_output:
@@ -1394,6 +1442,7 @@ try:
         "cleanup-failure-errexit", "cleanup-retry-signal", "gate-failure",
         "gate-visible-failure", "gate-visible-failure-signal", "monitor", "planner-signal", "success",
         "failure", "precedence", "restore-signal", "wave", "signal", "repeat",
+        *GRACE_SCENARIOS,
         "pre-wait-signal",
         "malformed-pgid", "shared-pgid", "ps-pgid-success",
     )
@@ -1463,6 +1512,38 @@ try:
     unobserved = [
         index for index in range(count) if not (root / f"backend-{index}.term").is_file()
     ]
+    if scenario in GRACE_SCENARIOS:
+        # The parent TERMs the group, then polls for up to 20 grace checks
+        # before it KILLs. Workers outlive TERM until their linter exits, so
+        # a linter that cleans up within the grace finishes, and one that
+        # ignores TERM holds the supervisor until the KILL ends the grace.
+        events = parent_events()
+        group_signals = [event[1] for event in events if event[0] == "kill"]
+        if not group_signals or group_signals[0] != "-TERM":
+            raise RuntimeError(f"group signals {group_signals!r} did not start with TERM")
+        term_at = next(i for i, e in enumerate(events) if e[:2] == ("kill", "-TERM"))
+        polls = [event for event in events[term_at:] if event == ("poll",)]
+        kill_at = next(
+            (i for i, e in enumerate(events) if e[:2] == ("kill", "-KILL")), None
+        )
+        if scenario in ("grace-cleanup", "grace-cleanup-wave"):
+            uncleaned = [
+                index for index in range(count)
+                if not (root / f"backend-{index}.cleaned").is_file()
+            ]
+            if uncleaned:
+                raise RuntimeError(
+                    f"backends {uncleaned!r} were stopped before cleaning up "
+                    f"within the grace; parent polled {len(polls)} times"
+                )
+        else:
+            grace = [e for e in events[term_at:kill_at] if e == ("poll",)] \
+                if kill_at is not None else []
+            if kill_at is None or len(grace) != 20:
+                raise RuntimeError(
+                    f"stubborn backends were KILLed after {len(grace)} grace polls, "
+                    "expected the full 20"
+                )
     if scenario in ("signal", "repeat") and unobserved:
         raise RuntimeError(
             f"owned backends {unobserved!r} did not observe cooperative TERM; "
@@ -1628,6 +1709,14 @@ esac
 _run_case "parent-only INT cancels the complete backend group" signal INT
 _run_case "parent-only TERM cancels the complete backend group" signal TERM
 _run_case "first signal wins while stubborn backends escalate" repeat TERM
+_run_case "cancellation grace lets a linter finish its TERM cleanup" grace-cleanup
+_run_case "linter that ignores TERM is KILLed after the full grace" grace-stubborn
+_run_case "wave runner also lets a linter finish its TERM cleanup" \
+  grace-cleanup-wave
+_run_case "direct group TERM still KILLs a TERM-ignoring linter after the grace" \
+  grace-group-signal
+_run_case "wave runner KILLs a TERM-ignoring linter after the full grace" \
+  grace-stubborn-wave
 
 echo "=== Process-group identity on cancellation ==="
 

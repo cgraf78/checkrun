@@ -733,6 +733,16 @@ _autolint_reap_pids() {
     # later terminal-group signals from interrupting these exact waits so the
     # supervisor's exit marker means every direct worker has been reaped.
     trap '' HUP INT TERM
+    # Workers outlive TERM until their linters exit, so these waits last as
+    # long as the slowest linter. A signal sent to the group directly, not to
+    # the parent, is known to the parent only through this record, which lets
+    # it start the bounded grace and KILL now rather than after the exit
+    # marker. Failure only delays that to the exit marker, as before. A plan
+    # the supervisor runs in its own foreground has no such record: there, as
+    # before, a direct group signal waits for that linter.
+    [ -z "${_autolint_cancelling_file:-}" ] ||
+      printf '%s\n' "$_autolint_cancel_status" 2>/dev/null \
+        >"$_autolint_cancelling_file" || :
   fi
   for pid in "$@"; do
     [ -n "$pid" ] || continue
@@ -771,6 +781,9 @@ _autolint_run_file_batch() {
     stdout_file="$plan_dir/$global_index.stdout"
     stderr_file="$plan_dir/$global_index.stderr"
     (
+      # See _autolint_run_files_pool: outlive a cancellation TERM until the
+      # foreground linter exits, then stop.
+      trap 'exit 143' TERM
       _lint_one_with_plan "$plan_dir/$global_index.plan"
     ) >"$stdout_file" 2>"$stderr_file" &
     pid=$!
@@ -880,6 +893,16 @@ _autolint_run_files_pool() {
       stdout_file="$plan_dir/$next.stdout"
       stderr_file="$plan_dir/$next.stderr"
       (
+        # Cancellation TERMs the whole private group, linters included, then
+        # gives them a short grace before KILL. A worker that died on that
+        # TERM at once would let the supervisor quiesce, and the parent KILL,
+        # while its linter was still cleaning up. Bash runs this trap only
+        # after the foreground command exits (the linter, or a command
+        # substitution or pipeline running it), so the worker outlives the
+        # TERM as long as its linter, and then stops before any further step.
+        # A linter that ignores TERM keeps the worker alive until the KILL.
+        # Nothing changes for a run that is never cancelled.
+        trap 'exit 143' TERM
         _autolint_worker_rc=0
         if _lint_one_with_plan "$plan_dir/$next.plan"; then
           _autolint_worker_rc=0
@@ -1304,9 +1327,10 @@ _autolint_cancel_private_group() {
   fi
   kill -TERM "-$group" 2>/dev/null || true
   # On cancellation, the supervisor reaps every exact worker, publishes
-  # exited, and then remains alive as the private group's PID anchor. Give
-  # cooperative cleanup a short grace before escalating the still-pinned
-  # group; no process-table scan or reusable bare PGID is involved.
+  # exited, and then remains alive as the private group's PID anchor. Workers
+  # outlive the TERM until their linters exit, so this wait is the linters'
+  # cooperative cleanup grace before escalating the still-pinned group; no
+  # process-table scan or reusable bare PGID is involved.
   for ((attempt = 0; attempt < 20; attempt++)); do
     if [ "$signals_frozen" -eq 0 ] &&
       { [ "${_autolint_signal_status:-0}" -ne 0 ] ||
@@ -1565,6 +1589,7 @@ _autolint_parallel_supervisor() {
   local plan_dir="$6"
   shift 6
   local rc=0 _autolint_signal_status=0 gate_polls=0
+  local _autolint_cancelling_file="${gate%/*}/cancelling"
   local -a files=("$@")
 
   # Install handlers before observing the gate so cancellation cannot be lost
@@ -1620,7 +1645,7 @@ _autolint_run_parallel_supervised() {
   local jobs="$1" plan_dir="$2"
   shift 2
   local control_dir="$plan_dir/.supervisor" gate busy_file hold_file exited_file
-  local armed_file jobs_file group_file leader_file
+  local armed_file jobs_file group_file leader_file cancelling_file
   local parent_pid="" leader="" group="" rc=0 tool event_status=0 job_state=0
   local had_monitor=0 released=1 armed_rc=0
   local REPLY=""
@@ -1647,6 +1672,7 @@ _autolint_run_parallel_supervised() {
   jobs_file="$control_dir/jobs"
   group_file="$control_dir/groups"
   leader_file="$control_dir/leader"
+  cancelling_file="$control_dir/cancelling"
   # Both lifecycle markers are written before the supervisor exists, so each
   # side signals the other by truncating one: a fork-free builtin that needs
   # no new allocation, unlike creating a file on a full TMPDIR. The supervisor
@@ -1775,7 +1801,10 @@ _autolint_run_parallel_supervised() {
     fi
 
     REPLY=""
-    if _autolint_read_status_file "$exited_file"; then
+    # A supervisor publishes `cancelling` before it waits for its workers and
+    # `exited` once they are reaped; either carries a direct group signal.
+    if _autolint_read_status_file "$exited_file" ||
+      _autolint_read_status_file "$cancelling_file"; then
       case "$REPLY" in
         129 | 130 | 143) event_status=$REPLY ;;
         *) event_status=0 ;;
