@@ -238,7 +238,7 @@ case "$mode" in
   cleanup-group-signal)
     _autolint_cleanup_attempt=0
     rm() {
-      local rc cleanup_child
+      local rc cleanup_child cleanup_attempt
       if [ "${1:-}" = -rf ]; then
         _autolint_cleanup_attempt=$((_autolint_cleanup_attempt + 1))
         printf '%s\n' "$_autolint_cleanup_attempt" >>"$root/cleanup-attempts"
@@ -249,6 +249,15 @@ case "$mode" in
           sleep 30 &
           cleanup_child=$!
           printf '%s\n' "$cleanup_child" >"$root/cleanup-child.pid"
+          # Publish readiness only once the child runs sleep itself. A group
+          # TERM between fork and exec reaches Bash's inherited trap handler
+          # and is lost, and the surviving sleep then holds the harness pipes.
+          for ((cleanup_attempt = 0; cleanup_attempt < 500; cleanup_attempt++)); do
+            case "$(LC_ALL=C "$AUTOLINT_CANCEL_REAL_PS" -o comm= -p "$cleanup_child" 2>/dev/null)" in
+              *sleep*) break ;;
+            esac
+            sleep 0.01
+          done
           : >"$root/cleanup-ready"
           if wait "$cleanup_child"; then
             rc=0
@@ -663,11 +672,12 @@ elif [ "$mode" = gate-visible-failure ] ||
   rm -rf "$visible_plan_dir"
 elif [ "$mode" = anchor-hold ]; then
   anchor_dir=$(mktemp -d "$TMPDIR/anchor-plans.XXXXXX")
-  anchor_gate="$anchor_dir/gate"
-  anchor_done="$anchor_dir/done"
+  anchor_busy="$anchor_dir/busy"
+  anchor_hold="$anchor_dir/hold"
   anchor_exited="$anchor_dir/exited"
   anchor_leader="$anchor_dir/leader"
-  mkdir "$anchor_gate"
+  printf '1\n' >"$anchor_busy"
+  printf '1\n' >"$anchor_hold"
   anchor_saved_hup=$(trap -p HUP)
   anchor_saved_int=$(trap -p INT)
   anchor_saved_term=$(trap -p TERM)
@@ -678,7 +688,7 @@ elif [ "$mode" = anchor-hold ]; then
     done
     _autolint_cancel_status=143
     _autolint_finish_parallel_supervisor \
-      "$AUTOLINT_CANCEL_PARENT_PID" "$anchor_gate" "$anchor_done" \
+      "$AUTOLINT_CANCEL_PARENT_PID" "$anchor_busy" "$anchor_hold" \
       "$anchor_exited" "$anchor_leader"
   ) &
   anchor_pid=$!
@@ -693,11 +703,12 @@ elif [ "$mode" = anchor-hold ]; then
   rm -rf "$anchor_dir"
 elif [ "$mode" = anchor-mismatch ]; then
   mismatch_dir=$(mktemp -d "$TMPDIR/anchor-mismatch.XXXXXX")
-  mismatch_gate="$mismatch_dir/gate"
-  mismatch_done="$mismatch_dir/done"
+  mismatch_busy="$mismatch_dir/busy"
+  mismatch_hold="$mismatch_dir/hold"
   mismatch_exited="$mismatch_dir/exited"
   mismatch_leader="$mismatch_dir/leader"
-  mkdir "$mismatch_gate"
+  printf '1\n' >"$mismatch_busy"
+  printf '1\n' >"$mismatch_hold"
   (
     _autolint_read_process_parent() {
       REPLY=1
@@ -716,7 +727,7 @@ elif [ "$mode" = anchor-mismatch ]; then
     }
     _autolint_cancel_status=143
     _autolint_finish_parallel_supervisor \
-      "$AUTOLINT_CANCEL_PARENT_PID" "$mismatch_gate" "$mismatch_done" \
+      "$AUTOLINT_CANCEL_PARENT_PID" "$mismatch_busy" "$mismatch_hold" \
       "$mismatch_exited" "$mismatch_leader"
   ) &
   mismatch_pid=$!
@@ -1360,6 +1371,374 @@ _run_case "parent-only HUP cancels the complete backend group" signal HUP
 _run_case "parent-only INT cancels the complete backend group" signal INT
 _run_case "parent-only TERM cancels the complete backend group" signal TERM
 _run_case "first signal wins while stubborn backends escalate" repeat TERM
+
+echo "=== Process-group identity on cancellation ==="
+
+# Every parent-side kill below goes through a wrapper that first gives an
+# exiting target up to 300 ms to disappear and then records whether the target
+# still had a live (or zombie) member. A signal to an empty PGID or a reaped
+# PID is exactly the window in which an unrelated process can reuse the
+# number, so any `stale` record is a failure even though no reuse is forced.
+_pgid_fixture="$_fixture_root/pgid-identity"
+cat >"$_pgid_fixture" <<'SH'
+#!/usr/bin/env bash
+set -u
+
+impl=$1
+root=$2
+scenario=$3
+
+mkdir -p "$root/tmp"
+export TMPDIR="$root/tmp"
+export CHECKRUN_CONFIG_DIR=/nonexistent
+
+# shellcheck source=/dev/null
+. "$impl"
+
+case "$scenario" in
+  noclobber-*)
+    # A sourcing caller may enable noclobber; every rewritten control file
+    # must still be replaceable.
+    set -C
+    scenario=${scenario#noclobber-}
+    ;;
+esac
+
+parent=$$
+json=0
+_autolint_signal_status=0
+_autolint_cancel_status=0
+_autolint_parallel_validated=0
+trap '_autolint_record_signal 129' HUP
+trap '_autolint_record_signal 130' INT
+trap '_autolint_record_signal 143' TERM
+
+kill() {
+  local sig="${1:-}" target="${2:-}" attempt state
+  case "$sig:$target" in
+    -0:* | *:"$parent") builtin kill "$@"; return ;;
+    *:-[1-9]* | *:[1-9]*) ;;
+    *) builtin kill "$@"; return ;;
+  esac
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    builtin kill -0 "$target" 2>/dev/null || break
+    sleep 0.01
+  done
+  if builtin kill -0 "$target" 2>/dev/null; then
+    state=live
+  else
+    state=stale
+  fi
+  printf '%s %s %s\n' "$sig" "$target" "$state" >>"$root/signals"
+  builtin kill "$@"
+}
+
+# The supervisor's work is irrelevant to identity; a visible marker proves
+# whether the gate ever authorized it.
+_autolint_run_read_only_pipeline() {
+  : >"$root/work-started"
+  case "$scenario" in
+    completion-race) sleep 0.1 ;;
+    jobs-false-exit-after-gate) sleep 0.3 ;;
+  esac
+  return 0
+}
+
+eval "_pgid_real_validate() $(declare -f _autolint_validate_private_group | tail -n +2)"
+eval "_pgid_real_job_is_running() $(declare -f _autolint_job_is_running | tail -n +2)"
+eval "_pgid_real_supervisor() $(declare -f _autolint_parallel_supervisor | tail -n +2)"
+
+case "$scenario" in
+  pre-gate-signal)
+    # Deliver INT after validation proved the private group but before the
+    # gate exists, so no planner or worker can have started.
+    _autolint_validate_private_group() {
+      _pgid_real_validate "$@" || return
+      builtin kill -INT "$parent"
+      return 0
+    }
+    ;;
+  pre-gate-leader-lost)
+    # The validated leader disappears before gate release; the parent must
+    # not signal a PID that Bash has already reaped.
+    _autolint_validate_private_group() {
+      local attempt
+      _pgid_real_validate "$@" || return
+      builtin kill -KILL "$1"
+      for ((attempt = 0; attempt < 300; attempt++)); do
+        builtin kill -0 "$1" 2>/dev/null || break
+        sleep 0.01
+      done
+      return 0
+    }
+    ;;
+  unpublished-completion)
+    # The supervisor completes normally but cannot publish completion: a
+    # non-empty directory replacing its precreated marker rejects truncation
+    # while still testing non-empty.
+    _autolint_parallel_supervisor() {
+      local busy="${1%/*}/busy"
+      command rm -f "$busy"
+      # An entry keeps the directory non-empty for `-s` on every filesystem;
+      # btrfs, for one, reports an empty directory's size as zero.
+      command mkdir "$busy"
+      : >"$busy/entry"
+      _pgid_real_supervisor "$@"
+    }
+    # Deliver TERM after the supervisor already left the running set.
+    _autolint_job_is_running() {
+      local rc=0
+      _pgid_real_job_is_running "$@" || rc=$?
+      if [ "$rc" -eq 1 ] && [ ! -e "$root/injected" ]; then
+        : >"$root/injected"
+        builtin kill -TERM "$parent"
+      fi
+      return "$rc"
+    }
+    ;;
+  pre-gate-unacknowledged)
+    # The supervisor cannot publish its exited marker, so the parent's grace
+    # expires and it must escalate with KILL to the still-pinned exact PID.
+    _autolint_validate_private_group() {
+      _pgid_real_validate "$@" || return
+      builtin kill -INT "$parent"
+      return 0
+    }
+    mkdir() {
+      local arg rc
+      command mkdir "$@"
+      rc=$?
+      for arg in "$@"; do
+        case "$arg" in
+          */.supervisor) ln -s "$arg/missing/exited" "$arg/exited" || return $? ;;
+        esac
+      done
+      return "$rc"
+    }
+    ;;
+  slow-arming)
+    # The supervisor installs its latches late, after the kill wrapper's own
+    # delay. A TERM before then is never recorded as a cancellation: it kills
+    # the supervisor or makes its EXIT trap publish completion instead.
+    _autolint_parallel_supervisor() {
+      sleep 0.8
+      _pgid_real_supervisor "$@"
+    }
+    _autolint_validate_private_group() {
+      _pgid_real_validate "$@" || return
+      builtin kill -TERM "$parent"
+      return 0
+    }
+    ;;
+  unarmed-death)
+    # The supervisor dies before arming while the parent waits to stop it.
+    # Its reaped PID must not receive the TERM meant for an armed supervisor.
+    _autolint_parallel_supervisor() {
+      sleep 0.5
+      sh -c 'kill -KILL "$PPID"'
+    }
+    _autolint_validate_private_group() {
+      _pgid_real_validate "$@" || return
+      builtin kill -INT "$parent"
+      return 0
+    }
+    ;;
+  jobs-false-exit)
+    # The job table reports a live supervisor as exited, so no signal is
+    # sent. The exact wait must still end: emptying hold aborts its gate wait.
+    jobs() {
+      [ "${1:-}" = -pr ] && return 0
+      builtin jobs "$@"
+    }
+    ;;
+  jobs-false-exit-after-gate)
+    # The same misreport, but only once the supervisor is working. Its exact
+    # wait must still end when it completes instead of holding forever.
+    jobs() {
+      if [ "${1:-}" = -pr ] && [ -d "$plan_dir/.supervisor/gate" ]; then
+        return 0
+      fi
+      builtin jobs "$@"
+    }
+    ;;
+  jobs-unlisted)
+    # Model a full TMPDIR: `jobs` reports no write error, so its running-job
+    # listing and the completeness sentinel after it are both silently lost.
+    jobs() {
+      [ "${1:-}" = -pr ] && return 0
+      builtin jobs "$@"
+    }
+    printf() {
+      [ "$#" -eq 2 ] && [ "$1" = '%s\n' ] && [ "$2" = end ] && return 0
+      builtin printf "$@"
+    }
+    ;;
+  release-failure)
+    # The parent cannot empty the hold marker, so a released supervisor
+    # would keep holding forever. The only bounded exit is KILL while still
+    # pinned.
+    # shellcheck disable=SC2329 # Invoked by the sourced release path.
+    _autolint_unhold() { :; }
+    ;;
+  completion-race)
+    # Deliver TERM at the parent's first poll while the supervisor is about
+    # to finish on its own: any done-then-signal check is a TOCTOU window.
+    eval "_pgid_real_read_status_file() $(declare -f _autolint_read_status_file | tail -n +2)"
+    _autolint_read_status_file() {
+      if [ ! -e "$root/injected" ] && [[ "$1" == */.supervisor/exited ]]; then
+        : >"$root/injected"
+        builtin kill -TERM "$parent"
+      fi
+      _pgid_real_read_status_file "$@"
+    }
+    ;;
+esac
+
+plan_dir=$(mktemp -d "$TMPDIR/pgid-plans.XXXXXX")
+_autolint_run_parallel_supervised 2 "$plan_dir" first.sh second.sh
+status=$?
+[ "$_autolint_signal_status" -eq 0 ] || status=$_autolint_signal_status
+builtin printf '%s\n' "$status" >"$root/status"
+cat "$plan_dir/.supervisor/exited" >"$root/exited" 2>/dev/null || :
+builtin jobs -pr >"$root/jobs-after"
+command rm -rf "$plan_dir"
+SH
+chmod +x "$_pgid_fixture"
+
+_run_pgid_case() {
+  local description="$1" scenario="$2" expected="$3" root rc=0 pid attempt
+  root="$_fixture_root/pgid-$scenario-$RANDOM"
+  mkdir -p "$root"
+  # Without monitor mode, an asynchronous command starts with INT ignored,
+  # which no trap can override. Give the fixture its own job like a
+  # foreground command so the INT scenarios reach its managed handler.
+  set -m
+  "$BASH" "$_pgid_fixture" "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh" \
+    "$root" "$scenario" >"$root/stdout" 2>"$root/stderr" &
+  # shellcheck disable=SC2031 # This reads the launch above, not a subshell's $!.
+  pid=$!
+  set +m
+  # A lost release deadlocks the fixture in an exact wait that shields TERM.
+  # Bound it so that regression fails here instead of hanging the suite; a
+  # holding supervisor releases itself once its parent is gone.
+  for ((attempt = 0; attempt < 1000; attempt++)); do
+    case " $(jobs -pr | tr '\n' ' ') " in
+      *" $pid "*) sleep 0.01 ;;
+      *) break ;;
+    esac
+  done
+  if [ "$attempt" -ge 1000 ]; then
+    kill -KILL "$pid" 2>/dev/null || :
+    rc=124
+  fi
+  if [ "$rc" -eq 0 ]; then
+    wait "$pid" || rc=$?
+  else
+    wait "$pid" 2>/dev/null || :
+  fi
+  _assert_exit "$description: fixture exits cleanly" 0 "$rc"
+  _assert_eq "$description: status" "$expected" \
+    "$(cat "$root/status" 2>/dev/null)"
+  _assert_eq "$description: no stale PID/PGID signal" "" \
+    "$(grep stale "$root/signals" 2>/dev/null || :)"
+  _assert_eq "$description: no running job remains" "" \
+    "$(cat "$root/jobs-after" 2>/dev/null)"
+  case "$scenario" in
+    pre-gate-* | noclobber-pre-gate-* | unarmed-death | jobs-false-exit)
+      _assert_file_missing "$description: gate never opened" \
+        "$root/work-started"
+      ;;
+  esac
+}
+
+_run_pgid_case "pre-gate INT stops the supervisor without a stale group signal" \
+  pre-gate-signal 130
+_run_pgid_case "pre-gate leader loss sends no signal to the reaped PID" \
+  pre-gate-leader-lost 0
+_run_pgid_case "unpublished completion is never followed by a group signal" \
+  unpublished-completion 143
+_run_pgid_case "TERM racing normal completion only signals a pinned group" \
+  completion-race 143
+_run_pgid_case "unremovable hold marker escalates only while pinned" \
+  release-failure 125
+_run_pgid_case "unacknowledged pre-gate TERM escalates to the exact pinned PID" \
+  pre-gate-unacknowledged 130
+_assert_contains "unacknowledged pre-gate TERM: KILL reached the live PID" \
+  "live" "$(grep -- '^-KILL [1-9]' "$_fixture_root"/pgid-pre-gate-unacknowledged-*/signals)"
+_run_pgid_case "pre-gate TERM waits until the supervisor is armed" \
+  slow-arming 143
+_assert_eq "pre-gate TERM is latched by the supervisor's handler" "143" \
+  "$(cat "$_fixture_root"/pgid-slow-arming-*/exited 2>/dev/null)"
+_run_pgid_case "lost job listing is an inspection failure, not an exit" \
+  jobs-unlisted 0
+_run_pgid_case "supervisor dying before it arms gets no pre-gate TERM" \
+  unarmed-death 130
+_run_pgid_case "job table misreporting a live supervisor cannot deadlock" \
+  jobs-false-exit 0
+_run_pgid_case "job table misreporting a working supervisor cannot deadlock" \
+  jobs-false-exit-after-gate 0
+_run_pgid_case "noclobber caller still detects a lost pre-gate leader" \
+  noclobber-pre-gate-leader-lost 0
+_run_pgid_case "noclobber caller still detects unpublished completion" \
+  noclobber-unpublished-completion 143
+
+# An anchor that cannot prove its parent link by PPID (no leader marker on
+# Bash 3.2, or no procfs and no usable ps) must still release once its parent
+# is dead, or a parent killed outright would leak a holding supervisor.
+_run_dead_parent_anchor() {
+  local mode="$1"
+  (
+    CHECKRUN_LIB_DIR="$CHECKRUN_TEST_ROOT/lib/checkrun"
+    # shellcheck source=../../lib/checkrun/autolint.sh
+    . "$CHECKRUN_LIB_DIR/autolint.sh"
+    _anchor_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-anchor.XXXXXX") || exit 1
+    printf '1\n' >"$_anchor_dir/hold"
+    printf '%s\n' "$$" >"$_anchor_dir/leader"
+    sh -c 'exit 0' &
+    _dead_parent=$!
+    wait "$_dead_parent"
+    _autolint_cancel_status=143
+    (
+      case "$mode" in
+        no-leader)
+          # Bash 3.2 has no BASHPID, which is when the leader marker matters.
+          unset BASHPID 2>/dev/null || :
+          command rm -f "$_anchor_dir/leader"
+          ;;
+        no-ppid)
+          # shellcheck disable=SC2329 # Invoked by the sourced hold loop.
+          _autolint_read_process_parent() { return 1; }
+          ;;
+      esac
+      _autolint_finish_parallel_supervisor "$_dead_parent" "$_anchor_dir/busy" \
+        "$_anchor_dir/hold" "$_anchor_dir/exited" "$_anchor_dir/leader"
+    ) &
+    _anchor=$!
+    _anchor_rc=1
+    for ((_attempt = 0; _attempt < 400; _attempt++)); do
+      if ! _autolint_job_is_running "$_anchor" "$_anchor_dir/jobs"; then
+        wait "$_anchor"
+        _anchor_rc=0
+        break
+      fi
+      sleep 0.01
+    done
+    [ "$_anchor_rc" -eq 0 ] || kill -KILL "$_anchor" 2>/dev/null
+    rm -rf "$_anchor_dir"
+    exit "$_anchor_rc"
+  )
+}
+
+set +e
+_run_dead_parent_anchor no-leader
+_dead_parent_rc=$?
+_run_dead_parent_anchor no-ppid
+_dead_parent_ppid_rc=$?
+set -e
+_assert_exit "anchor without a leader marker releases after parent death" 0 \
+  "$_dead_parent_rc"
+_assert_exit "anchor without a PPID probe releases after parent death" 0 \
+  "$_dead_parent_ppid_rc"
 
 set +e
 # shellcheck disable=SC2016 # This program is evaluated by the selected Bash.
