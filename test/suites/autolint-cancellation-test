@@ -363,15 +363,20 @@ case "$mode" in
     }
     _autolint_try_clean_batch() { return 1; }
     _lint_one_with_plan() {
-      printf '%s\n' "${BASHPID:-$$}" >"$root/gate-visible-worker.pid"
-      : >"$root/gate-visible-worker.ready"
+      local index=${1##*/}
+      index=${index%.plan}
+      # Each worker gets its own files. With a shared PID file, the mkdir
+      # wrapper could read it between the second worker's truncation and
+      # its write, and record an empty supervisor group.
+      printf '%s\n' "${BASHPID:-$$}" >"$root/gate-visible-worker-$index.pid"
+      : >"$root/gate-visible-worker-$index.ready"
       if [ "$mode" = gate-visible-failure-signal ]; then
         trap '' TERM
       fi
       sleep 30
     }
     mkdir() {
-      local arg rc worker group
+      local arg rc worker group ready
       "$AUTOLINT_CANCEL_REAL_MKDIR" "$@"
       rc=$?
       for arg in "$@"; do
@@ -381,10 +386,14 @@ case "$mode" in
             # is visible before returning failure. This models mkdir succeeding at the
             # filesystem boundary but reporting interruption, where exact-PID
             # cleanup would miss descendants and the validated group must win.
-            while [ ! -e "$root/gate-visible-worker.ready" ]; do
+            # A worker's ready marker follows its complete PID file.
+            while :; do
+              for ready in "$root"/gate-visible-worker-*.ready; do
+                [ -e "$ready" ] && break 2
+              done
               sleep 0.01
             done
-            IFS= read -r worker <"$root/gate-visible-worker.pid"
+            IFS= read -r worker <"${ready%.ready}.pid"
             group=$(LC_ALL=C "$AUTOLINT_CANCEL_REAL_PS" -o pgid= -p "$worker")
             group=${group//[[:space:]]/}
             printf '%s\n' "$group" >"$root/supervisor.pid"
@@ -616,7 +625,7 @@ _record_driver_state() {
   printf '%s\n' "$status" >"$root/operation-status"
   : >"$root/processes.before-exit"
   for pid_file in "$root"/anchor.pid "$root"/supervisor.pid \
-    "$root"/gate-visible-worker.pid "$root"/worker-*.pid \
+    "$root"/gate-visible-worker-*.pid "$root"/worker-*.pid \
     "$root"/backend-*.pid "$root"/planner.pid; do
     [ -f "$pid_file" ] || continue
     IFS= read -r pid <"$pid_file" || continue
@@ -873,6 +882,18 @@ def wait_for(predicate, description, seconds=6):
 def release(index):
     with (root / f"gate-{index}").open("wb", buffering=0) as gate:
         gate.write(b"x")
+
+
+def read_pid(path):
+    # A worker killed by group cancellation between creating its PID file and
+    # writing it leaves the file empty; it has nothing left to clean up.
+    text = path.read_text(encoding="ascii").strip()
+    return int(text) if text else None
+
+
+def extra_pid_paths():
+    paths = [root / "anchor.pid", *sorted(root.glob("gate-visible-worker-*.pid"))]
+    return [path for path in paths if path.is_file()]
 
 
 def backend_finished(index):
@@ -1195,10 +1216,10 @@ try:
         if worker_path.exists():
             worker_pids.append(int(worker_path.read_text(encoding="ascii")))
     owned_pids = backend_pids + worker_pids
-    for extra_pid_name in ("anchor.pid", "gate-visible-worker.pid"):
-        extra_pid_path = root / extra_pid_name
-        if extra_pid_path.exists():
-            owned_pids.append(int(extra_pid_path.read_text(encoding="ascii")))
+    for extra_pid_path in extra_pid_paths():
+        extra_pid = read_pid(extra_pid_path)
+        if extra_pid is not None:
+            owned_pids.append(extra_pid)
     if (root / "planner.pid").exists():
         owned_pids.append(int((root / "planner.pid").read_text(encoding="ascii")))
     deadline = time.monotonic() + 1
@@ -1244,15 +1265,13 @@ finally:
             os.killpg(supervisor_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    for extra_pid_name in ("anchor.pid", "gate-visible-worker.pid"):
-        extra_pid_path = root / extra_pid_name
-        if extra_pid_path.exists():
-            pid = int(extra_pid_path.read_text(encoding="ascii"))
-            if alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+    for extra_pid_path in extra_pid_paths():
+        pid = read_pid(extra_pid_path)
+        if pid is not None and alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     planner_pid_file = root / "planner.pid"
     if planner_pid_file.exists():
         planner_pid = int(planner_pid_file.read_text(encoding="ascii"))
@@ -1957,7 +1976,11 @@ set +e
   first_rc=$?
   wait "$pid" 2>/dev/null
   second_rc=$?
-  [[ "$first_rc" -eq 7 && "$second_rc" -eq 7 ]]
+  # If the child exits and Bash reaps it and drops it from the job table
+  # before `wait -n` starts, as happens under CPU load, `wait -n` finds
+  # no job and returns 127. The pool ignores that status anyway; what must
+  # hold is that the exact PID wait still returns the saved status.
+  [[ ("$first_rc" -eq 7 || "$first_rc" -eq 127) && "$second_rc" -eq 7 ]]
 ' >/dev/null 2>&1
 _wait_n_rc=$?
 set -e

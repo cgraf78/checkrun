@@ -886,9 +886,11 @@ _autolint_run_files_pool() {
     fi
 
     if [ "$in_flight" -gt 0 ]; then
-      # `wait -n` returns 127 only when there are no children to wait for.
-      # Our in_flight counter guards against that case, so any exit status
-      # here belongs to a real worker.
+      # `wait -n` is only backpressure, so its status is ignored: statuses
+      # come from the worker records. It can return 127 even with a child in
+      # flight, when Bash already reaped that worker and dropped it from its
+      # job table before this call. That worker did finish, so it still
+      # leaves the in-flight count.
       wait -n 2>/dev/null || :
       if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
         _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
