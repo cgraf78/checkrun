@@ -29,6 +29,7 @@ program	test/suites/checkrun-cli-test
 program	test/suites/ci-toolchain-test
 program	test/suites/editor-metadata-test
 program	test/suites/examples-test
+program	test/suites/harness-test
 program	test/suites/hook-performance-test
 program	test/suites/install-test
 program	test/suites/linter-probes-test

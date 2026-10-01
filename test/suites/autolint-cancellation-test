@@ -32,6 +32,13 @@ case " $_ignored_signals " in
     ;;
 esac
 unset _signal_probe _signal_reset
+# harness-test runs only this header, with signals ignored, to prove that the
+# restart above restores the defaults the scenarios below depend on. Exit
+# nonzero so that a leaked hook variable cannot turn this suite into a pass.
+if [ -n "${AUTOLINT_CANCEL_HEADER_ONLY:-}" ]; then
+  printf 'ignored=%s\n' "$_ignored_signals"
+  exit 3
+fi
 
 CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"

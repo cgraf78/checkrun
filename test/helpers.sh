@@ -10,6 +10,23 @@
 #   ...
 #   _test_summary  # prints results, exits 0 or 1
 
+# Bash sources BASH_ENV before it runs a non-interactive script, so a suite
+# run directly, rather than through test/checkrun-test, starts with the
+# developer's startup file already applied to this very shell: options such
+# as noclobber or errexit, traps and functions would then shape every
+# assertion. Unsetting BASH_ENV protects only child shells, so restart the
+# suite once without it. Variables that file exported still reach the suite;
+# run `env -u BASH_ENV` to rule those out too. ENV matters only in POSIX mode,
+# but child `sh` fixtures read it, so drop it as well.
+if [[ -n "${BASH_ENV:-}" ]]; then
+  unset BASH_ENV ENV
+  if [[ -f "$0" ]]; then
+    [[ "$-" != *x* ]] || exec "$BASH" -x "$0" "$@"
+    exec "$BASH" "$0" "$@"
+  fi
+fi
+unset ENV
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -394,14 +411,6 @@ trap _cleanup EXIT
 # ---------------------------------------------------------------------------
 # Common test setup
 # ---------------------------------------------------------------------------
-
-# Every product entry point and many fixtures are non-interactive Bash, which
-# sources BASH_ENV (and ENV in POSIX mode) at startup. Keep child shells from
-# sourcing a developer's startup file, which could add functions, traps or
-# options to the code under test. This shell already sourced it, so anything
-# that file exported still reaches them; run `env -u BASH_ENV` to rule that
-# out too.
-unset BASH_ENV ENV
 
 # Pin Checkrun's user config to an empty invocation-owned directory. Without
 # this, any suite that runs a public command without its own override reads

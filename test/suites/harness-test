@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Verify the isolation and accounting that every other suite relies on.
+
+set -o pipefail
+export NO_COLOR=1
+
+CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$CHECKRUN_TEST_DIR/helpers.sh"
+
+echo "=== suite isolation ==="
+
+fixture=$(_tmpdir)
+
+# A suite started with a hostile startup file and exported knobs must run as
+# if neither existed. The probe prints the state each part of helpers.sh is
+# responsible for, so deleting any part of it fails one assertion below.
+cat >"$fixture/startup.bash" <<'EOF'
+printf 'sourced\n' >>"$CHECKRUN_HARNESS_STARTUP_LOG"
+set -C
+hostile_function() { :; }
+EOF
+cat >"$fixture/probe-suite" <<'EOF'
+#!/usr/bin/env bash
+. "$CHECKRUN_HARNESS_HELPERS"
+printf 'args=%s\n' "$*"
+case "$-" in
+  *C*) printf 'noclobber=on\n' ;;
+  *) printf 'noclobber=off\n' ;;
+esac
+if declare -F hostile_function >/dev/null; then
+  printf 'startup-function=present\n'
+else
+  printf 'startup-function=absent\n'
+fi
+printf 'BASH_ENV=%s\n' "${BASH_ENV-unset}"
+printf 'ENV=%s\n' "${ENV-unset}"
+for name in CHECKRUN_SCHEMA_ASSOCIATIONS CHECKRUN_REGISTRY \
+  CHECKRUN_AUTOLINT_JOBS CHECKRUN_AUTOLINT_REPORT CHECKRUN_SCHEMA_LINT \
+  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP; do
+  printf '%s=%s\n' "$name" "${!name-unset}"
+done
+if [[ "$CHECKRUN_CONFIG_DIR" != /hostile && -d "$CHECKRUN_CONFIG_DIR" ]]; then
+  printf 'config=private\n'
+else
+  printf 'config=%s\n' "$CHECKRUN_CONFIG_DIR"
+fi
+# A child shell must not source the startup file again.
+bash -c ':'
+EOF
+chmod +x "$fixture/probe-suite"
+
+: >"$fixture/startup.log"
+probe_output=$(CHECKRUN_HARNESS_HELPERS="$CHECKRUN_TEST_DIR/helpers.sh" \
+  CHECKRUN_HARNESS_STARTUP_LOG="$fixture/startup.log" \
+  BASH_ENV="$fixture/startup.bash" \
+  ENV="$fixture/startup.bash" \
+  CHECKRUN_SCHEMA_ASSOCIATIONS=/hostile \
+  CHECKRUN_REGISTRY=/hostile \
+  CHECKRUN_AUTOLINT_JOBS=99 \
+  CHECKRUN_AUTOLINT_REPORT=/hostile \
+  CHECKRUN_SCHEMA_LINT=/hostile \
+  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP=/hostile \
+  CHECKRUN_CONFIG_DIR=/hostile \
+  "$fixture/probe-suite" "first arg" second)
+_assert_exit "isolation: probe suite exits 0" 0 "$?"
+_assert_eq "isolation: restart preserves suite arguments" \
+  "args=first arg second" "$(sed -n '/^args=/p' <<<"$probe_output")"
+_assert_contains "isolation: startup options do not reach the suite" \
+  "noclobber=off" "$probe_output"
+_assert_contains "isolation: startup functions do not reach the suite" \
+  "startup-function=absent" "$probe_output"
+_assert_contains "isolation: BASH_ENV is cleared" "BASH_ENV=unset" "$probe_output"
+_assert_contains "isolation: ENV is cleared" "ENV=unset" "$probe_output"
+for name in CHECKRUN_SCHEMA_ASSOCIATIONS CHECKRUN_REGISTRY \
+  CHECKRUN_AUTOLINT_JOBS CHECKRUN_AUTOLINT_REPORT CHECKRUN_SCHEMA_LINT \
+  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP; do
+  _assert_contains "isolation: $name is dropped" "$name=unset" "$probe_output"
+done
+_assert_contains "isolation: config directory is private" \
+  "config=private" "$probe_output"
+_assert_eq "isolation: startup file is sourced only by the first start" \
+  "1" "$(wc -l <"$fixture/startup.log" | tr -d '[:space:]')"
+
+# Suites that do not source helpers.sh rely on test/checkrun-test alone to
+# start them without the startup file. Run the real aggregate over a copy
+# whose only suite is a probe that does not source helpers.sh.
+mkdir -p "$fixture/aggregate/suites"
+cp "$CHECKRUN_TEST_DIR/checkrun-test" "$CHECKRUN_TEST_DIR/run-suites" \
+  "$fixture/aggregate/"
+cat >"$fixture/aggregate/suites/probe-test" <<'EOF'
+#!/usr/bin/env bash
+printf 'BASH_ENV=%s\n' "${BASH_ENV-unset}" >"$CHECKRUN_HARNESS_PROBE_LOG"
+EOF
+chmod +x "$fixture/aggregate/suites/probe-test"
+: >"$fixture/aggregate-startup.log"
+CHECKRUN_HARNESS_STARTUP_LOG="$fixture/aggregate-startup.log" \
+  CHECKRUN_HARNESS_PROBE_LOG="$fixture/aggregate-probe.log" \
+  BASH_ENV="$fixture/startup.bash" \
+  "$fixture/aggregate/checkrun-test" >/dev/null 2>&1
+_assert_exit "aggregate: runs the probe suite" 0 "$?"
+_assert_eq "aggregate: suites start without BASH_ENV" "BASH_ENV=unset" \
+  "$(cat "$fixture/aggregate-probe.log" 2>/dev/null)"
+_assert_eq "aggregate: only the aggregate itself sources the startup file" \
+  "1" "$(wc -l <"$fixture/aggregate-startup.log" | tr -d '[:space:]')"
+
+echo "=== cancellation suite signal restart ==="
+
+# The cancellation scenarios need SIGINT and SIGTERM at their default action,
+# which a background or nohup start can withhold. Run only that suite's header
+# with all three ignored: the restart must restore INT and TERM, and leave
+# HUP ignored because `nohup` asked for that. The header-only mode exits 3 so
+# that a leaked hook variable fails that suite instead of passing it empty.
+header_output=$(env -u AUTOLINT_CANCEL_SIGNAL_RESET \
+  AUTOLINT_CANCEL_HEADER_ONLY=1 python3 -I -c '
+import os, signal, sys
+for name in ("SIGHUP", "SIGINT", "SIGTERM"):
+    signal.signal(getattr(signal, name), signal.SIG_IGN)
+os.execv(sys.argv[1], sys.argv[1:])
+' "$BASH" "$CHECKRUN_TEST_DIR/suites/autolint-cancellation-test")
+_assert_exit "signal restart: header-only mode exits 3" 3 "$?"
+_assert_eq "signal restart: only the requested HUP stays ignored" \
+  "ignored=SIGHUP" "$header_output"
+
+echo "=== result accounting ==="
+
+cat >"$fixture/summary-suite" <<'EOF'
+#!/usr/bin/env bash
+. "$CHECKRUN_HARNESS_HELPERS"
+for result in "$@"; do
+  "_$result" "$result case"
+done
+_test_summary
+EOF
+chmod +x "$fixture/summary-suite"
+
+_summary_of() {
+  # Styled output would hide the plain summary line this parses.
+  CHECKRUN_HARNESS_HELPERS="$CHECKRUN_TEST_DIR/helpers.sh" TEST_STYLE=0 \
+    "$fixture/summary-suite" "$@" 2>&1 | sed -n 's/^Results: //p'
+  return "${PIPESTATUS[0]}"
+}
+
+summary=$(_summary_of pass skip)
+_assert_exit "accounting: a skip alone does not fail the suite" 0 "$?"
+_assert_eq "accounting: a skip is reported, not counted as a pass" \
+  "1 passed, 0 failed, 1 skipped" "$summary"
+summary=$(_summary_of pass)
+_assert_eq "accounting: the summary omits skips when there are none" \
+  "1 passed, 0 failed" "$summary"
+summary=$(_summary_of skip fail)
+_assert_exit "accounting: a skip does not hide a failure" 1 "$?"
+_assert_eq "accounting: failures and skips are both reported" \
+  "0 passed, 1 failed, 1 skipped" "$summary"
+
+_test_summary
