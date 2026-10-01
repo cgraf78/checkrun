@@ -902,13 +902,61 @@ def alive(pid):
     return process_state_is_live(process_state(pid))
 
 
-def wait_for(predicate, description, seconds=6):
+def observed_paths():
+    # A failed wait reports what the fixture published, which tells startup
+    # that is merely slow apart from a path that never started (for example,
+    # a sequential fallback that will not start the second backend).
+    paths = []
+    try:
+        for path in root.rglob("*"):
+            paths.append(str(path.relative_to(root)))
+    except OSError:
+        pass
+    return sorted(paths)
+
+
+def driver_exit_status():
+    # Peek without reaping. Reaping here would free the driver's PID while a
+    # later step may still signal it, and `Popen` can still collect it.
+    if not hasattr(os, "waitid"):
+        # Without a non-reaping probe, rely on the deadline alone.
+        return None
+    try:
+        info = os.waitid(
+            os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+        )
+    except ChildProcessError:
+        return process.returncode
+    return None if info is None else info.si_status
+
+
+def wait_for(predicate, description, seconds=20):
+    # These waits are preconditions, not latency assertions; cancellation
+    # latency has its own deadlines (`signal_started`, the direct-path
+    # `process.wait`, and the `communicate` timeouts). Reaching a marker can
+    # take several interpreter startups, which took about 5 s at a load
+    # average of 4x the CPU count and has exceeded the former 6 s bound.
+    # Bound a real hang generously instead, and fail at once when the driver
+    # exits: every marker comes from the driver or a descendant it is still
+    # waiting for, so none can appear after that.
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+    while True:
         if predicate():
             return
+        status = driver_exit_status()
+        if status is not None:
+            if predicate():
+                return
+            raise RuntimeError(
+                f"driver exited {status} before {description}; "
+                f"observed {observed_paths()!r}"
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"timed out after {seconds} s waiting for {description}; "
+                f"observed {observed_paths()!r}"
+            )
         time.sleep(0.02)
-    raise RuntimeError(f"timed out waiting for {description}")
 
 
 def release(index):
@@ -2001,6 +2049,24 @@ _assert_eq "held anchor backs off to a 1 s cap after a few seconds" \
     END { printf "cap=%s before-cap-ok=%d", max, (before >= 3 && before <= 10) }
   ')"
 
+# The hold runs from the supervisor's EXIT trap, which keeps errexit active
+# under a `set -e` caller. A failing `sleep` at any tier of the pause must
+# not abort the hold, which would release the pinned identity early.
+set +e
+# shellcheck disable=SC2016 # This program is evaluated by the selected Bash.
+_hold_errexit=$("$BASH" -ec '
+  . "$1"
+  sleep() { return 1; }
+  _autolint_hold_polls=0
+  for ((poll = 0; poll < 200; poll++)); do
+    _autolint_hold_pause
+  done
+  printf "survived=%s\n" "$_autolint_hold_polls"
+' _ "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh" 2>&1)
+set -e
+_assert_eq "held anchor survives a failing sleep under errexit" \
+  "survived=200" "$_hold_errexit"
+
 # A supervisor whose parent is stopped during validation waits at a closed
 # gate just as long. Drive the real gate wait with a recording `sleep` that
 # withdraws the hold after 400 polls, which the wait treats as an abort. The
@@ -2049,17 +2115,30 @@ set +e
   if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
     exit 1
   fi
-  (exit 7) &
-  pid=$!
-  wait -n 2>/dev/null
-  first_rc=$?
-  wait "$pid" 2>/dev/null
-  second_rc=$?
   # If the child exits and Bash reaps it and drops it from the job table
-  # before `wait -n` starts, as happens under CPU load, `wait -n` finds
-  # no job and returns 127. The pool ignores that status anyway; what must
-  # hold is that the exact PID wait still returns the saved status.
-  [[ ("$first_rc" -eq 7 || "$first_rc" -eq 127) && "$second_rc" -eq 7 ]]
+  # before `wait -n` starts, as happens under CPU load, `wait -n` finds no
+  # job and returns 127, and the exact wait below proves nothing about a
+  # status that `wait -n` consumed. Retry with a child that lives longer
+  # each time, so `wait -n` is already blocked when it exits, and fail if no
+  # attempt ever reaches that state.
+  for delay in 0 0.01 0.05 0.1 0.2 0.5 1; do
+    (
+      [ "$delay" = 0 ] || sleep "$delay"
+      exit 7
+    ) &
+    pid=$!
+    wait -n 2>/dev/null
+    first_rc=$?
+    wait "$pid" 2>/dev/null
+    second_rc=$?
+    [ "$second_rc" -eq 7 ] || exit 1
+    case "$first_rc" in
+      7) exit 0 ;;
+      127) ;;
+      *) exit 1 ;;
+    esac
+  done
+  exit 2
 ' >/dev/null 2>&1
 _wait_n_rc=$?
 set -e
