@@ -3,10 +3,35 @@
 
 set -o pipefail
 export NO_COLOR=1
-# Every fixture below is a fresh non-interactive Bash (or a Python harness
-# that launches one). An inherited BASH_ENV or ENV would be sourced into each
-# of them and could install traps, functions or options under test.
-unset BASH_ENV ENV
+
+# Bash can neither trap nor reset a signal that was ignored when it started,
+# and every fixture inherits that disposition. A non-interactive shell starts
+# an asynchronous command with SIGINT ignored, and `nohup` ignores SIGHUP, so
+# those scenarios would never reach their handlers. Python reports an
+# inherited SIG_IGN; a failed probe prints nothing and changes nothing.
+_signal_probe='import signal
+print(" ".join(name for name in ("SIGHUP", "SIGINT", "SIGTERM")
+               if signal.getsignal(getattr(signal, name)) is signal.SIG_IGN))'
+_signal_reset='import os, signal, sys
+for name in ("SIGINT", "SIGTERM", "SIGPIPE", "SIGXFSZ"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])'
+_ignored_signals=$(python3 -I -c "$_signal_probe" 2>/dev/null) || _ignored_signals=""
+case " $_ignored_signals " in
+  *" SIGINT "* | *" SIGTERM "*)
+    # Nothing asked for INT or TERM to be ignored, so re-exec once with the
+    # default action. Python itself ignores SIGPIPE and SIGXFSZ, so reset
+    # those as well; an ignored HUP stays ignored, since `nohup` asked for it.
+    if [ -z "${AUTOLINT_CANCEL_SIGNAL_RESET:-}" ]; then
+      export AUTOLINT_CANCEL_SIGNAL_RESET=1
+      # The new shell would source the startup file again.
+      unset BASH_ENV ENV
+      exec python3 -I -c "$_signal_reset" "$BASH" "${BASH_SOURCE[0]}" "$@"
+    fi
+    ;;
+esac
+unset _signal_probe _signal_reset
 
 CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
@@ -1390,7 +1415,12 @@ _run_case "one-file hot path stays direct" one
 _run_case "jobs=1 hot path stays direct" jobs-one
 _run_case "parent-only TERM stays prompt during one-file planning" direct-one-signal
 _run_case "parent-only TERM stays prompt during jobs=1 lint" direct-jobs-one-signal
-_run_case "parent-only HUP cancels the complete backend group" signal HUP
+case " $_ignored_signals " in
+  *" SIGHUP "*)
+    _pass "parent-only HUP cancels the complete backend group (skipped: SIGHUP ignored at start)"
+    ;;
+  *) _run_case "parent-only HUP cancels the complete backend group" signal HUP ;;
+esac
 _run_case "parent-only INT cancels the complete backend group" signal INT
 _run_case "parent-only TERM cancels the complete backend group" signal TERM
 _run_case "first signal wins while stubborn backends escalate" repeat TERM
