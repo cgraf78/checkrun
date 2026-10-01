@@ -888,6 +888,45 @@ exit 0
 SH
 chmod +x "$_driver"
 
+# Cleanup helper shared by the harness and its own test below.
+cat >"$_fixture_root/group_signal.py" <<'PY'
+import os
+import subprocess
+
+
+def group_has_live_member(pgid):
+    result = subprocess.run(
+        ["ps", "-A", "-o", "pgid=", "-o", "stat="],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == str(pgid) and not fields[1].startswith("Z"):
+            return True
+    return False
+
+
+def signal_group_if_present(pgid, sig, killpg=os.killpg):
+    """Signal a test-owned process group that may already be gone.
+
+    Linux delivers a group signal even when every member is an unreaped
+    zombie. macOS instead fails such a group with EPERM rather than ESRCH
+    (XNU's killpg returns EPERM when it finds only zombies), which is what an
+    orphaned child that exits just before cleanup leaves behind. Treat that
+    exactly like ESRCH, but only once the process table confirms that no live
+    member remains; any other EPERM is still an error.
+    """
+    try:
+        killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if group_has_live_member(pgid):
+            raise
+PY
+
 _harness="$_fixture_root/harness.py"
 cat >"$_harness" <<'PY'
 #!/usr/bin/env python3
@@ -898,6 +937,8 @@ import shutil
 import subprocess
 import sys
 import time
+
+from group_signal import signal_group_if_present
 
 
 shell, driver, impl, tool_bin, root_arg, scenario, signal_name = sys.argv[1:]
@@ -1306,11 +1347,9 @@ try:
     if direct_signal:
         # A direct-path child retains the stdout/stderr pipe after its parent
         # dies. Wait for the driver itself first (above), then clean up that
-        # test-owned process group before draining pipes.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        # test-owned process group before draining pipes. Its last member can
+        # be a child that exits just now and stays a zombie until reaped.
+        signal_group_if_present(process.pid, signal.SIGKILL)
         stdout, stderr = process.communicate(timeout=2)
     else:
         try:
@@ -1582,10 +1621,7 @@ except BaseException as error:
     errors.append(str(error))
 finally:
     if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        signal_group_if_present(process.pid, signal.SIGKILL)
     for pid_file in root.glob("backend-*.pid"):
         pid = int(pid_file.read_text(encoding="ascii"))
         if alive(pid):
@@ -1596,10 +1632,7 @@ finally:
     supervisor_file = root / "supervisor.pid"
     if scenario == "gate-visible-failure" and supervisor_file.exists():
         supervisor_group = int(supervisor_file.read_text(encoding="ascii"))
-        try:
-            os.killpg(supervisor_group, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        signal_group_if_present(supervisor_group, signal.SIGKILL)
     for extra_pid_path in extra_pid_paths():
         pid = read_pid(extra_pid_path)
         if pid is not None and alive(pid):
@@ -1625,6 +1658,42 @@ if errors:
     raise SystemExit(1)
 PY
 chmod +x "$_harness"
+
+# Group cleanup must accept a group left with only zombies, which macOS
+# refuses with EPERM, without hiding EPERM from a group that still runs.
+# Build both groups for real and model the macOS refusal with an injected
+# killpg, since this host may deliver the signal instead.
+set +e
+_group_signal_result=$(python3 -I -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import os, signal, subprocess, time
+from group_signal import group_has_live_member, signal_group_if_present
+
+def refuse(_pgid, _sig):
+    raise PermissionError(1, "Operation not permitted")
+
+zombie = subprocess.Popen(["true"], start_new_session=True)
+deadline = time.monotonic() + 10
+while group_has_live_member(zombie.pid) and time.monotonic() < deadline:
+    time.sleep(0.01)
+signal_group_if_present(zombie.pid, signal.SIGKILL, killpg=refuse)
+signal_group_if_present(zombie.pid, signal.SIGKILL)
+zombie.wait()
+live = subprocess.Popen(["sleep", "30"], start_new_session=True)
+try:
+    signal_group_if_present(live.pid, signal.SIGKILL, killpg=refuse)
+    print("live-eperm-hidden")
+except PermissionError:
+    print("live-eperm-raised")
+finally:
+    live.kill()
+    live.wait()
+print("zombie-group-accepted")
+' "$_fixture_root" 2>&1)
+set -e
+_assert_eq "group cleanup accepts a zombie-only group but not a live one" \
+  $'live-eperm-raised\nzombie-group-accepted' "$_group_signal_result"
 
 _run_case() {
   local description="$1" scenario="$2" signal_name="${3:-TERM}" signal_label root
