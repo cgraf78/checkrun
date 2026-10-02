@@ -10,8 +10,26 @@
 #   ...
 #   _test_summary  # prints results, exits 0 or 1
 
+# Bash sources BASH_ENV before it runs a non-interactive script, so a suite
+# run directly, rather than through test/checkrun-test, starts with the
+# developer's startup file already applied to this very shell: options such
+# as noclobber or errexit, traps and functions would then shape every
+# assertion. Unsetting BASH_ENV protects only child shells, so restart the
+# suite once without it. Variables that file exported still reach the suite;
+# run `env -u BASH_ENV` to rule those out too. ENV matters only in POSIX mode,
+# but child `sh` fixtures read it, so drop it as well.
+if [[ -n "${BASH_ENV:-}" ]]; then
+  unset BASH_ENV ENV
+  if [[ -f "$0" ]]; then
+    [[ "$-" != *x* ]] || exec "$BASH" -x "$0" "$@"
+    exec "$BASH" "$0" "$@"
+  fi
+fi
+unset ENV
+
 PASS=0
 FAIL=0
+SKIP=0
 CLEANUP_DIRS=()
 
 # Mark every suite, including suites run directly, so code that can reach
@@ -54,6 +72,16 @@ _pass() {
     _test_style green "  ✓ $1"
   else
     echo "  PASS: $1"
+  fi
+}
+# Record a case the host cannot exercise. It counts toward neither total, so
+# a skipped assertion can never read as a pass.
+_skip() {
+  SKIP=$((SKIP + 1))
+  if $_TEST_PRETTY; then
+    _test_style yellow "  - $1"
+  else
+    echo "  SKIP: $1"
   fi
 }
 _fail() {
@@ -384,14 +412,6 @@ trap _cleanup EXIT
 # Common test setup
 # ---------------------------------------------------------------------------
 
-# Every product entry point and many fixtures are non-interactive Bash, which
-# sources BASH_ENV (and ENV in POSIX mode) at startup. Keep child shells from
-# sourcing a developer's startup file, which could add functions, traps or
-# options to the code under test. This shell already sourced it, so anything
-# that file exported still reaches them; run `env -u BASH_ENV` to rule that
-# out too.
-unset BASH_ENV ENV
-
 # Pin Checkrun's user config to an empty invocation-owned directory. Without
 # this, any suite that runs a public command without its own override reads
 # the developer's live ~/.config/checkrun (ignore lists, tool fallbacks,
@@ -610,20 +630,22 @@ _require_compatible_libc() {
 # ---------------------------------------------------------------------------
 
 _test_summary() {
+  local results="$PASS passed, $FAIL failed"
+  [[ $SKIP -eq 0 ]] || results="$results, $SKIP skipped"
   echo ""
   if $_TEST_PRETTY; then
     local summary_color=green
     [[ $FAIL -ne 0 ]] && summary_color=red
     _test_style "$summary_color" "────────────────────────────────"
     if [[ $FAIL -eq 0 ]]; then
-      _test_style green "✓ Results: $PASS passed, $FAIL failed"
+      _test_style green "✓ Results: $results"
     else
-      _test_style red "✗ Results: $PASS passed, $FAIL failed"
+      _test_style red "✗ Results: $results"
     fi
     _test_style "$summary_color" "────────────────────────────────"
   else
     echo "================================"
-    echo "Results: $PASS passed, $FAIL failed"
+    echo "Results: $results"
     echo "================================"
   fi
   [[ $FAIL -eq 0 ]] && exit 0 || exit 1

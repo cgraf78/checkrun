@@ -746,6 +746,227 @@ if [[ "$pool_supported" == 1 ]]; then
     0 "$large_allocation_count"
   _assert_eq "nonempty-plan batch: pool invokes no per-worker cleanup commands" \
     0 "$large_cleanup_count"
+
+  # Workers that finish together while another still runs can leave Bash's
+  # job table before `wait -n` reports them: when `wait -n` returns one
+  # finished job, or when the shell forks, Bash may drop other jobs it has
+  # already reaped, and no later `wait -n` returns those. Model that
+  # schedule exactly: workers 0 and 1 exit at once, and the first `wait -n`
+  # returns only after Bash no longer lists either as running, as if it had
+  # reported one and dropped the other. A pool that retires one worker per
+  # `wait -n` then still counts three in flight, starts only worker 3, and
+  # blocks, while workers 2 and 3 wait for worker 4. A pool that recounts
+  # its live workers starts workers 3 and 4 together. The give-up file only
+  # bounds the failing case; the passing case never waits for it.
+  slots_plan_dir="$td/slots-plans"
+  slots_state="$td/slots-state"
+  mkdir -p "$slots_plan_dir" "$slots_state"
+  slots_files=()
+  for ((index = 0; index < 5; index++)); do
+    printf 'step\n' >"$slots_plan_dir/$index.plan"
+    slots_files+=("$td/slots-$index.txt")
+  done
+  CHECKRUN_SLOTS_STATE="$slots_state" \
+    CHECKRUN_REAL_SLEEP="$(command -v sleep)" \
+    PATH="$runner_path" \
+    bash -c '
+      . "$1"
+      plan_dir=$2
+      shift 2
+      state=$CHECKRUN_SLOTS_STATE
+      _lint_one_with_plan() {
+        local plan=${1##*/}
+        plan=${plan%.plan}
+        printf "%s\n" "$BASHPID" >"$state/pid-$plan"
+        : >"$state/started-$plan"
+        case "$plan" in
+          2 | 3)
+            while [ ! -e "$state/started-4" ] && [ ! -e "$state/give-up" ]; do
+              "$CHECKRUN_REAL_SLEEP" 0.01
+            done
+            [ -e "$state/started-4" ] && : >"$state/overlapped-$plan"
+            ;;
+        esac
+        return 0
+      }
+      first_wait=1
+      wait() {
+        local early pid line running early_pids
+        if [ "${1:-}" != -n ] || [ "$first_wait" -ne 1 ]; then
+          builtin wait "$@"
+          return
+        fi
+        first_wait=0
+        # The external sleep lets Bash reap exited workers.
+        while [ ! -e "$state/give-up" ]; do
+          "$CHECKRUN_REAL_SLEEP" 0.01
+          running=" "
+          jobs -rp >|"$state/running"
+          while IFS= read -r line; do
+            running="$running$line "
+          done <"$state/running"
+          early_pids=""
+          for early in 0 1; do
+            pid=""
+            [ -s "$state/pid-$early" ] && IFS= read -r pid <"$state/pid-$early"
+            case "$pid:$running" in
+              :* | *" $pid "*) continue 2 ;;
+            esac
+            early_pids="$early_pids $pid"
+          done
+          # Consume both reports, as if `wait -n` had returned one and Bash
+          # had dropped the other, so neither is left for a later call.
+          builtin wait $early_pids 2>/dev/null
+          break
+        done
+        return 0
+      }
+      _autolint_run_files_pool 3 "$plan_dir" "$@"
+    ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
+    "$slots_plan_dir" "${slots_files[@]}" >/dev/null 2>&1 &
+  slots_runner_pid=$!
+  for ((index = 0; index < 1000; index++)); do
+    [[ -e "$slots_state/started-4" ]] && break
+    kill -0 "$slots_runner_pid" 2>/dev/null || break
+    sleep 0.01
+  done
+  : >"$slots_state/give-up"
+  wait "$slots_runner_pid"
+  rc=$?
+  _assert_exit "simultaneous completions: pool runner exits 0" 0 "$rc"
+  _assert_eq "simultaneous completions: pool refills both freed slots" \
+    "overlapped-2 overlapped-3" \
+    "$(cd "$slots_state" && echo overlapped-*)"
+
+  # A worker can also finish between the pool's job snapshot and its
+  # `wait -n`. That is safe only while nothing in between drops the reaped
+  # job, and in a `bash -c` caller such as this one even a compound array
+  # assignment does. Hold the window open after the real snapshot with a
+  # fork-free spin until worker 0 has finished, plus a margin for Bash to
+  # reap it. Workers 1 and 2 wait for worker 3, which only a refill can
+  # start. If worker 0 is slower than the margin, it finishes during
+  # `wait -n` instead and the case passes without exercising the window.
+  window_plan_dir="$td/window-plans"
+  window_state="$td/window-state"
+  mkdir -p "$window_plan_dir" "$window_state"
+  window_files=()
+  for ((index = 0; index < 4; index++)); do
+    printf 'step\n' >"$window_plan_dir/$index.plan"
+    window_files+=("$td/window-$index.txt")
+  done
+  CHECKRUN_WINDOW_STATE="$window_state" \
+    CHECKRUN_REAL_SLEEP="$(command -v sleep)" \
+    PATH="$runner_path" \
+    bash -c '
+      . "$1"
+      plan_dir=$2
+      shift 2
+      state=$CHECKRUN_WINDOW_STATE
+      real_live_jobs=$(declare -f _autolint_live_jobs)
+      eval "_real_live_jobs${real_live_jobs#_autolint_live_jobs}"
+      window_spins=0
+      _autolint_live_jobs() {
+        _real_live_jobs "$@" || return
+        [ ! -e "$state/finished-0" ] || return 0
+        while [ ! -e "$state/finished-0" ] && [ "$window_spins" -lt 5000000 ]; do
+          window_spins=$((window_spins + 1))
+        done
+        for ((window_spins = 0; window_spins < 200000; window_spins++)); do :; done
+      }
+      _lint_one_with_plan() {
+        local plan=${1##*/}
+        plan=${plan%.plan}
+        : >"$state/started-$plan"
+        case "$plan" in
+          0)
+            "$CHECKRUN_REAL_SLEEP" 0.1
+            : >"$state/finished-0"
+            ;;
+          1 | 2)
+            while [ ! -e "$state/started-3" ] && [ ! -e "$state/give-up" ]; do
+              "$CHECKRUN_REAL_SLEEP" 0.01
+            done
+            [ -e "$state/started-3" ] && : >"$state/overlapped-$plan"
+            ;;
+        esac
+        return 0
+      }
+      _autolint_run_files_pool 3 "$plan_dir" "$@"
+    ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
+    "$window_plan_dir" "${window_files[@]}" >/dev/null 2>&1 &
+  window_runner_pid=$!
+  for ((index = 0; index < 1000; index++)); do
+    [[ -e "$window_state/started-3" ]] && break
+    kill -0 "$window_runner_pid" 2>/dev/null || break
+    sleep 0.01
+  done
+  : >"$window_state/give-up"
+  wait "$window_runner_pid"
+  rc=$?
+  _assert_exit "completion after snapshot: pool runner exits 0" 0 "$rc"
+  _assert_eq "completion after snapshot: pool refills the freed slot" \
+    "overlapped-1 overlapped-2" \
+    "$(cd "$window_state" && echo overlapped-*)"
+
+  # `jobs` reports success even when its output is lost, as on a full TMPDIR.
+  # A pool that trusted that empty listing would count every worker as
+  # finished and start them all at once. Point the snapshot at /dev/full,
+  # where every write fails, and require the cap to hold and the run to end.
+  if [[ -w /dev/full ]]; then
+    full_plan_dir="$td/full-plans"
+    full_state="$td/full-state"
+    mkdir -p "$full_plan_dir" "$full_state"
+    ln -s /dev/full "$full_plan_dir/.live-jobs"
+    full_files=()
+    for ((index = 0; index < 6; index++)); do
+      printf 'step\n' >"$full_plan_dir/$index.plan"
+      full_files+=("$td/full-$index.txt")
+    done
+    CHECKRUN_FULL_STATE="$full_state" \
+      CHECKRUN_REAL_SLEEP="$(command -v sleep)" \
+      PATH="$runner_path" \
+      bash -c '
+        . "$1"
+        plan_dir=$2
+        shift 2
+        state=$CHECKRUN_FULL_STATE
+        _lint_one_with_plan() {
+          local plan=${1##*/} marker running=0
+          plan=${plan%.plan}
+          printf "1\n" >"$state/run-$plan"
+          for marker in "$state"/run-*; do
+            [ -s "$marker" ] && running=$((running + 1))
+          done
+          printf "%s\n" "$running" >"$state/peak-$plan"
+          "$CHECKRUN_REAL_SLEEP" 0.2
+          : >"$state/run-$plan"
+        }
+        _autolint_run_files_pool 2 "$plan_dir" "$@"
+      ' _ "$CHECKRUN_REPO_ROOT/lib/checkrun/autolint.sh" \
+      "$full_plan_dir" "${full_files[@]}" >/dev/null 2>&1 &
+    full_runner_pid=$!
+    for ((index = 0; index < 1000; index++)); do
+      kill -0 "$full_runner_pid" 2>/dev/null || break
+      sleep 0.01
+    done
+    # Signal only a runner that was still alive at the last check: once Bash
+    # has reaped it, its PID can belong to another process.
+    ((index < 1000)) || kill -KILL "$full_runner_pid" 2>/dev/null
+    wait "$full_runner_pid"
+    rc=$?
+    full_peak=0
+    for marker in "$full_state"/peak-*; do
+      [[ -s "$marker" ]] || continue
+      value=$(<"$marker")
+      ((value > full_peak)) && full_peak=$value
+    done
+    _assert_exit "lost job snapshot: pool runner completes" 0 "$rc"
+    _assert_eq "lost job snapshot: pool keeps the worker cap" \
+      "started=6 peak-within-cap=1" \
+      "started=$(cd "$full_state" && find . -name 'peak-*' | wc -l | tr -d '[:space:]') peak-within-cap=$((full_peak <= 2))"
+  else
+    _skip "lost job snapshot: pool keeps the worker cap (no /dev/full)"
+  fi
 else
   echo "  - skipping nonempty pool-runner assertions (wait -n unavailable)"
 fi

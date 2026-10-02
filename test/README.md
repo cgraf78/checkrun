@@ -29,6 +29,9 @@ timing- and signal-sensitive `autolint-cancellation-test`,
 - `manpage-test` verifies every PATH-visible command has a manual page.
 - `runner-test` covers `test/run-suites` result ordering, status preservation,
   and descendant cleanup.
+- `harness-test` covers the isolation every suite relies on (a restart without
+  the developer's `BASH_ENV`, dropped `CHECKRUN_*` knobs, the cancellation
+  suite's signal restart) and how `_skip` results appear in the summary.
 - `ci-toolchain-test` validates the CI `mise` lock and the pinned
   `cgraf78/actions` workflow references.
 - `hook-performance-test` protects the process count and coarse p95 latency of

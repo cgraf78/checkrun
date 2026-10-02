@@ -168,6 +168,10 @@ _lint_one_with_plan() {
     IFS= read -r -d '' adapter &&
     IFS= read -r -d '' config_source &&
     IFS= read -r -d '' config_path; do
+    # A supervisor that runs plans itself handles a cancellation signal only
+    # once the current linter exits. Start no further step after that: the
+    # step would receive no TERM and would only be KILLed when the grace ends.
+    [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
     _checkrun_path_dir dir "$path"
     _lint_dispatch "$adapter" "$path" "$filetype" "$step_phase" "$config_source" "$config_path" "$dir"
     tool_rc=$?
@@ -733,6 +737,16 @@ _autolint_reap_pids() {
     # later terminal-group signals from interrupting these exact waits so the
     # supervisor's exit marker means every direct worker has been reaped.
     trap '' HUP INT TERM
+    # Workers outlive TERM until their linters exit, so these waits last as
+    # long as the slowest linter. A signal sent to the group directly, not to
+    # the parent, is known to the parent only through this record, which lets
+    # it start the bounded grace and KILL now rather than after the exit
+    # marker. Failure only delays that to the exit marker, as before. A plan
+    # the supervisor runs in its own foreground has no such record: there, as
+    # before, a direct group signal waits for that linter.
+    [ -z "${_autolint_cancelling_file:-}" ] ||
+      printf '%s\n' "$_autolint_cancel_status" 2>/dev/null \
+        >"$_autolint_cancelling_file" || :
   fi
   for pid in "$@"; do
     [ -n "$pid" ] || continue
@@ -771,6 +785,9 @@ _autolint_run_file_batch() {
     stdout_file="$plan_dir/$global_index.stdout"
     stderr_file="$plan_dir/$global_index.stderr"
     (
+      # See _autolint_run_files_pool: outlive a cancellation TERM until the
+      # foreground linter exits, then stop.
+      trap 'exit 143' TERM
       _lint_one_with_plan "$plan_dir/$global_index.plan"
     ) >"$stdout_file" 2>"$stderr_file" &
     pid=$!
@@ -824,6 +841,27 @@ _autolint_supports_pool() {
   return 1
 }
 
+_autolint_live_jobs() {
+  local snapshot="$1" line live=" " complete=0
+  # List the jobs that have not terminated, as " pid pid ... ", so a caller
+  # can match exact PIDs. A redirected builtin forks nothing; the snapshot
+  # lives in invocation-owned scratch, so cleanup needs no extra command.
+  # `jobs` reports success even when its output cannot be written, and a
+  # truncated listing would make running workers look finished, so accept
+  # the snapshot only with its terminator, as `_autolint_job_is_running` does.
+  { jobs -rp && jobs -sp && printf '%s\n' end; } 2>/dev/null >|"$snapshot" ||
+    return 1
+  while IFS= read -r line; do
+    if [ "$line" = end ]; then
+      complete=1
+      break
+    fi
+    live="$live$line "
+  done <"$snapshot"
+  [ "$complete" -eq 1 ] || return 1
+  REPLY=$live
+}
+
 _autolint_run_files_pool() {
   # Pool-style: maintain up to ${jobs} workers in flight. When any worker
   # finishes (via `wait -n`), spawn the next file immediately rather than
@@ -840,8 +878,8 @@ _autolint_run_files_pool() {
   shift 2
   local -a files=("$@")
   local n=${#files[@]}
-  local -a pids=() stdouts=() stderrs=()
-  local rc=0 file_rc i next=0 in_flight=0 stdout_file stderr_file
+  local -a pids=() stdouts=() stderrs=() active=()
+  local rc=0 file_rc i next=0 in_flight=0 stdout_file stderr_file live
   local REPLY=""
 
   # Spawn-and-reap loop. `wait -n` blocks until any one child finishes; its
@@ -859,6 +897,16 @@ _autolint_run_files_pool() {
       stdout_file="$plan_dir/$next.stdout"
       stderr_file="$plan_dir/$next.stderr"
       (
+        # Cancellation TERMs the whole private group, linters included, then
+        # gives them a short grace before KILL. A worker that died on that
+        # TERM at once would let the supervisor quiesce, and the parent KILL,
+        # while its linter was still cleaning up. Bash runs this trap only
+        # after the foreground command exits (the linter, or a command
+        # substitution or pipeline running it), so the worker outlives the
+        # TERM as long as its linter, and then stops before any further step.
+        # A linter that ignores TERM keeps the worker alive until the KILL.
+        # Nothing changes for a run that is never cancelled.
+        trap 'exit 143' TERM
         _autolint_worker_rc=0
         if _lint_one_with_plan "$plan_dir/$next.plan"; then
           _autolint_worker_rc=0
@@ -875,8 +923,9 @@ _autolint_run_files_pool() {
       pids[next]=$!
       stdouts[next]=$stdout_file
       stderrs[next]=$stderr_file
+      active+=("$next")
       next=$((next + 1))
-      in_flight=$((in_flight + 1))
+      in_flight=${#active[@]}
       [ "${_autolint_cancel_status:-0}" -eq 0 ] || break
     done
 
@@ -885,18 +934,51 @@ _autolint_run_files_pool() {
       return "$_autolint_cancel_status"
     fi
 
-    if [ "$in_flight" -gt 0 ]; then
-      # `wait -n` is only backpressure, so its status is ignored: statuses
-      # come from the worker records. It can return 127 even with a child in
-      # flight, when Bash already reaped that worker and dropped it from its
-      # job table before this call. That worker did finish, so it still
-      # leaves the in-flight count.
-      wait -n 2>/dev/null || :
-      if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
-        _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
-        return "$_autolint_cancel_status"
+    [ "$in_flight" -gt 0 ] || continue
+    # `wait -n` cannot count completions. Bash can drop a job it has already
+    # reaped from its job table, and no later `wait -n` returns it: Bash 5.1
+    # does so when `wait -n` reports another job, when the shell forks, and,
+    # in a `bash -c` caller, when it parses a compound array assignment.
+    # Retiring one worker per call then held a finished worker's slot until
+    # the last running worker ended. Recount from Bash's job table instead,
+    # right before blocking: a worker stays in flight only while its job is
+    # still running or stopped. Between this snapshot and `wait -n`, use only
+    # builtins that cannot drop a job (no forks, no compound assignments), so
+    # a worker that ends after the snapshot stays reportable and `wait -n`
+    # returns at once rather than blocking on the others.
+    if _autolint_live_jobs "$plan_dir/.live-jobs"; then
+      live=$REPLY
+      for i in "${!active[@]}"; do
+        case "$live" in
+          *" ${pids[active[i]]} "*) ;;
+          *) unset 'active[i]' ;;
+        esac
+      done
+      in_flight=${#active[@]}
+      # Refill freed slots before blocking; with nothing left to start,
+      # block only while a worker is still running.
+      if [ "$next" -lt "$n" ] && [ "$in_flight" -lt "$jobs" ]; then
+        continue
       fi
-      in_flight=$((in_flight - 1))
+      [ "$in_flight" -gt 0 ] || continue
+      wait -n 2>/dev/null || :
+    else
+      # Without a snapshot, fall back to assuming the job `wait -n` returned
+      # was one worker. A lost report can then lower concurrency until the
+      # pool drains, but can never exceed the cap. `active` may be sparse, so
+      # retire its first remaining element rather than slicing by index.
+      wait -n 2>/dev/null || :
+      for i in "${!active[@]}"; do
+        unset 'active[i]'
+        break
+      done
+      in_flight=${#active[@]}
+    fi
+    # `wait -n` is only backpressure, so its status is ignored: statuses come
+    # from the worker records.
+    if [ "${_autolint_cancel_status:-0}" -ne 0 ]; then
+      _autolint_reap_pids "${pids[@]+"${pids[@]}"}"
+      return "$_autolint_cancel_status"
     fi
   done
 
@@ -1249,9 +1331,10 @@ _autolint_cancel_private_group() {
   fi
   kill -TERM "-$group" 2>/dev/null || true
   # On cancellation, the supervisor reaps every exact worker, publishes
-  # exited, and then remains alive as the private group's PID anchor. Give
-  # cooperative cleanup a short grace before escalating the still-pinned
-  # group; no process-table scan or reusable bare PGID is involved.
+  # exited, and then remains alive as the private group's PID anchor. Workers
+  # outlive the TERM until their linters exit, so this wait is the linters'
+  # cooperative cleanup grace before escalating the still-pinned group; no
+  # process-table scan or reusable bare PGID is involved.
   for ((attempt = 0; attempt < 20; attempt++)); do
     if [ "$signals_frozen" -eq 0 ] &&
       { [ "${_autolint_signal_status:-0}" -ne 0 ] ||
@@ -1509,7 +1592,8 @@ _autolint_parallel_supervisor() {
   local gate="$1" armed_file="$2" hold_file="$3" parent_pid="$4" jobs="$5"
   local plan_dir="$6"
   shift 6
-  local rc=0 _autolint_signal_status=0
+  local rc=0 _autolint_signal_status=0 gate_polls=0
+  local _autolint_cancelling_file="${gate%/*}/cancelling"
   local -a files=("$@")
 
   # Install handlers before observing the gate so cancellation cannot be lost
@@ -1527,7 +1611,23 @@ _autolint_parallel_supervisor() {
     # An emptied hold before the gate is the parent's signal-free abort.
     [ -s "$hold_file" ] || return 125
     kill -0 "$parent_pid" 2>/dev/null || return 125
-    sleep 0.001
+    # Validation normally opens the gate within tens of milliseconds, even
+    # where it forks `ps` rather than reading procfs, so keep 1 ms polls for
+    # the first 200. Then back off like the anchor hold, so a parent stopped
+    # (for example, Ctrl-Z) during validation cannot make this child fork
+    # `sleep` a thousand times a second. Unlike the hold, this wait has live
+    # signal handlers, which Bash runs only once the foreground `sleep`
+    # returns, and the parent gives a TERMed candidate 200 ms to publish
+    # before it escalates to KILL. Cap the pause at 100 ms so cancellation
+    # by a resumed parent still completes cooperatively.
+    gate_polls=$((gate_polls + 1))
+    if [ "$gate_polls" -le 200 ]; then
+      sleep 0.001 || :
+    elif [ "$gate_polls" -le 300 ]; then
+      sleep 0.01 || :
+    else
+      sleep 0.1 || :
+    fi
   done
   [ "${_autolint_cancel_status:-0}" -eq 0 ] || return "$_autolint_cancel_status"
 
@@ -1549,7 +1649,7 @@ _autolint_run_parallel_supervised() {
   local jobs="$1" plan_dir="$2"
   shift 2
   local control_dir="$plan_dir/.supervisor" gate busy_file hold_file exited_file
-  local armed_file jobs_file group_file leader_file
+  local armed_file jobs_file group_file leader_file cancelling_file
   local parent_pid="" leader="" group="" rc=0 tool event_status=0 job_state=0
   local had_monitor=0 released=1 armed_rc=0
   local REPLY=""
@@ -1576,6 +1676,7 @@ _autolint_run_parallel_supervised() {
   jobs_file="$control_dir/jobs"
   group_file="$control_dir/groups"
   leader_file="$control_dir/leader"
+  cancelling_file="$control_dir/cancelling"
   # Both lifecycle markers are written before the supervisor exists, so each
   # side signals the other by truncating one: a fork-free builtin that needs
   # no new allocation, unlike creating a file on a full TMPDIR. The supervisor
@@ -1704,7 +1805,10 @@ _autolint_run_parallel_supervised() {
     fi
 
     REPLY=""
-    if _autolint_read_status_file "$exited_file"; then
+    # A supervisor publishes `cancelling` before it waits for its workers and
+    # `exited` once they are reaped; either carries a direct group signal.
+    if _autolint_read_status_file "$exited_file" ||
+      _autolint_read_status_file "$cancelling_file"; then
       case "$REPLY" in
         129 | 130 | 143) event_status=$REPLY ;;
         *) event_status=0 ;;

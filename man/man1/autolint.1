@@ -110,8 +110,28 @@ A required runtime dependency, such as a suitable Python interpreter, is missing
 .TP
 .BR 129 ", " 130 ", " 143
 The run was cancelled by SIGHUP, SIGINT or SIGTERM, respectively (128 plus the
-signal number). Lint workers that autolint started in the background are
-stopped before it exits.
+signal number). A run that lints two or more files with more than one job and
+without
+.B --fix
+catches these signals, stops the lint workers it started in the background,
+and exits with this status. Each running linter first receives SIGTERM and a
+short grace, at least 0.2 seconds, to exit before it is killed. Other runs,
+such as a single file,
+.BR CHECKRUN_AUTOLINT_JOBS=1 ,
+.BR --fix ,
+or a host that cannot supervise parallel workers, keep the default signal
+actions. SIGHUP and SIGTERM then kill autolint itself: a shell reports that
+death as the same status, but a caller that inspects the raw wait status sees a
+signal rather than an exit; Python's
+.BR subprocess ,
+for example, reports \-15 rather than 143. A SIGINT that arrives while a
+linter runs in the foreground waits for that linter, and the run continues if
+the linter exits normally. A signal sent to autolint alone does not reach a
+linter running in the foreground; one sent to the whole process group, such as
+a terminal interrupt, does. A signal that was already ignored when autolint
+started, as SIGHUP is under
+.BR nohup ,
+stays ignored on every path.
 .PP
 Ordinary findings usually exit 1, but a linter's own nonzero status other
 than 2 is passed through, so treat any status not listed here as findings.

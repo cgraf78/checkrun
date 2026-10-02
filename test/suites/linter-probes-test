@@ -231,7 +231,7 @@ fi
 _assert_eq "php: negative cache spawns no new probes" "" "$(<"$probe_log")"
 
 if [[ "$host_fallback_php" -eq 1 ]]; then
-  _pass "php: none-case skipped (host has a working fallback php)"
+  _skip "php: none-case (host has a working fallback php)"
 else
   export PATH="$php_first:$hhvm_bin:$none_bin"
   _CHECKRUN_PHP_CLI_CACHE=""
@@ -260,7 +260,7 @@ _assert_exit "php: syntax error propagates the tool exit" 255 "$?"
 _assert_contains "php: syntax error surfaces tool output" "Parse error" "$_lint_out"
 
 if [[ "$host_fallback_php" -eq 1 ]]; then
-  _pass "php: missing-tool no-op skipped (host has a working fallback php)"
+  _skip "php: missing-tool no-op (host has a working fallback php)"
 else
   export PATH="$php_first:$hhvm_bin:$none_bin"
   _CHECKRUN_PHP_CLI_CACHE=""

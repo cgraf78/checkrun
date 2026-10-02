@@ -32,6 +32,13 @@ case " $_ignored_signals " in
     ;;
 esac
 unset _signal_probe _signal_reset
+# harness-test runs only this header, with signals ignored, to prove that the
+# restart above restores the defaults the scenarios below depend on. Exit
+# nonzero so that a leaked hook variable cannot turn this suite into a pass.
+if [ -n "${AUTOLINT_CANCEL_HEADER_ONLY:-}" ]; then
+  printf 'ignored=%s\n' "$_ignored_signals"
+  exit 3
+fi
 
 CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CHECKRUN_TEST_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
@@ -128,7 +135,12 @@ def terminate(_signum, _frame):
 
 signal.signal(signal.SIGTERM, terminate)
 (root / "planner.ready").touch(exist_ok=False)
-time.sleep(1.5)
+# This is the foreground work a cancellation must not wait for. It ends only
+# when the harness releases it, which it does only after a cancellation has
+# already failed to finish promptly, so waiting for it is unambiguous.
+deadline = time.monotonic() + 60
+while not (root / "foreground.release").exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
 PY
 cat >"$_tool_bin/shellcheck" <<'PY'
 #!/usr/bin/env python3
@@ -142,6 +154,8 @@ import time
 root = Path(os.environ["AUTOLINT_CANCEL_ROOT"])
 source = Path(sys.argv[-1])
 index = source.stem.rsplit("-", 1)[-1]
+with (root / "backend-starts").open("a", encoding="ascii") as starts:
+    starts.write(f"{index}\n")
 (root / f"backend-{index}.pid").write_text(str(os.getpid()), encoding="ascii")
 (root / f"worker-{index}.pid").write_text(str(os.getppid()), encoding="ascii")
 group = os.getpgrp()
@@ -153,10 +167,28 @@ if group != int(os.environ["AUTOLINT_CANCEL_PARENT_PID"]):
         pass
 
 
+def grace_polls():
+    try:
+        events = (root / "parent-events").read_text(encoding="ascii").splitlines()
+    except OSError:
+        return 0
+    return events.count("poll")
+
+
 def terminate(_signum, _frame):
     (root / f"backend-{index}.term").touch(exist_ok=True)
-    if os.environ.get("AUTOLINT_CANCEL_IGNORE_TERM") != "1":
-        raise SystemExit(143)
+    if os.environ.get("AUTOLINT_CANCEL_IGNORE_TERM") == "1":
+        return
+    if os.environ.get("AUTOLINT_CANCEL_TERM_CLEANUP") == "1":
+        # Model a linter that needs part of the parent's cancellation grace to
+        # clean up. Measure that grace in the parent's own polls, not wall
+        # time: an immediate KILL ends this before the third poll, while a real
+        # grace allows twenty.
+        deadline = time.monotonic() + 10
+        while grace_polls() < 3 and time.monotonic() < deadline:
+            time.sleep(0.002)
+        (root / f"backend-{index}.cleaned").touch(exist_ok=True)
+    raise SystemExit(143)
 
 
 signal.signal(signal.SIGTERM, terminate)
@@ -205,6 +237,62 @@ export AUTOLINT_CANCEL_PARENT_PID=${BASHPID:-$$}
 
 # shellcheck source=/dev/null
 . "$impl"
+
+# Record, in order, every pause the parent itself takes and every group
+# signal, so the harness can check how cancellation escalates without
+# measuring wall time. Bash 3.2 has no BASHPID to tell the parent from a
+# subshell, so it records no pauses there; only the parent signals a group.
+sleep() {
+  if [ -n "${BASHPID:-}" ] && [ "$BASHPID" = "$AUTOLINT_CANCEL_PARENT_PID" ]; then
+    printf 'pause %s\n' "$1" >>"$root/parent-events"
+  fi
+  command sleep "$@"
+}
+kill() {
+  local owned owned_pid attempt pending
+  case "${2:-}" in
+    -[1-9]*) printf 'kill %s %s\n' "$1" "$2" >>"$root/parent-events" ;;
+  esac
+  if { [ "$mode" = normal ] || [ "$mode" = planner-signal ]; } &&
+    [ "${1:-}" = -KILL ] && [[ "${2:-}" == -[1-9]* ]]; then
+    # The parent KILLs the group once the supervisor has reaped its workers,
+    # which outlive TERM only until their linter exits, or after its 200 ms
+    # grace, which a starved backend or planner can miss entirely. Hold the
+    # KILL, boundedly, until each one has observed the TERM or is gone, so
+    # the harness can require cooperative delivery on any host. This only
+    # delays KILL: a TERM that never reached them still fails. It also means
+    # these cases no longer see whether a grace exists at all; the
+    # escalation check below drives the real loop for that.
+    for ((attempt = 0; attempt < 500; attempt++)); do
+      pending=0
+      for owned in "$root"/backend-*.pid "$root/planner.pid"; do
+        [ -e "$owned" ] || continue
+        [ ! -e "${owned%.pid}.term" ] || continue
+        # The PID file has no trailing newline, so `read` reports EOF.
+        owned_pid=""
+        IFS= read -r owned_pid <"$owned" 2>/dev/null
+        [ -n "$owned_pid" ] || continue
+        if builtin kill -0 "$owned_pid" 2>/dev/null; then
+          pending=1
+          break
+        fi
+      done
+      [ "$pending" -eq 1 ] || break
+      command sleep 0.01
+    done
+    printf 'held %s\n' "$attempt" >>"$root/parent-events"
+  fi
+  builtin kill "$@"
+}
+# Record each poll of the parent's cancellation grace, which checks whether the
+# supervisor has quiesced, so a fixture can measure the grace in polls on any
+# Bash.
+_autolint_real_supervisor_quiesced=$(declare -f _autolint_supervisor_quiesced)
+eval "_autolint_real_supervisor_quiesced${_autolint_real_supervisor_quiesced#_autolint_supervisor_quiesced}"
+_autolint_supervisor_quiesced() {
+  printf 'poll\n' >>"$root/parent-events"
+  _autolint_real_supervisor_quiesced "$@"
+}
 
 case "$mode" in
   capability-fallback)
@@ -274,8 +362,9 @@ case "$mode" in
         if [ "$_autolint_cleanup_attempt" -eq 1 ]; then
           # Give the harness a live child wait to interrupt with a terminal-group
           # signal. A fast real rm would not prove that active cleanup returns
-          # the signal status which drives the managed retry.
-          sleep 30 &
+          # the signal status which drives the managed retry. `command` skips
+          # the driver's pause recorder so that the child itself runs sleep.
+          command sleep 30 &
           cleanup_child=$!
           printf '%s\n' "$cleanup_child" >"$root/cleanup-child.pid"
           # Publish readiness only once the child runs sleep itself. A group
@@ -559,8 +648,20 @@ case "$mode" in
       builtin kill "$@"
     }
     ;;
-  wave)
+  wave | grace-wave)
     _autolint_supports_pool() { return 1; }
+    ;;
+  sequential-steps)
+    # Give file 0 its real plan twice and file 1 none, so the supervisor runs
+    # the only nonempty plan itself, step after step, in its foreground.
+    _autolint_real_pre_plan=$(declare -f _autolint_pre_plan)
+    eval "_autolint_real_pre_plan${_autolint_real_pre_plan#_autolint_pre_plan}"
+    _autolint_pre_plan() {
+      _autolint_real_pre_plan "$@" || return
+      cat "$1/0.plan" "$1/0.plan" >"$1/0.plan.twice" &&
+        command mv -f "$1/0.plan.twice" "$1/0.plan" && : >"$1/1.plan"
+    }
+    _autolint_try_clean_batch() { return 1; }
     ;;
   normal-no-probe)
     # Failure-composition scenarios use single-shot FIFO backends that cannot
@@ -607,7 +708,11 @@ case "$mode" in
         : >"$root/fallback-scratch-present"
       fi
       : >"$root/direct-fallback.ready"
-      sleep 30
+      # Foreground work that ends only when the harness releases it.
+      for ((probe_poll = 0; probe_poll < 3000; probe_poll++)); do
+        [ ! -e "$root/foreground.release" ] || break
+        command sleep 0.01
+      done
     }
     _autolint_pre_plan() { _autolint_direct_fallback_probe; }
     _lint_one() { _autolint_direct_fallback_probe; }
@@ -783,6 +888,45 @@ exit 0
 SH
 chmod +x "$_driver"
 
+# Cleanup helper shared by the harness and its own test below.
+cat >"$_fixture_root/group_signal.py" <<'PY'
+import os
+import subprocess
+
+
+def group_has_live_member(pgid):
+    result = subprocess.run(
+        ["ps", "-A", "-o", "pgid=", "-o", "stat="],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == str(pgid) and not fields[1].startswith("Z"):
+            return True
+    return False
+
+
+def signal_group_if_present(pgid, sig, killpg=os.killpg):
+    """Signal a test-owned process group that may already be gone.
+
+    Linux delivers a group signal even when every member is an unreaped
+    zombie. macOS instead fails such a group with EPERM rather than ESRCH
+    (XNU's killpg returns EPERM when it finds only zombies), which is what an
+    orphaned child that exits just before cleanup leaves behind. Treat that
+    exactly like ESRCH, but only once the process table confirms that no live
+    member remains; any other EPERM is still an error.
+    """
+    try:
+        killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if group_has_live_member(pgid):
+            raise
+PY
+
 _harness="$_fixture_root/harness.py"
 cat >"$_harness" <<'PY'
 #!/usr/bin/env python3
@@ -793,6 +937,8 @@ import shutil
 import subprocess
 import sys
 import time
+
+from group_signal import signal_group_if_present
 
 
 shell, driver, impl, tool_bin, root_arg, scenario, signal_name = sys.argv[1:]
@@ -837,7 +983,17 @@ case = {
     "direct-jobs-one-signal": ("direct-jobs-one-signal", 2, 1, 143),
     "signal": ("normal", 2, 2, 128 + getattr(signal, f"SIG{signal_name}")),
     "repeat": ("repeat", 2, 2, 143),
+    "grace-cleanup": ("grace", 2, 2, 143),
+    "grace-stubborn": ("grace", 2, 2, 143),
+    "grace-cleanup-wave": ("grace-wave", 2, 2, 143),
+    "grace-group-signal": ("grace", 2, 2, 143),
+    "grace-stubborn-wave": ("grace-wave", 2, 2, 143),
+    "sequential-steps": ("sequential-steps", 2, 2, 143),
 }[scenario]
+GRACE_SCENARIOS = (
+    "grace-cleanup", "grace-stubborn", "grace-cleanup-wave", "grace-group-signal",
+    "grace-stubborn-wave",
+)
 mode, count, jobs, expected_status = case
 env = os.environ.copy()
 env["PATH"] = tool_bin + os.pathsep + env["PATH"]
@@ -851,8 +1007,10 @@ if scenario == "precedence":
     env["AUTOLINT_CANCEL_EXIT_0"] = "1"
     env["AUTOLINT_CANCEL_EXIT_1"] = "2"
     env["AUTOLINT_CANCEL_EXIT_2"] = "125"
-if scenario == "repeat":
+if scenario in ("repeat", "grace-stubborn", "grace-group-signal", "grace-stubborn-wave"):
     env["AUTOLINT_CANCEL_IGNORE_TERM"] = "1"
+if scenario in ("grace-cleanup", "grace-cleanup-wave"):
+    env["AUTOLINT_CANCEL_TERM_CLEANUP"] = "1"
 if scenario == "shared-pgid":
     env["AUTOLINT_CANCEL_PGID_SNAPSHOT"] = "shared"
 if scenario == "malformed-pgid":
@@ -895,18 +1053,141 @@ def alive(pid):
     return process_state_is_live(process_state(pid))
 
 
-def wait_for(predicate, description, seconds=6):
+def observed_paths():
+    # A failed wait reports what the fixture published, which tells startup
+    # that is merely slow apart from a path that never started (for example,
+    # a sequential fallback that will not start the second backend).
+    paths = []
+    try:
+        for path in root.rglob("*"):
+            paths.append(str(path.relative_to(root)))
+    except OSError:
+        pass
+    return sorted(paths)
+
+
+def driver_exit_status():
+    # Peek without reaping. Reaping here would free the driver's PID while a
+    # later step may still signal it, and `Popen` can still collect it.
+    if not hasattr(os, "waitid"):
+        # Without a non-reaping probe, rely on the deadline alone.
+        return None
+    try:
+        info = os.waitid(
+            os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+        )
+    except ChildProcessError:
+        return process.returncode
+    return None if info is None else info.si_status
+
+
+def wait_for(predicate, description, seconds=20):
+    # These waits are preconditions, not latency assertions; cancellation
+    # promptness is asserted separately by `await_cancellation`. Reaching a
+    # marker can take several interpreter startups, which took about 5 s at a
+    # load average of 4x the CPU count and has exceeded the former 6 s bound.
+    # Bound a real hang generously instead, and fail at once when the driver
+    # exits: every marker comes from the driver or a descendant it is still
+    # waiting for, so none can appear after that.
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+    while True:
         if predicate():
             return
+        status = driver_exit_status()
+        if status is not None:
+            if predicate():
+                return
+            raise RuntimeError(
+                f"driver exited {status} before {description}; "
+                f"observed {observed_paths()!r}"
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"timed out after {seconds} s waiting for {description}; "
+                f"observed {observed_paths()!r}"
+            )
         time.sleep(0.02)
-    raise RuntimeError(f"timed out waiting for {description}")
 
 
 def release(index):
     with (root / f"gate-{index}").open("wb", buffering=0) as gate:
         gate.write(b"x")
+
+
+def parent_events():
+    # ("pause", seconds) and ("kill", signal, target) records from the driver.
+    path = root / "parent-events"
+    if not path.exists():
+        return []
+    return [tuple(line.split()) for line in path.read_text(encoding="ascii").splitlines()]
+
+
+def release_if_waiting(index):
+    # A cancelled backend may already be gone, and opening a FIFO with no
+    # reader would block, so release only a backend that still waits.
+    try:
+        gate = os.open(root / f"gate-{index}", os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        os.write(gate, b"x")
+    except OSError:
+        pass
+    finally:
+        os.close(gate)
+
+
+# Cancellation must not wait for the foreground work that is running when the
+# signal arrives. Asserting that as wall time (formerly 0.8 s from the signal)
+# failed on slow and loaded hosts even though the bounded cancellation path,
+# whose escalation alone polls for 200 ms before KILL, was working: at a load
+# average of about 250 it took up to 0.9 s, measured without harness overhead.
+# Assert the ordering instead. The foreground work in these scenarios (the
+# slow planner, a backend, the direct-fallback probe) never finishes on its
+# own; the harness releases it only after this delay, so a cancellation that
+# ends later than that provably waited for it, while a merely slow one
+# passes. Passing runs never pay the delay. How finely the parent polls is
+# checked separately from recorded pauses, which load cannot stretch.
+FOREGROUND_RELEASE_DELAY = 5
+RELEASABLE_FOREGROUND = (
+    "allocation-fallback-signal", "capability-fallback-signal",
+    "validation-fallback-signal", "planner-signal", "pre-wait-signal",
+    "direct-one-signal", "direct-jobs-one-signal",
+)
+
+
+def release_foreground():
+    (root / "foreground.release").touch()
+    for index in range(count):
+        release_if_waiting(index)
+
+
+def await_cancellation(description, started):
+    """Wait for the driver after a cancellation signal, failing if it waited
+    for the foreground work or did not finish at all."""
+    try:
+        process.wait(timeout=FOREGROUND_RELEASE_DELAY)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    releasable = scenario in RELEASABLE_FOREGROUND
+    if releasable:
+        release_foreground()
+    try:
+        process.wait(timeout=8)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"{description} did not finish") from error
+    elapsed = time.monotonic() - started
+    if releasable:
+        raise RuntimeError(
+            f"{description} waited for foreground work: it finished "
+            f"{elapsed:.1f} s after the signal, only once that work was released "
+            f"after {FOREGROUND_RELEASE_DELAY} s"
+        )
+    raise RuntimeError(
+        f"{description} took {elapsed:.1f} s after the signal "
+        f"(limit {FOREGROUND_RELEASE_DELAY} s)"
+    )
 
 
 def read_pid(path):
@@ -931,7 +1212,7 @@ def backend_finished(index):
 backend_pids = []
 worker_pids = []
 errors = []
-signal_started = None
+signal_time = None
 try:
     if scenario in (
         "allocation-fallback", "capability-fallback", "fallback", "jobs-one",
@@ -950,6 +1231,7 @@ try:
         "validation-fallback-signal",
     ):
         wait_for(lambda: (root / "direct-fallback.ready").is_file(), "direct fallback")
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "allocation-signal":
         pass
@@ -979,18 +1261,22 @@ try:
         os.kill(process.pid, signal.SIGCONT)
     elif scenario == "planner-signal":
         wait_for(lambda: (root / "planner.ready").is_file(), "registry planner")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "pre-wait-signal":
         wait_for(lambda: (root / "pre-wait-signal").is_file(), "pre-wait signal")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
     elif scenario == "direct-one-signal":
         wait_for(lambda: (root / "planner.ready").is_file(), "direct registry planner")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "direct-jobs-one-signal":
         wait_for(lambda: (root / "backend-0.ready").is_file(), "direct lint backend")
-        signal_started = time.monotonic()
+        signal_time = time.monotonic()
+        os.kill(process.pid, signal.SIGTERM)
+    elif scenario == "sequential-steps":
+        wait_for(lambda: (root / "backend-0.ready").is_file(), "first lint step")
+        signal_time = time.monotonic()
         os.kill(process.pid, signal.SIGTERM)
     elif scenario == "monitor":
         pass
@@ -1002,7 +1288,16 @@ try:
             lambda: all((root / f"backend-{index}.ready").is_file() for index in range(count)),
             "all parallel backends",
         )
-        if scenario in ("signal", "repeat"):
+        if scenario == "grace-group-signal":
+            # Signal the private group directly, so the parent learns of the
+            # cancellation only from the supervisor.
+            supervisor_group = int((root / "supervisor.pid").read_text(encoding="ascii"))
+            signal_time = time.monotonic()
+            os.killpg(supervisor_group, signal.SIGTERM)
+        elif scenario in GRACE_SCENARIOS:
+            signal_time = time.monotonic()
+            os.kill(process.pid, signal.SIGTERM)
+        elif scenario in ("signal", "repeat"):
             os.kill(process.pid, getattr(signal, f"SIG{signal_name}"))
             if scenario == "repeat":
                 wait_for(
@@ -1034,7 +1329,7 @@ try:
                 os.killpg(process.pid, signal.SIGTERM)
             elif scenario == "cleanup-retry-signal":
                 wait_for(lambda: (root / "cleanup-retry-ready").is_file(), "cleanup retry")
-                signal_started = time.monotonic()
+                signal_time = time.monotonic()
                 os.kill(process.pid, signal.SIGTERM)
 
     direct_signal = scenario in (
@@ -1044,23 +1339,21 @@ try:
         "direct-one-signal",
         "direct-jobs-one-signal",
     )
+    if signal_time is not None or direct_signal:
+        await_cancellation(
+            "the direct driver" if direct_signal else "parent-only cancellation",
+            signal_time if signal_time is not None else time.monotonic(),
+        )
     if direct_signal:
         # A direct-path child retains the stdout/stderr pipe after its parent
-        # dies. Measure the driver itself first, then clean up that test-owned
-        # process group before draining pipes.
-        try:
-            process.wait(timeout=0.8)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("parent-only TERM did not stop the direct driver") from error
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        # dies. Wait for the driver itself first (above), then clean up that
+        # test-owned process group before draining pipes. Its last member can
+        # be a child that exits just now and stays a zombie until reaped.
+        signal_group_if_present(process.pid, signal.SIGKILL)
         stdout, stderr = process.communicate(timeout=2)
     else:
         try:
-            timeout = 1.5 if scenario == "pre-wait-signal" else 8
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = process.communicate(timeout=8)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("autolint did not finish after its observable event") from error
 
@@ -1075,15 +1368,20 @@ try:
         actual_status = int((root / "operation-status").read_text(encoding="ascii"))
         if actual_status != expected_status:
             raise RuntimeError(f"operation status {actual_status}, expected {expected_status}")
-
-    if signal_started is not None and time.monotonic() - signal_started > 0.8:
-        raise RuntimeError("parent-only cancellation waited for foreground work")
+    if scenario in ("success", "signal", "planner-signal", "pre-wait-signal"):
+        # Promptness without wall time: every pause the parent takes while it
+        # waits for or cancels the supervisor must stay at the 10 ms poll.
+        pauses = [event[1] for event in parent_events() if event[0] == "pause"]
+        long_pauses = [pause for pause in pauses if float(pause) > 0.01]
+        if long_pauses:
+            raise RuntimeError(f"parent paused longer than 10 ms: {long_pauses!r}")
 
     if not direct_signal and scenario not in (
         "allocation-fallback-signal", "allocation-signal", "anchor-hold",
         "anchor-mismatch", "gate-visible-failure", "gate-visible-failure-signal",
         "monitor", "planner-signal",
         "direct-one-signal", "direct-jobs-one-signal", "pre-wait-signal", "signal", "repeat",
+        *GRACE_SCENARIOS, "sequential-steps",
     ):
         expected_output = [f"backend:{index}" for index in range(count)]
         if stdout.splitlines() != expected_output:
@@ -1202,6 +1500,7 @@ try:
         "cleanup-failure-errexit", "cleanup-retry-signal", "gate-failure",
         "gate-visible-failure", "gate-visible-failure-signal", "monitor", "planner-signal", "success",
         "failure", "precedence", "restore-signal", "wave", "signal", "repeat",
+        *GRACE_SCENARIOS, "sequential-steps",
         "pre-wait-signal",
         "malformed-pgid", "shared-pgid", "ps-pgid-success",
     )
@@ -1260,10 +1559,60 @@ try:
         time.sleep(0.02)
     if live_remaining and not direct_signal:
         raise RuntimeError(f"owned process survived: {live_remaining!r}")
-    if scenario in ("signal", "repeat") and not all(
-        (root / f"backend-{index}.term").is_file() for index in range(count)
-    ):
-        raise RuntimeError("owned backend did not observe cooperative TERM")
+    if scenario == "signal":
+        # The parent must signal the group cooperatively before any KILL. The
+        # driver holds that KILL until each backend, already in its TERM-ready
+        # wait, has observed the TERM, so a missing observation means the TERM
+        # never reached it, not that a loaded host starved its handler.
+        group_signals = [event[1] for event in parent_events() if event[0] == "kill"]
+        if not group_signals or group_signals[0] != "-TERM":
+            raise RuntimeError(f"group signals {group_signals!r} did not start with TERM")
+    unobserved = [
+        index for index in range(count) if not (root / f"backend-{index}.term").is_file()
+    ]
+    if scenario == "sequential-steps":
+        # The supervisor runs plan steps in its own foreground, so its TERM
+        # trap runs once the current linter exits. No later step may start.
+        starts = (root / "backend-starts").read_text(encoding="ascii").split()
+        if starts != ["0"]:
+            raise RuntimeError(f"lint steps started {starts!r}, expected only the first")
+    if scenario in GRACE_SCENARIOS:
+        # The parent TERMs the group, then polls for up to 20 grace checks
+        # before it KILLs. Workers outlive TERM until their linter exits, so
+        # a linter that cleans up within the grace finishes, and one that
+        # ignores TERM holds the supervisor until the KILL ends the grace.
+        events = parent_events()
+        group_signals = [event[1] for event in events if event[0] == "kill"]
+        if not group_signals or group_signals[0] != "-TERM":
+            raise RuntimeError(f"group signals {group_signals!r} did not start with TERM")
+        term_at = next(i for i, e in enumerate(events) if e[:2] == ("kill", "-TERM"))
+        polls = [event for event in events[term_at:] if event == ("poll",)]
+        kill_at = next(
+            (i for i, e in enumerate(events) if e[:2] == ("kill", "-KILL")), None
+        )
+        if scenario in ("grace-cleanup", "grace-cleanup-wave"):
+            uncleaned = [
+                index for index in range(count)
+                if not (root / f"backend-{index}.cleaned").is_file()
+            ]
+            if uncleaned:
+                raise RuntimeError(
+                    f"backends {uncleaned!r} were stopped before cleaning up "
+                    f"within the grace; parent polled {len(polls)} times"
+                )
+        else:
+            grace = [e for e in events[term_at:kill_at] if e == ("poll",)] \
+                if kill_at is not None else []
+            if kill_at is None or len(grace) != 20:
+                raise RuntimeError(
+                    f"stubborn backends were KILLed after {len(grace)} grace polls, "
+                    "expected the full 20"
+                )
+    if scenario in ("signal", "repeat") and unobserved:
+        raise RuntimeError(
+            f"owned backends {unobserved!r} did not observe cooperative TERM; "
+            f"group signals and KILL hold {[e for e in parent_events() if e[0] != 'pause']!r}"
+        )
     if scenario == "planner-signal" and not (root / "planner.term").is_file():
         raise RuntimeError("owned registry planner did not observe TERM")
     if not alive(unrelated.pid):
@@ -1272,10 +1621,7 @@ except BaseException as error:
     errors.append(str(error))
 finally:
     if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        signal_group_if_present(process.pid, signal.SIGKILL)
     for pid_file in root.glob("backend-*.pid"):
         pid = int(pid_file.read_text(encoding="ascii"))
         if alive(pid):
@@ -1286,10 +1632,7 @@ finally:
     supervisor_file = root / "supervisor.pid"
     if scenario == "gate-visible-failure" and supervisor_file.exists():
         supervisor_group = int(supervisor_file.read_text(encoding="ascii"))
-        try:
-            os.killpg(supervisor_group, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        signal_group_if_present(supervisor_group, signal.SIGKILL)
     for extra_pid_path in extra_pid_paths():
         pid = read_pid(extra_pid_path)
         if pid is not None and alive(pid):
@@ -1315,6 +1658,42 @@ if errors:
     raise SystemExit(1)
 PY
 chmod +x "$_harness"
+
+# Group cleanup must accept a group left with only zombies, which macOS
+# refuses with EPERM, without hiding EPERM from a group that still runs.
+# Build both groups for real and model the macOS refusal with an injected
+# killpg, since this host may deliver the signal instead.
+set +e
+_group_signal_result=$(python3 -I -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import os, signal, subprocess, time
+from group_signal import group_has_live_member, signal_group_if_present
+
+def refuse(_pgid, _sig):
+    raise PermissionError(1, "Operation not permitted")
+
+zombie = subprocess.Popen(["true"], start_new_session=True)
+deadline = time.monotonic() + 10
+while group_has_live_member(zombie.pid) and time.monotonic() < deadline:
+    time.sleep(0.01)
+signal_group_if_present(zombie.pid, signal.SIGKILL, killpg=refuse)
+signal_group_if_present(zombie.pid, signal.SIGKILL)
+zombie.wait()
+live = subprocess.Popen(["sleep", "30"], start_new_session=True)
+try:
+    signal_group_if_present(live.pid, signal.SIGKILL, killpg=refuse)
+    print("live-eperm-hidden")
+except PermissionError:
+    print("live-eperm-raised")
+finally:
+    live.kill()
+    live.wait()
+print("zombie-group-accepted")
+' "$_fixture_root" 2>&1)
+set -e
+_assert_eq "group cleanup accepts a zombie-only group but not a live one" \
+  $'live-eperm-raised\nzombie-group-accepted' "$_group_signal_result"
 
 _run_case() {
   local description="$1" scenario="$2" signal_name="${3:-TERM}" signal_label root
@@ -1417,13 +1796,23 @@ _run_case "parent-only TERM stays prompt during one-file planning" direct-one-si
 _run_case "parent-only TERM stays prompt during jobs=1 lint" direct-jobs-one-signal
 case " $_ignored_signals " in
   *" SIGHUP "*)
-    _pass "parent-only HUP cancels the complete backend group (skipped: SIGHUP ignored at start)"
+    _skip "parent-only HUP cancels the complete backend group (SIGHUP ignored at start)"
     ;;
   *) _run_case "parent-only HUP cancels the complete backend group" signal HUP ;;
 esac
 _run_case "parent-only INT cancels the complete backend group" signal INT
 _run_case "parent-only TERM cancels the complete backend group" signal TERM
 _run_case "first signal wins while stubborn backends escalate" repeat TERM
+_run_case "cancellation grace lets a linter finish its TERM cleanup" grace-cleanup
+_run_case "linter that ignores TERM is KILLed after the full grace" grace-stubborn
+_run_case "wave runner also lets a linter finish its TERM cleanup" \
+  grace-cleanup-wave
+_run_case "direct group TERM still KILLs a TERM-ignoring linter after the grace" \
+  grace-group-signal
+_run_case "wave runner KILLs a TERM-ignoring linter after the full grace" \
+  grace-stubborn-wave
+_run_case "cancellation starts no later lint step of the same file" \
+  sequential-steps
 
 echo "=== Process-group identity on cancellation ==="
 
@@ -1994,23 +2383,133 @@ _assert_eq "held anchor backs off to a 1 s cap after a few seconds" \
     END { printf "cap=%s before-cap-ok=%d", max, (before >= 3 && before <= 10) }
   ')"
 
+# The hold runs from the supervisor's EXIT trap, which keeps errexit active
+# under a `set -e` caller. A failing `sleep` at any tier of the pause must
+# not abort the hold, which would release the pinned identity early.
+set +e
+# shellcheck disable=SC2016 # This program is evaluated by the selected Bash.
+_hold_errexit=$("$BASH" -ec '
+  . "$1"
+  sleep() { return 1; }
+  _autolint_hold_polls=0
+  for ((poll = 0; poll < 200; poll++)); do
+    _autolint_hold_pause
+  done
+  printf "survived=%s\n" "$_autolint_hold_polls"
+' _ "$CHECKRUN_TEST_ROOT/lib/checkrun/autolint.sh" 2>&1)
+set -e
+_assert_eq "held anchor survives a failing sleep under errexit" \
+  "survived=200" "$_hold_errexit"
+
+# A supervisor whose parent is stopped during validation waits at a closed
+# gate just as long. Drive the real gate wait with a recording `sleep` that
+# withdraws the hold after 400 polls, which the wait treats as an abort. The
+# normal gate open must keep its 200 fast polls, the wait must then back off
+# rather than fork a thousand sleeps a second, and its pause must stay at
+# 100 ms so a TERM still lands within the parent's 200 ms cooperative grace.
+_gate_wait_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-gate-wait.XXXXXX")
+printf '1\n' >"$_gate_wait_dir/hold"
+set +e
+_gate_schedule=$(
+  CHECKRUN_LIB_DIR="$CHECKRUN_TEST_ROOT/lib/checkrun"
+  # shellcheck source=../../lib/checkrun/autolint.sh
+  . "$CHECKRUN_LIB_DIR/autolint.sh"
+  _gate_polls=0
+  # shellcheck disable=SC2329 # Invoked by the sourced gate wait.
+  sleep() {
+    printf '%s\n' "$1"
+    _gate_polls=$((_gate_polls + 1))
+    [ "$_gate_polls" -lt 400 ] || : >|"$_gate_wait_dir/hold"
+  }
+  _autolint_parallel_supervisor "$_gate_wait_dir/gate" \
+    "$_gate_wait_dir/armed" "$_gate_wait_dir/hold" "$$" 2 "$_gate_wait_dir"
+  printf 'status=%s\n' "$?"
+)
+set -e
+rm -rf "$_gate_wait_dir"
+_assert_eq "closed gate keeps 1 ms polls, then backs off in steps" \
+  "polls=400 fast=200 medium=100 status=125" \
+  "$(printf '%s\n' "$_gate_schedule" | awk '
+    /^status=/ { status = $0; next }
+    { polls++ }
+    NR <= 200 && $1 == 0.001 { fast++ }
+    NR > 200 && NR <= 300 && $1 == 0.01 { medium++ }
+    END { printf "polls=%d fast=%d medium=%d %s", polls, fast, medium, status }
+  ')"
+_assert_eq "closed gate backs off to a 100 ms cap" "cap=0.1" \
+  "$(printf '%s\n' "$_gate_schedule" | awk '
+    /^status=/ { next }
+    { if ($1 > max) max = $1 }
+    END { printf "cap=%s", max }
+  ')"
+
+# Cancellation promptness, independent of host load: a supervisor that never
+# quiesces must get a cooperative group TERM, at most 200 ms of 10 ms polls,
+# and then KILL. Record the real escalation's signals and pauses.
+_escalation_dir=$(mktemp -d "${TMPDIR:-/tmp}/autolint-escalation.XXXXXX")
+printf '1\n' >"$_escalation_dir/busy"
+printf '1\n' >"$_escalation_dir/hold"
+: >"$_escalation_dir/exited"
+_escalation_schedule=$(
+  CHECKRUN_LIB_DIR="$CHECKRUN_TEST_ROOT/lib/checkrun"
+  # shellcheck source=../../lib/checkrun/autolint.sh
+  . "$CHECKRUN_LIB_DIR/autolint.sh"
+  # shellcheck disable=SC2329 # Invoked by the sourced escalation.
+  sleep() { printf 'sleep %s\n' "$1"; }
+  # shellcheck disable=SC2329 # Invoked by the sourced escalation.
+  kill() { printf 'kill %s\n' "$*"; }
+  # shellcheck disable=SC2329 # Invoked by the sourced escalation.
+  wait() { :; }
+  # shellcheck disable=SC2329 # The supervisor stays in Bash's running set.
+  _autolint_job_exited() { return 1; }
+  _autolint_signal_status=0
+  _autolint_cancel_status=143
+  _autolint_cancel_private_group 424242 424242 "$_escalation_dir/busy" \
+    "$_escalation_dir/exited" "$_escalation_dir/hold" "$_escalation_dir/jobs"
+)
+rm -rf "$_escalation_dir"
+_assert_eq "escalation TERMs the group, polls at most 200 ms, then KILLs" \
+  "term-first=1 longest=0.01 total-ok=1 kill-last=1" \
+  "$(printf '%s\n' "$_escalation_schedule" | awk '
+    NR == 1 { term_first = ($0 == "kill -TERM -424242") }
+    $1 == "sleep" { total += $2; if ($2 > longest) longest = $2 }
+    { last = $0 }
+    END {
+      printf "term-first=%d longest=%s total-ok=%d kill-last=%d", term_first,
+        longest, (total > 0 && total <= 0.2001), (last == "kill -KILL -424242")
+    }
+  ')"
+
 set +e
 # shellcheck disable=SC2016 # This program is evaluated by the selected Bash.
 "$BASH" -c '
   if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
     exit 1
   fi
-  (exit 7) &
-  pid=$!
-  wait -n 2>/dev/null
-  first_rc=$?
-  wait "$pid" 2>/dev/null
-  second_rc=$?
   # If the child exits and Bash reaps it and drops it from the job table
-  # before `wait -n` starts, as happens under CPU load, `wait -n` finds
-  # no job and returns 127. The pool ignores that status anyway; what must
-  # hold is that the exact PID wait still returns the saved status.
-  [[ ("$first_rc" -eq 7 || "$first_rc" -eq 127) && "$second_rc" -eq 7 ]]
+  # before `wait -n` starts, as happens under CPU load, `wait -n` finds no
+  # job and returns 127, and the exact wait below proves nothing about a
+  # status that `wait -n` consumed. Retry with a child that lives longer
+  # each time, so `wait -n` is already blocked when it exits, and fail if no
+  # attempt ever reaches that state.
+  for delay in 0 0.01 0.05 0.1 0.2 0.5 1; do
+    (
+      [ "$delay" = 0 ] || sleep "$delay"
+      exit 7
+    ) &
+    pid=$!
+    wait -n 2>/dev/null
+    first_rc=$?
+    wait "$pid" 2>/dev/null
+    second_rc=$?
+    [ "$second_rc" -eq 7 ] || exit 1
+    case "$first_rc" in
+      7) exit 0 ;;
+      127) ;;
+      *) exit 1 ;;
+    esac
+  done
+  exit 2
 ' >/dev/null 2>&1
 _wait_n_rc=$?
 set -e
