@@ -229,12 +229,33 @@ def validate_policy(policy: Any, *, path: Path | None = None) -> dict[str, Any]:
     return _ValidatedPolicy(policy)
 
 
+def policy_required() -> bool:
+    """Return whether the caller declared that a schema policy must exist.
+
+    A missing policy normally means "no associations", which is right for a
+    host that never configured any. A host that ships one, such as a dotfiles
+    profile, sets CHECKRUN_SCHEMA_POLICY_REQUIRED=1 so that a deleted or
+    unlinked policy fails loudly instead of silently enforcing no schemas.
+    """
+
+    return os.environ.get("CHECKRUN_SCHEMA_POLICY_REQUIRED") == "1"
+
+
 def load_policy(path: Path | None = None) -> dict[str, Any] | None:
-    """Load an optional active policy, rejecting malformed or unreadable files."""
+    """Load an optional active policy, rejecting malformed or unreadable files.
+
+    The policy stops being optional when `policy_required()` holds: a missing
+    file then raises SchemaPolicyError like an unreadable one.
+    """
 
     target = path if path is not None else policy_path()
     policy = _load_policy_document(target, optional=True)
     if policy is _MISSING_POLICY:
+        if policy_required():
+            raise SchemaPolicyError(
+                f"schema policy is required (CHECKRUN_SCHEMA_POLICY_REQUIRED=1) "
+                f"but missing: {target}"
+            )
         return None
     return validate_policy(policy, path=target)
 

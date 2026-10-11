@@ -323,6 +323,14 @@ payload names resolve under `$XDG_DATA_HOME/checkrun/schemas` when
 `~/.local/share/checkrun/schemas`; a policy can override that with
 `schemaDataDir`.
 
+A missing policy means "no associations", which suits hosts that never
+configured one. A host that ships a policy can set
+`CHECKRUN_SCHEMA_POLICY_REQUIRED=1` so that losing it fails loudly instead:
+planning then exits 2 when the policy is missing, and `schema-lint` exits 2
+when its validation dependencies are unavailable and `uv` cannot provide them,
+rather than printing a notice and passing. Commit gates treat exit 2 as a
+failure, so a broken install cannot look like a clean run.
+
 The policy is optional when no file exists. Once a policy file is present, it
 must be a regular file; symlinks resolving to regular files are accepted, while
 special files are rejected without reading. Checkrun validates the complete

@@ -78,6 +78,18 @@ def _ensure_optional_deps() -> None:
         # install uv or jsonschema gets a clear, repeated signal that the
         # phase is unenforced. Future batching of schema-lint would naturally
         # collapse the notice the same way the planner batching does.
+        #
+        # A host that requires its schema policy also requires enforcement, so
+        # there the same condition exits 2 ("could not run"), which commit
+        # gates treat as a failure rather than a clean pass.
+        if schema_policy.policy_required():
+            print(
+                "schema-lint: optional dependencies missing and uv unavailable; "
+                "schema validation is required (CHECKRUN_SCHEMA_POLICY_REQUIRED=1) "
+                f"but cannot run (missing: {', '.join(missing)})",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
         print(
             "schema-lint: optional dependencies missing and uv unavailable; "
             f"schema validation skipped (missing: {', '.join(missing)})",
