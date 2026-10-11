@@ -423,10 +423,14 @@ def _vendored_ref_path(schema_file: Path, url: str) -> Path | None:
     the two can never disagree about where a reference lives. Returns None for
     a URL that cannot map to a safe relative path (a query string, an empty or
     dot segment), which refresh reports and lint treats as unresolvable.
+
+    Only https and file URLs map. The path omits the scheme, so admitting
+    plain http would let an http reference be served the copy vetted over
+    https (or overwrite it); file exists for hermetic tests and staging.
     """
 
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme not in {"http", "https", "file"} or parsed.query:
+    if parsed.scheme not in {"https", "file"} or parsed.query:
         return None
     host = parsed.netloc.lower() or "_local"
     segments = [segment for segment in parsed.path.split("/") if segment]

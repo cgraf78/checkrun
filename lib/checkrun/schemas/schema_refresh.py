@@ -210,55 +210,150 @@ def _write_atomic(path: Path, content: bytes) -> None:
 MAX_VENDORED_REFS = 200
 
 
-def _document_ids(document: Any, base: str) -> set[str]:
-    """Return the URLs a document answers to: its fetch URL and any `$id`s.
+def _mentions_ref(document: Any) -> bool:
+    """Return whether `document` contains any `$ref` key at all.
 
-    References to these resolve inside the document itself, so they must not
-    be fetched as separate resources (an embedded `$id` usually 404s, and the
-    root `$id` often differs from the fetch URL, as SchemaStore's does).
+    A cheap pre-check, so payloads without references never need the optional
+    `referencing` library and refresh keeps working on lean hosts for them.
     """
 
-    ids = {urllib.parse.urldefrag(base).url}
-    stack: list[tuple[Any, str]] = [(document, base)]
+    stack = [document]
     while stack:
-        node, node_base = stack.pop()
+        node = stack.pop()
         if isinstance(node, dict):
-            node_id = node.get("$id")
-            if isinstance(node_id, str) and node_id:
-                node_base = urllib.parse.urljoin(node_base, node_id)
-                ids.add(urllib.parse.urldefrag(node_base).url)
-            stack.extend((value, node_base) for value in node.values())
+            if "$ref" in node:
+                return True
+            stack.extend(node.values())
         elif isinstance(node, list):
-            stack.extend((value, node_base) for value in node)
-    return ids
+            stack.extend(node)
+    return False
 
 
-def _remote_refs(document: Any, base: str) -> list[str]:
+def _referencing() -> Any:
+    """Import the `referencing` pieces vendoring needs, or explain what is missing."""
+
+    try:
+        import jsonschema_specifications
+        import referencing.jsonschema
+    except ModuleNotFoundError as exc:
+        raise RefreshError(
+            "vendoring schema references needs the `referencing` library "
+            "(install jsonschema 4.18 or newer)"
+        ) from exc
+    return referencing.jsonschema, jsonschema_specifications.REGISTRY
+
+
+def _specification(contents: Any, default: Any) -> Any:
+    """Return the JSON Schema dialect `contents` declares, else `default`."""
+
+    referencing_jsonschema, _meta = _referencing()
+    dialect = contents.get("$schema") if isinstance(contents, dict) else None
+    if not isinstance(dialect, str):
+        return default
+    return referencing_jsonschema.specification_with(dialect, default=default)
+
+
+def _schema_walk(document: Any, url: str) -> list[tuple[dict[str, Any], str]]:
+    """Return every subschema of `document` with its resolution base URI.
+
+    The walk uses the `referencing` library that validation itself resolves
+    references with, so refresh agrees with validation about which keyword is
+    the dialect's id (`id` before draft 6, `$id` after), which values are
+    subschemas (never `examples`, `enum`, `default`, or `const` data), and how
+    a nested id changes the base. An implementation of our own would drift.
+    """
+
+    referencing_jsonschema, _meta = _referencing()
+    walked: list[tuple[dict[str, Any], str]] = []
+    stack: list[tuple[Any, Any, str]] = [
+        (document, _specification(document, referencing_jsonschema.DRAFT7), url)
+    ]
+    while stack:
+        contents, spec, base = stack.pop()
+        if not isinstance(contents, dict):
+            continue
+        own_id = spec.id_of(contents)
+        if isinstance(own_id, str) and own_id:
+            base = urllib.parse.urljoin(base, own_id)
+        walked.append((contents, base))
+        for subschema in spec.subresources_of(contents):
+            stack.append((subschema, _specification(subschema, spec), base))
+    return walked
+
+
+def _remote_refs(document: Any, url: str) -> list[str]:
     """Return the external documents `document` references, without fragments.
 
-    Relative references resolve against the nearest enclosing `$id`, the same
-    rule validators use, so a relative `$ref` in a fetched payload is vendored
-    under the absolute URL that validation will later ask for.
+    References to the document's own URL or any id inside it resolve within
+    the document (SchemaStore's root `$id` even differs from its fetch URL),
+    and JSON Schema meta-schemas ship with the validator, so neither is
+    fetched.
     """
 
-    own = _document_ids(document, base)
+    _referencing_jsonschema, meta_schemas = _referencing()
+    walked = _schema_walk(document, url)
+    own = {urllib.parse.urldefrag(url).url} | {
+        urllib.parse.urldefrag(base).url for _contents, base in walked
+    }
     found: list[str] = []
-    stack: list[tuple[Any, str]] = [(document, base)]
-    while stack:
-        node, node_base = stack.pop()
-        if isinstance(node, dict):
-            node_id = node.get("$id")
-            if isinstance(node_id, str) and node_id:
-                node_base = urllib.parse.urljoin(node_base, node_id)
-            ref = node.get("$ref")
-            if isinstance(ref, str) and not ref.startswith("#"):
-                target = urllib.parse.urldefrag(urllib.parse.urljoin(node_base, ref)).url
-                if target and target not in own and target not in found:
-                    found.append(target)
-            stack.extend((value, node_base) for value in node.values())
-        elif isinstance(node, list):
-            stack.extend((value, node_base) for value in node)
+    for contents, base in walked:
+        ref = contents.get("$ref")
+        if not isinstance(ref, str) or ref.startswith("#"):
+            continue
+        target = urllib.parse.urldefrag(urllib.parse.urljoin(base, ref)).url
+        if not target or target in own or target in found:
+            continue
+        try:
+            meta_schemas.contents(target)
+        except LookupError:
+            found.append(target)
     return found
+
+
+def _with_base_id(schema: Any, source: str) -> Any:
+    """Record the fetch URL as the base URI of a payload that has references.
+
+    JSON Schema resolves relative references against the retrieval URI when a
+    document declares no id. A pinned payload is read from disk, where that URI
+    is lost, so without this a relative `$ref` would be vendored under the
+    source URL by refresh but looked up without a base by validation. Payloads
+    that already declare an id, or reference nothing external, are untouched.
+    """
+
+    if not isinstance(schema, dict) or not _mentions_ref(schema):
+        return schema
+    if not _remote_refs(schema, source):
+        return schema
+    referencing_jsonschema, _meta = _referencing()
+    spec = _specification(schema, referencing_jsonschema.DRAFT7)
+    if spec.id_of(schema):
+        return schema
+    keyword = "id" if spec.name in {"draft-03", "draft-04"} else "$id"
+    # Keep `$schema` first, as upstream documents conventionally do.
+    ordered: dict[str, Any] = {"$schema": schema["$schema"]} if "$schema" in schema else {}
+    ordered[keyword] = source
+    ordered.update(schema)
+    return ordered
+
+
+def _check_ref_scheme(document_url: str, target: str) -> None:
+    """Reject a reference that may not be fetched from where it appears.
+
+    Fetched documents are untrusted input. A remote payload containing
+    `"$ref": "file:///home/user/.ssh/id_ed25519"` must not make refresh read a
+    local file and vendor it into a directory a bot commits, and an https
+    payload must not pull its references over plain http. A reference must
+    therefore use its document's own scheme, and only https or file (the
+    latter for hermetic tests and local staging).
+    """
+
+    document_scheme = urllib.parse.urlsplit(document_url).scheme
+    target_scheme = urllib.parse.urlsplit(target).scheme
+    if target_scheme != document_scheme or target_scheme not in {"https", "file"}:
+        raise RefreshError(
+            f"refusing $ref {target} from {document_url}: a reference must use its "
+            "document's scheme, https or file"
+        )
 
 
 def _vendor_refs(
@@ -276,10 +371,13 @@ def _vendor_refs(
     """
 
     results: list[Result] = []
+    if not _mentions_ref(schema):
+        return results
     queue: list[tuple[Any, str]] = [(schema, candidate.source)]
     while queue:
         document, url = queue.pop(0)
         for target in _remote_refs(document, url):
+            _check_ref_scheme(url, target)
             path = schema_policy._vendored_ref_path(candidate.destination, target)
             label = f"{candidate.name} ref"
             if path is None:
@@ -315,6 +413,7 @@ def _refresh_candidate(
         payload = _read_url(candidate.source, timeout=timeout)
         schema = _decode_schema(payload)
         _check_schema(schema)
+        schema = _with_base_id(schema, candidate.source)
         content = _encoded(schema)
         existing = _read_existing(candidate.destination)
         if existing == content:

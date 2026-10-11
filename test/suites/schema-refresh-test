@@ -292,8 +292,11 @@ JSON
 cat >"$_rremote/shared.json" <<JSON
 {"\$schema":"http://json-schema.org/draft-07/schema#","\$id":"https://example.invalid/shared.json","definitions":{"s":{"type":"string"}},"properties":{"c":{"\$ref":"file://$_rremote/common.json"},"s":{"\$ref":"https://example.invalid/shared.json#/definitions/s"}}}
 JSON
-cat >"$_rremote/query.json" <<'JSON'
-{"$schema":"http://json-schema.org/draft-07/schema#","properties":{"q":{"$ref":"https://example.invalid/x.json?v=1"}}}
+cat >"$_rremote/query.json" <<JSON
+{"\$schema":"http://json-schema.org/draft-07/schema#","properties":{"q":{"\$ref":"file://$_rremote/x.json?v=1"}}}
+JSON
+cat >"$_rremote/cross.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-07/schema#","properties":{"x":{"$ref":"https://example.invalid/x.json"}}}
 JSON
 cat >"$_rpolicy" <<JSON
 {
@@ -305,7 +308,9 @@ cat >"$_rpolicy" <<JSON
     {"name": "Shared", "format": "json", "schema": "shared.schema.json",
      "source": "file://$_rremote/shared.json", "matches": ["shared.json"], "enforce": true},
     {"name": "Query", "format": "json", "schema": "query.schema.json",
-     "source": "file://$_rremote/query.json", "matches": ["query.json"], "enforce": true}
+     "source": "file://$_rremote/query.json", "matches": ["query.json"], "enforce": true},
+    {"name": "Cross", "format": "json", "schema": "cross.schema.json",
+     "source": "file://$_rremote/cross.json", "matches": ["cross.json"], "enforce": true}
   ]
 }
 JSON
@@ -350,7 +355,82 @@ rc=$?
 set -e
 _assert_exit "refs: an unvendorable reference fails the refresh" 1 "$rc"
 _assert_contains "refs: an unvendorable reference is named" \
-  "cannot vendor \$ref https://example.invalid/x.json?v=1: unsupported URL" "$output"
+  "cannot vendor \$ref file://$_rremote/x.json?v=1: unsupported URL" "$output"
+
+set +e
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_rpolicy" "$SCRIPT" --association Cross 2>&1)
+rc=$?
+set -e
+_assert_exit "refs: a reference changing scheme fails the refresh" 1 "$rc"
+_assert_contains "refs: a scheme-changing reference is refused before any fetch" \
+  "refusing \$ref https://example.invalid/x.json from file://$_rremote/cross.json" "$output"
+
+# Fetched documents are untrusted: an https payload must not make refresh read
+# a local file (which a bot would then commit) or fetch over plain http.
+python3 - "$CHECKRUN_REPO_ROOT/lib/checkrun/schemas" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import schema_policy
+import schema_refresh
+
+refused = [
+    ("https://example.invalid/a.json", "file:///home/user/.ssh/id_ed25519"),
+    ("https://example.invalid/a.json", "http://example.invalid/b.json"),
+    ("http://example.invalid/a.json", "http://example.invalid/b.json"),
+]
+for document, target in refused:
+    try:
+        schema_refresh._check_ref_scheme(document, target)
+    except schema_refresh.RefreshError:
+        pass
+    else:
+        raise AssertionError(f"accepted {target} from {document}")
+schema_refresh._check_ref_scheme("https://www.example.invalid/a.json", "https://json.example.invalid/b.json")
+assert schema_policy._vendored_ref_path(schema_policy.Path("/s/x.json"), "http://h/a.json") is None
+PY
+_assert_exit "refs: https documents cannot reach file:// or http references" 0 "$?"
+
+# Refresh and validation must agree on every reference, so lint what refresh
+# vendored. Root has no id and a relative ref, the case where the payload's
+# base URI would otherwise be lost once it is pinned to disk.
+_rschema_lint="$CHECKRUN_REPO_ROOT/lib/checkrun/schemas/schema-lint.py"
+printf '{"c": {"n": "not-an-integer"}}\n' >"$_rtd/root.json"
+set +e
+output=$(cd "$_rtd" && CHECKRUN_SCHEMA_ASSOCIATIONS="$_rpolicy" "$_rschema_lint" root.json 2>&1)
+rc=$?
+set -e
+_assert_exit "refs: lint resolves what refresh vendored" 1 "$rc"
+_assert_contains "refs: a relative, then nested, reference is enforced offline" \
+  "c.n: 'not-an-integer' is not of type 'integer'" "$output"
+_assert_contains "refs: a payload without an id records its fetch URL as base" \
+  "\"\$id\": \"file://$_rremote/root.json\"" "$(cat "$_rschemas/root.schema.json")"
+
+# The crawl follows validation's rules: draft-04 `id` sets the base, `$ref`s in
+# example data are never resolved, and meta-schemas ship with the validator.
+mkdir -p "$_rremote/d4"
+cat >"$_rremote/d4/leaf.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-04/schema#","type":"boolean"}
+JSON
+cat >"$_rremote/edge.json" <<JSON
+{"\$schema":"http://json-schema.org/draft-04/schema#","id":"file://$_rremote/d4/edge.json","properties":{"leaf":{"\$ref":"leaf.json"},"meta":{"\$ref":"http://json-schema.org/draft-04/schema#"}},"examples":[{"\$ref":"file://$_rremote/never-fetched.json"}]}
+JSON
+_redge_policy="$_rtd/edge-associations.json"
+cat >"$_redge_policy" <<JSON
+{"version": 1, "schemaDataDir": "$_rschemas", "associations": [
+  {"name": "Edge", "format": "json", "schema": "edge.schema.json",
+   "source": "file://$_rremote/edge.json", "matches": ["edge.json"], "enforce": true}
+]}
+JSON
+set +e
+output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_redge_policy" "$SCRIPT" 2>&1)
+rc=$?
+set -e
+_assert_exit "refs: draft-04, example, and meta-schema refs refresh cleanly" 0 "$rc"
+_assert_file_exists "refs: a draft-04 \`id\` sets the base for relative refs" \
+  "$_rschemas/refs/_local$_rremote/d4/leaf.json"
+_assert_not_contains "refs: \$ref inside examples is never fetched" "never-fetched" "$output"
+_assert_not_contains "refs: meta-schema refs are never fetched" "json-schema.org" "$output"
 
 # Two payloads sharing a reference fetch it once per run.
 rm -rf -- "$_rschemas/refs"

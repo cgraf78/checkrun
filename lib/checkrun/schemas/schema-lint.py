@@ -155,7 +155,8 @@ def _vendored_registry(schema_path: Path) -> Any:
     copies and never fetches, so validation stays offline and deterministic. A
     reference that was never vendored raises Unresolvable, reported as a
     diagnostic that names the fix. Returns None for jsonschema releases before
-    the `referencing` library existed; they keep their own resolver.
+    the `referencing` library existed (4.18); their own resolver still fetches
+    remote references, so offline validation needs a current jsonschema.
     """
 
     try:
