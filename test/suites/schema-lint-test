@@ -815,6 +815,43 @@ assert not hasattr(module, "nvim_config")
 PY
 _assert_exit "policy API: public facade is explicit" 0 "$?"
 
+python3 - "$POLICY_SCRIPT" "$_td" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+script = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("checkrun_schema_policy", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+policy = module.validate_policy(
+    {
+        "version": 1,
+        "associations": [
+            {"name": "Enforced", "format": "json", "schema": "e.schema.json",
+             "matches": ["tool.json"], "enforce": True},
+            {"name": "Advisory", "format": "json", "editorSource": "https://example.invalid/a.json",
+             "matches": ["tool.json"], "enforce": False},
+            {"name": "Other", "format": "json", "schema": "o.schema.json",
+             "matches": ["other.json"], "enforce": True},
+        ],
+    }
+)
+target = Path(sys.argv[2]) / "repo" / "tool.json"
+names = lambda items: [item["name"] for item in items]
+# Validation keeps enforcing only `enforce: true` entries.
+assert names(module.matching_associations(policy, target)) == ["Enforced"]
+# Coverage tooling sees every decision, through the same pattern expansion.
+assert names(module.matching_associations(policy, target, include_advisory=True)) == [
+    "Enforced",
+    "Advisory",
+]
+assert module.matching_associations(policy, target.with_name("none.json"), include_advisory=True) == []
+PY
+_assert_exit "policy API: include_advisory adds editor-only matches" 0 "$?"
+
 set +e
 output=$(HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" PATH="$_shdeps_bin:$PATH" python3 "$POLICY_SCRIPT" --lsp-schemas 2>/dev/null)
 rc=$?

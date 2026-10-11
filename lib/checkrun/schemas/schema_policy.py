@@ -528,10 +528,23 @@ def matching_associations(
     path: Path,
     *,
     prepared: list[tuple[dict[str, Any], list[str]]] | None = None,
+    include_advisory: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return enforceable schema associations that match `path`."""
+    """Return schema associations that match `path`.
 
-    matchers = prepared if prepared is not None else _prepare_matching_associations(policy)
+    Validation only enforces `enforce: true` entries, so that is the default.
+    `include_advisory=True` also returns editor-only entries, for coverage
+    tooling that asks whether a file has any schema decision at all; it uses
+    the same pattern expansion so the answer cannot drift from validation.
+    """
+
+    if include_advisory:
+        matchers = [
+            (association, _expanded_patterns(association.get("matches", [])))
+            for association in _associations(policy)
+        ]
+    else:
+        matchers = prepared if prepared is not None else _prepare_matching_associations(policy)
     path_names = _candidates(path)
     return [
         association for association, patterns in matchers if _matches_expanded(path_names, patterns)
