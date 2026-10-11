@@ -4,8 +4,8 @@
 Normal Checkrun validation is intentionally offline: schema-lint reads local
 payloads through schema_policy.schema_path(). This command is the explicit
 maintenance path that updates those pinned payloads from their public `source`
-URLs and lets CI report drift without making every lint run depend on the
-network.
+URLs, along with every document they reference remotely, and lets CI report
+drift without making every lint run depend on the network.
 """
 
 from __future__ import annotations
@@ -204,7 +204,113 @@ def _write_atomic(path: Path, content: bytes) -> None:
         raise RefreshError(f"cannot write schema: {exc}") from exc
 
 
-def _refresh_candidate(candidate: Candidate, *, check: bool, timeout: float) -> Result:
+# A schema graph larger than this is almost certainly a reference loop through
+# ever-changing URLs or a misconfigured source, not a real payload; stop rather
+# than crawl indefinitely.
+MAX_VENDORED_REFS = 200
+
+
+def _document_ids(document: Any, base: str) -> set[str]:
+    """Return the URLs a document answers to: its fetch URL and any `$id`s.
+
+    References to these resolve inside the document itself, so they must not
+    be fetched as separate resources (an embedded `$id` usually 404s, and the
+    root `$id` often differs from the fetch URL, as SchemaStore's does).
+    """
+
+    ids = {urllib.parse.urldefrag(base).url}
+    stack: list[tuple[Any, str]] = [(document, base)]
+    while stack:
+        node, node_base = stack.pop()
+        if isinstance(node, dict):
+            node_id = node.get("$id")
+            if isinstance(node_id, str) and node_id:
+                node_base = urllib.parse.urljoin(node_base, node_id)
+                ids.add(urllib.parse.urldefrag(node_base).url)
+            stack.extend((value, node_base) for value in node.values())
+        elif isinstance(node, list):
+            stack.extend((value, node_base) for value in node)
+    return ids
+
+
+def _remote_refs(document: Any, base: str) -> list[str]:
+    """Return the external documents `document` references, without fragments.
+
+    Relative references resolve against the nearest enclosing `$id`, the same
+    rule validators use, so a relative `$ref` in a fetched payload is vendored
+    under the absolute URL that validation will later ask for.
+    """
+
+    own = _document_ids(document, base)
+    found: list[str] = []
+    stack: list[tuple[Any, str]] = [(document, base)]
+    while stack:
+        node, node_base = stack.pop()
+        if isinstance(node, dict):
+            node_id = node.get("$id")
+            if isinstance(node_id, str) and node_id:
+                node_base = urllib.parse.urljoin(node_base, node_id)
+            ref = node.get("$ref")
+            if isinstance(ref, str) and not ref.startswith("#"):
+                target = urllib.parse.urldefrag(urllib.parse.urljoin(node_base, ref)).url
+                if target and target not in own and target not in found:
+                    found.append(target)
+            stack.extend((value, node_base) for value in node.values())
+        elif isinstance(node, list):
+            stack.extend((value, node_base) for value in node)
+    return found
+
+
+def _vendor_refs(
+    candidate: Candidate,
+    schema: Any,
+    *,
+    check: bool,
+    timeout: float,
+    seen: set[Path],
+) -> list[Result]:
+    """Fetch every document the payload transitively references, beside it.
+
+    `seen` spans the whole run, so a document several payloads share (such as
+    SchemaStore's common fragments) is fetched and reported once.
+    """
+
+    results: list[Result] = []
+    queue: list[tuple[Any, str]] = [(schema, candidate.source)]
+    while queue:
+        document, url = queue.pop(0)
+        for target in _remote_refs(document, url):
+            path = schema_policy._vendored_ref_path(candidate.destination, target)
+            label = f"{candidate.name} ref"
+            if path is None:
+                raise RefreshError(f"cannot vendor $ref {target}: unsupported URL")
+            if path in seen:
+                continue
+            seen.add(path)
+            if len(seen) > MAX_VENDORED_REFS:
+                raise RefreshError(f"more than {MAX_VENDORED_REFS} referenced documents")
+            try:
+                referenced = _decode_schema(_read_url(target, timeout=timeout))
+            except RefreshError as exc:
+                raise RefreshError(f"$ref {target}: {exc}") from exc
+            content = _encoded(referenced)
+            existing = _read_existing(path)
+            if existing == content:
+                results.append(Result("current", label, path, target))
+            elif check:
+                message = "would update" if existing is not None else "would create"
+                results.append(Result("changed", label, path, target, message))
+            else:
+                _write_atomic(path, content)
+                status = "updated" if existing is not None else "created"
+                results.append(Result(status, label, path, target))
+            queue.append((referenced, target))
+    return results
+
+
+def _refresh_candidate(
+    candidate: Candidate, *, check: bool, timeout: float, seen: set[Path]
+) -> list[Result]:
     try:
         payload = _read_url(candidate.source, timeout=timeout)
         schema = _decode_schema(payload)
@@ -212,17 +318,22 @@ def _refresh_candidate(candidate: Candidate, *, check: bool, timeout: float) -> 
         content = _encoded(schema)
         existing = _read_existing(candidate.destination)
         if existing == content:
-            return Result("current", candidate.name, candidate.destination, candidate.source)
-        if check:
+            result = Result("current", candidate.name, candidate.destination, candidate.source)
+        elif check:
             message = "would update" if existing is not None else "would create"
-            return Result(
+            result = Result(
                 "changed", candidate.name, candidate.destination, candidate.source, message
             )
-        _write_atomic(candidate.destination, content)
-        status = "updated" if existing is not None else "created"
-        return Result(status, candidate.name, candidate.destination, candidate.source)
+        else:
+            _write_atomic(candidate.destination, content)
+            status = "updated" if existing is not None else "created"
+            result = Result(status, candidate.name, candidate.destination, candidate.source)
+        # References can change upstream while the payload itself does not,
+        # so they are refreshed on every run, not only when the payload moves.
+        refs = _vendor_refs(candidate, schema, check=check, timeout=timeout, seen=seen)
+        return [result, *refs]
     except RefreshError as exc:
-        return Result("failed", candidate.name, candidate.destination, candidate.source, str(exc))
+        return [Result("failed", candidate.name, candidate.destination, candidate.source, str(exc))]
 
 
 def _load_policy() -> tuple[Path, dict[str, Any]]:
@@ -296,8 +407,11 @@ def run(
         print("schema refresh: no refreshable schemas")
         return 0
 
+    seen: set[Path] = set()
     results = [
-        _refresh_candidate(candidate, check=check, timeout=timeout) for candidate in candidates
+        result
+        for candidate in candidates
+        for result in _refresh_candidate(candidate, check=check, timeout=timeout, seen=seen)
     ]
     for result in results:
         _print_result(result)

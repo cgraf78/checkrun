@@ -147,6 +147,43 @@ def _json_path(error: Any) -> str:
     return ".".join(parts) if parts else "<root>"
 
 
+def _vendored_registry(schema_path: Path) -> Any:
+    """Return a reference registry that resolves remote `$ref`s offline.
+
+    `checkrun schema refresh` stores each payload's remote references beside it
+    (see schema_policy._vendored_ref_path); this registry serves only those
+    copies and never fetches, so validation stays offline and deterministic. A
+    reference that was never vendored raises Unresolvable, reported as a
+    diagnostic that names the fix. Returns None for jsonschema releases before
+    the `referencing` library existed; they keep their own resolver.
+    """
+
+    try:
+        from referencing import Registry, Resource
+        from referencing.exceptions import NoSuchResource
+        from referencing.jsonschema import DRAFT7
+    except ModuleNotFoundError:
+        return None
+
+    def retrieve(uri: str) -> Any:
+        target = schema_policy._vendored_ref_path(schema_path, uri)
+        if target is None or not target.is_file():
+            raise NoSuchResource(ref=uri)
+        # Vendored documents normally declare their own `$schema`; Draft 7 is
+        # only the fallback dialect for the few that do not.
+        return Resource.from_contents(schema_policy.load_json(target), default_specification=DRAFT7)
+
+    return Registry(retrieve=retrieve)
+
+
+def _unresolvable_types() -> tuple[type[BaseException], ...]:
+    try:
+        from referencing.exceptions import Unresolvable
+    except ModuleNotFoundError:
+        return ()
+    return (Unresolvable,)
+
+
 def _validate_with_schema(
     path: Path,
     data: Any,
@@ -174,7 +211,10 @@ def _validate_with_schema(
         schema = schema_policy.load_json(schema_path)
         validator_cls = jsonschema.validators.validator_for(schema)
         validator_cls.check_schema(schema)
-        validator = validator_cls(schema)
+        registry = _vendored_registry(schema_path)
+        validator = (
+            validator_cls(schema) if registry is None else validator_cls(schema, registry=registry)
+        )
         for error in sorted(validator.iter_errors(data), key=lambda item: list(item.path)):
             diagnostics.append(
                 Diagnostic(
@@ -189,6 +229,17 @@ def _validate_with_schema(
                 path=str(path),
                 code=name,
                 message=f"{name}: invalid schema {schema_path}: {exc.message}",
+            )
+        )
+    except _unresolvable_types() as exc:
+        diagnostics.append(
+            Diagnostic(
+                path=str(path),
+                code=name,
+                message=(
+                    f"{name}: schema reference is not vendored ({exc}); "
+                    "run `checkrun schema refresh` to fetch it"
+                ),
             )
         )
     except (JSONDecodeError, OSError, RuntimeError, ValueError) as exc:

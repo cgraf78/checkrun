@@ -32,6 +32,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import urllib.parse
 from collections.abc import Iterable
 from functools import lru_cache
 from json import JSONDecodeError
@@ -411,6 +412,29 @@ def schema_path(policy: dict[str, Any], association: dict[str, Any]) -> Path:
         else checkrun_paths.data_dir() / "checkrun/schemas"
     )
     return data_dir / schema
+
+
+def _vendored_ref_path(schema_file: Path, url: str) -> Path | None:
+    """Return where a pinned payload's remote `$ref` target is vendored.
+
+    Validation is offline, so a payload's remote references are fetched by
+    `checkrun schema refresh` and stored beside it under `refs/<host>/<path>`.
+    Refresh writes through this mapping and schema-lint reads through it, so
+    the two can never disagree about where a reference lives. Returns None for
+    a URL that cannot map to a safe relative path (a query string, an empty or
+    dot segment), which refresh reports and lint treats as unresolvable.
+    """
+
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https", "file"} or parsed.query:
+        return None
+    host = parsed.netloc.lower() or "_local"
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if not segments or "/" in host or host in {".", ".."}:
+        return None
+    if any(segment in {".", ".."} or "\\" in segment for segment in segments):
+        return None
+    return schema_file.parent / "refs" / host / Path(*segments)
 
 
 def schema_url(

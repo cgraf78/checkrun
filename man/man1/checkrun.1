@@ -57,7 +57,10 @@ Emit formatter and linter execution plans without running tools.
 Explain formatter, linter, and schema policy for paths.
 .TP
 .B schema refresh [--check] [--association NAME] [--timeout SECONDS]
-Refresh pinned public schema payloads from association sources.
+Refresh pinned public schema payloads from association sources, and vendor
+the documents they reference remotely under
+.I refs/
+beside them so validation never fetches.
 .B --check
 reports drift without writing payloads,
 .B --association

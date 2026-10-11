@@ -903,6 +903,57 @@ else
     "but cannot run (missing: jsonschema" "$output"
 fi
 
+echo "=== schema-lint: remote references resolve offline ==="
+
+# Payloads with remote `$ref`s validate from the copies `checkrun schema
+# refresh` vendors under refs/<host>/<path>, never from the network. The
+# example.invalid host cannot resolve, so any fetch would fail the first case.
+_vtd=$(_tmpdir)
+_vschemas="$_vtd/schemas"
+mkdir -p "$_vschemas/refs/example.invalid/defs"
+cat >"$_vschemas/remote-ref.schema.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"port":{"$ref":"https://example.invalid/defs/port.json#/definitions/port"}}}
+JSON
+cat >"$_vschemas/refs/example.invalid/defs/port.json" <<'JSON'
+{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"port":{"type":"integer","maximum":65535}}}
+JSON
+cat >"$_vtd/associations.json" <<JSON
+{"version": 1, "schemaDataDir": "$_vschemas", "associations": [
+  {"name": "Remote ref", "format": "json", "schema": "remote-ref.schema.json",
+   "matches": ["remote-ref.json"], "enforce": true}
+]}
+JSON
+printf '{"port": 70000}\n' >"$_vtd/remote-ref.json"
+if [[ "${#_schema_python[@]}" -gt 0 ]]; then
+  set +e
+  output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_vtd/associations.json" \
+    "${_schema_python[@]}" -W error::DeprecationWarning "$SCRIPT" "$_vtd/remote-ref.json" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "vendored ref: finding from the referenced definition" 1 "$rc"
+  _assert_contains "vendored ref: the referenced constraint is enforced" \
+    "port: 70000 is greater than the maximum of 65535" "$output"
+  _assert_not_contains "vendored ref: no remote retrieval is attempted" \
+    "Automatically retrieving remote references" "$output"
+
+  rm "$_vschemas/refs/example.invalid/defs/port.json"
+  set +e
+  output=$(CHECKRUN_SCHEMA_ASSOCIATIONS="$_vtd/associations.json" \
+    "${_schema_python[@]}" "$SCRIPT" "$_vtd/remote-ref.json" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "unvendored ref: reported as a finding" 1 "$rc"
+  _assert_contains "unvendored ref: names the reference and the fix" \
+    "schema reference is not vendored (Unresolvable: https://example.invalid/defs/port.json" \
+    "$output"
+  # shellcheck disable=SC2016 # The expected message contains literal backticks.
+  _assert_contains "unvendored ref: points at schema refresh" \
+    'run `checkrun schema refresh` to fetch it' "$output"
+  _assert_not_contains "unvendored ref: no traceback" "Traceback" "$output"
+else
+  echo "  SKIP: offline reference resolution (jsonschema and uv unavailable)"
+fi
+
 # Keep production policy assertions out of this repo. The deployed
 # associations.json, its pinned schema URLs, and the configs it enforces are
 # owned by dotfiles, which is where any validation of them belongs; asserting
