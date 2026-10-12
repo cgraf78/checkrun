@@ -341,7 +341,10 @@ policy.
 
 Normal schema validation never fetches association `source` URLs. `schema-lint`
 uses local schema payloads through `schema_policy.schema_path()` so hooks and CI
-remain deterministic offline. Portable LSP consumers can prefer public `source`
+remain deterministic offline. Remote `$ref` targets inside a payload are offline
+too: they resolve only from copies vendored beside it under
+`refs/<host>/<path>`, and a reference that was never vendored is a finding that
+names `checkrun schema refresh` as the fix rather than a network fetch. Portable LSP consumers can prefer public `source`
 URLs through the `--lsp-schemas` projection. VS Code and other editor-native
 consumers that can resolve custom schema schemes can add `--editor-sources` to
 prefer `editorSource` URLs such as `vscode://schemas/settings/user`.
@@ -358,7 +361,11 @@ The refresh command selects associations that declare `source` and do not
 declare `dependency`; dependency-owned schemas are refreshed by their owning
 repos. Fetched payloads must be valid JSON, and when `jsonschema` is available
 they must also validate as JSON Schemas before replacing the pinned file.
-Writes are atomic and use a canonical generated JSON layout so future diffs are
+Each run also vendors every document the payload references remotely,
+transitively, under `refs/` beside it; references are re-checked on every run
+because they can change while the payload does not, and a reference that cannot
+map to a safe local path (for example, one with a query string) fails the
+refresh. Writes are atomic and use a canonical generated JSON layout so future diffs are
 stable. `--check` reports drift without writing and is intended for scheduled
 CI in host repos that track schema payloads.
 
