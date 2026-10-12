@@ -38,7 +38,7 @@ printf 'BASH_ENV=%s\n' "${BASH_ENV-unset}"
 printf 'ENV=%s\n' "${ENV-unset}"
 for name in CHECKRUN_SCHEMA_ASSOCIATIONS CHECKRUN_REGISTRY \
   CHECKRUN_AUTOLINT_JOBS CHECKRUN_AUTOLINT_REPORT CHECKRUN_SCHEMA_LINT \
-  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP; do
+  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP CHECKRUN_SCHEMA_POLICY_REQUIRED; do
   printf '%s=%s\n' "$name" "${!name-unset}"
 done
 if [[ "$CHECKRUN_CONFIG_DIR" != /hostile && -d "$CHECKRUN_CONFIG_DIR" ]]; then
@@ -62,6 +62,7 @@ probe_output=$(CHECKRUN_HARNESS_HELPERS="$CHECKRUN_TEST_DIR/helpers.sh" \
   CHECKRUN_AUTOLINT_REPORT=/hostile \
   CHECKRUN_SCHEMA_LINT=/hostile \
   CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP=/hostile \
+  CHECKRUN_SCHEMA_POLICY_REQUIRED=1 \
   CHECKRUN_CONFIG_DIR=/hostile \
   "$fixture/probe-suite" "first arg" second)
 _assert_exit "isolation: probe suite exits 0" 0 "$?"
@@ -75,7 +76,7 @@ _assert_contains "isolation: BASH_ENV is cleared" "BASH_ENV=unset" "$probe_outpu
 _assert_contains "isolation: ENV is cleared" "ENV=unset" "$probe_output"
 for name in CHECKRUN_SCHEMA_ASSOCIATIONS CHECKRUN_REGISTRY \
   CHECKRUN_AUTOLINT_JOBS CHECKRUN_AUTOLINT_REPORT CHECKRUN_SCHEMA_LINT \
-  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP; do
+  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP CHECKRUN_SCHEMA_POLICY_REQUIRED; do
   _assert_contains "isolation: $name is dropped" "$name=unset" "$probe_output"
 done
 _assert_contains "isolation: config directory is private" \

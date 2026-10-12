@@ -428,11 +428,13 @@ export CHECKRUN_CONFIG_DIR
 # Drop the other behavior knobs a developer's shell may export, too. An
 # exported CHECKRUN_REGISTRY points every planner at a different registry, and
 # CHECKRUN_AUTOLINT_REPORT makes each autolint run truncate the developer's
-# report file. Suites that test a knob set it per command. CHECKRUN_PYTHON is
-# kept: like PATH, it only selects an interpreter the host may need.
+# report file, and an exported CHECKRUN_SCHEMA_POLICY_REQUIRED (a host that
+# ships a policy sets it) fails every fixture that runs without one. Suites
+# that test a knob set it per command. CHECKRUN_PYTHON is kept: like PATH, it
+# only selects an interpreter the host may need.
 unset CHECKRUN_SCHEMA_ASSOCIATIONS CHECKRUN_REGISTRY CHECKRUN_AUTOLINT_JOBS \
   CHECKRUN_AUTOLINT_REPORT CHECKRUN_SCHEMA_LINT \
-  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP
+  CHECKRUN_SCHEMA_LINT_UV_BOOTSTRAP CHECKRUN_SCHEMA_POLICY_REQUIRED
 
 # Create a mock HOME, saving the original. Sets TEST_HOME, REAL_HOME, HOME.
 _mock_home() {

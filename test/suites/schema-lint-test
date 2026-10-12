@@ -835,6 +835,37 @@ set -e
 _assert_exit "editor config: editor-source mode exits 0" 0 "$rc"
 _assert_contains "editor config: editor-source mode preserves editor-only schema urls" '"url":"vscode://schemas/settings/user"' "$output"
 
+echo "=== schema-lint: validation dependencies when the policy is required ==="
+
+# `python3 -S` drops site-packages, which is where jsonschema lives, and a PATH
+# without uv removes the self-bootstrap, so the validator cannot run. A host
+# that requires its policy must see that as "could not run" (exit 2), never as
+# a clean pass; other hosts keep the notice-and-skip behavior.
+_nodeps_bin="$_td/nodeps-bin"
+mkdir -p "$_nodeps_bin"
+ln -s "$(command -v python3)" "$_nodeps_bin/python3"
+if PATH="$_nodeps_bin" python3 -S -c 'import jsonschema' 2>/dev/null; then
+  echo "  SKIP: required validation dependencies (jsonschema importable without site-packages)"
+else
+  _nodeps_file="$_home/.config/example/schema.d/test-settings-bad.json"
+  set +e
+  output=$(env -i PATH="$_nodeps_bin" HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" \
+    python3 -S "$SCRIPT" "$_nodeps_file" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "missing deps: optional policy skips validation" 0 "$rc"
+  _assert_contains "missing deps: optional policy says validation was skipped" \
+    "schema validation skipped" "$output"
+  set +e
+  output=$(env -i PATH="$_nodeps_bin" HOME="$_home" CHECKRUN_SCHEMA_ASSOCIATIONS="$_policy" \
+    CHECKRUN_SCHEMA_POLICY_REQUIRED=1 python3 -S "$SCRIPT" "$_nodeps_file" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "missing deps: required policy reports could-not-run" 2 "$rc"
+  _assert_contains "missing deps: required policy names the missing package" \
+    "but cannot run (missing: jsonschema" "$output"
+fi
+
 # Keep production policy assertions out of this repo. The deployed
 # associations.json, its pinned schema URLs, and the configs it enforces are
 # owned by dotfiles, which is where any validation of them belongs; asserting

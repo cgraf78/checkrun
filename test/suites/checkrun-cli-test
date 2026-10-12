@@ -384,6 +384,22 @@ _assert_exit "plan: missing optional policy exits zero" 0 "$rc"
 _assert_contains "plan: missing optional policy still emits its plan" \
   '"files"' "$output"
 
+# A host that ships a policy declares it required, so losing it must not read
+# as "no associations": planning fails like an unreadable policy does.
+set +e
+output=$(env CHECKRUN_SCHEMA_ASSOCIATIONS="$_missing_policy" CHECKRUN_SCHEMA_POLICY_REQUIRED=1 \
+  "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+rc=$?
+set -e
+_assert_exit "plan: missing required policy exits 2" 2 "$rc"
+_assert_contains "plan: missing required policy names the variable and path" \
+  "CHECKRUN_SCHEMA_POLICY_REQUIRED=1) but missing: $_missing_policy" "$output"
+_assert_not_contains "plan: missing required policy emits no partial JSON" \
+  '"files"' "$output"
+output=$(env CHECKRUN_SCHEMA_ASSOCIATIONS="$_missing_policy" CHECKRUN_SCHEMA_POLICY_REQUIRED=0 \
+  "$CHECKRUN" plan --json --phase format "$_td/keep.py" 2>&1)
+_assert_contains "plan: only the value 1 makes the policy required" '"files"' "$output"
+
 _dangling_policy="$_td/dangling-associations.json"
 ln -s missing-policy-target.json "$_dangling_policy"
 set +e

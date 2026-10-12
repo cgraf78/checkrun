@@ -107,6 +107,14 @@ Schema association policy file to use instead of
 .I associations.json
 in the Checkrun config directory, for a single run, test fixture, or
 integration harness.
+.TP
+.B CHECKRUN_SCHEMA_POLICY_REQUIRED
+Set to
+.B 1
+on a host that ships a schema association policy.
+A missing policy then exits 2 instead of meaning no associations, and
+schema validation that cannot run because its dependencies are unavailable
+exits 2 instead of being skipped.
 .SH EXIT STATUS
 .TP
 .B 0
