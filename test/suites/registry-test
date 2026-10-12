@@ -319,6 +319,29 @@ for relative in (
     plan = registry_mod.plan(registry, [str(target)], "lint")["files"][0]
     assert plan["filetype"] == "jsonc", relative
 
+# Extensionless config names that schema associations commonly target. Without
+# a filetype, editors attach no language server and the plan selects no syntax
+# linter, so a schema association alone would not make them editable safely.
+for relative, expected in {
+    "repo/.renovaterc": "json",
+    "repo/.yamlfmt": "yaml",
+    ".config/checkrun/clang-format": "yaml",
+}.items():
+    target = tmp / "matrix" / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("", encoding="utf-8")
+    plan = registry_mod.plan(registry, [str(target)], "lint")["files"][0]
+    assert plan["filetype"] == expected, (relative, plan["filetype"])
+    if expected == "json":
+        # JSON gets a real syntax linter, not only the schema step.
+        assert "biome-lint" in [step["adapter"] for step in plan["lint"]["steps"]], relative
+# Editors detect filetypes from the capabilities projection, so the same names
+# must reach it, not only the plan.
+custom = capabilities["filetypes"]["custom"]
+assert custom["filename"][".renovaterc"] == "json"
+assert custom["filename"][".yamlfmt"] == "yaml"
+assert {"pattern": "*/.config/checkrun/clang-format", "filetype": "yaml"} in custom["patterns"]
+
 agent_target = (
     tmp
     / "matrix"

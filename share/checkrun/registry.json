@@ -109,7 +109,9 @@
       ".profile": "bash",
       ".pylintrc": "ini",
       ".pypirc": "ini",
+      ".renovaterc": "json",
       ".vscodeignore": "ignore",
+      ".yamlfmt": "yaml",
       ".zlogin": "zsh",
       ".zlogout": "zsh",
       ".zprofile": "zsh",
@@ -151,6 +153,7 @@
         "pattern": "*/.config/dot/merge-hooks.d/agent-rules/targets.d/*.replace/*.conf",
         "filetype": "text"
       },
+      { "pattern": "*/.config/checkrun/clang-format", "filetype": "yaml" },
       { "pattern": "*/.config/git/config", "filetype": "gitconfig" },
       { "pattern": "*color-theme.json", "filetype": "jsonc" },
       { "pattern": "*icon-theme.json", "filetype": "jsonc" },
