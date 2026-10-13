@@ -13,7 +13,8 @@ python3 - \
   "$repo_root/.github/workflows/test.yml" \
   "$repo_root/.github/workflows/retry-infrastructure.yml" \
   "$repo_root/.github/cgraf78-actions.lock" \
-  "$repo_root/.github/workflows/update-mise-lock.yml" <<'PY'
+  "$repo_root/.github/workflows/update-mise-lock.yml" \
+  "$repo_root/.github/workflows/dependabot-automerge.yml" <<'PY'
 from __future__ import annotations
 
 import importlib.util
@@ -38,6 +39,8 @@ if re.fullmatch(r"[0-9a-f]{40}\n", lock_text) is None:
 actions_sha = lock_text[:-1]
 update_workflow_path = Path(sys.argv[5])
 update_workflow = update_workflow_path.read_text(encoding="utf-8")
+automerge_workflow_path = Path(sys.argv[6])
+automerge_workflow = automerge_workflow_path.read_text(encoding="utf-8")
 spec = importlib.util.spec_from_file_location("verify_mise_lock", script)
 if spec is None or spec.loader is None:
     raise RuntimeError(f"cannot load {script}")
@@ -182,6 +185,29 @@ for duplicated_implementation in [
     if duplicated_implementation in refresh_job:
         raise AssertionError(
             f"Mise refresh caller duplicates provider logic: {duplicated_implementation}"
+        )
+
+if automerge_workflow.count("permissions: {}") != 1:
+    raise AssertionError("Dependabot auto-merge must deny permissions by default")
+enable_job = job_block(automerge_workflow, "enable")
+for contract in [
+    "    if: github.event.pull_request.user.login == 'dependabot[bot]'",
+    "      contents: write",
+    "      pull-requests: write",
+    (
+        "    uses: cgraf78/actions/.github/workflows/dependabot-automerge.yml@"
+        f"{actions_sha}"
+    ),
+]:
+    if contract not in enable_job:
+        raise AssertionError(f"Dependabot auto-merge caller must include {contract}")
+# The pull_request_target trigger carries a write token, so the caller must
+# never grow steps that could check out or run pull-request code.
+for duplicated_implementation in ["runs-on:", "steps:", "gh pr merge"]:
+    if duplicated_implementation in enable_job:
+        raise AssertionError(
+            "Dependabot auto-merge caller duplicates provider logic: "
+            f"{duplicated_implementation}"
         )
 PY
 
