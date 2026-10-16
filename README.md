@@ -5,14 +5,71 @@
 [![Bash Version](https://img.shields.io/badge/bash-%3E%3D3.2-blue.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-lightgrey.svg)](#)
 
-`checkrun` owns formatter, linter, and file-check dispatch used by the
-`checkrun`, `autoformat`, and `autolint` CLIs. Other tools can depend on those
-CLIs as their formatting and linting policy surface.
+**One format command and one lint command for 30+ file types.**
 
-`shdeps` installs the `bin/` entry points as PATH-visible symlinks and links
-the bundled `man/man1/` pages into the user-local manpath.
+`autoformat FILE...` and `autolint FILE...` pick the right tool for each file:
+ruff, shfmt and shellcheck, biome, stylua, clang-format, rustfmt, taplo,
+actionlint and zizmor, hadolint, typos, and two dozen more. Each tool uses the
+project's own config when it has one, with optional global fallbacks under
+`~/.config/checkrun`. Tools you haven't installed are skipped, so the same
+setup works on every machine. Editors, commit hooks, CI, and AI agents can all
+call the same two commands instead of each carrying its own language table.
+`autolint --json` emits one diagnostic per line, and `checkrun verify` runs
+slower project-wide analyzers (clippy, golangci-lint, govulncheck, cargo-audit)
+on demand.
+
+Unlike trunk check or MegaLinter, checkrun never installs linters or
+formatters: it runs the ones already on your `PATH`. Unlike conform.nvim or
+nvim-lint, it is not tied to an editor.
+
+## Supported Tools
+
+| File type | Formatter | Linter |
+| --- | --- | --- |
+| Python | `ruff format` | `ruff check` |
+| Shell | `shfmt` | `shellcheck` |
+| Zsh | `shfmt` | `zsh -n` |
+| Go | `goimports` + `gofumpt` | - |
+| Lua | `stylua` | `selene` |
+| C/C++ | `clang-format` | gated `clang-tidy` |
+| CMake | `cmake-format` | `cmake-lint` |
+| Rust | `rustfmt` | - |
+| Java | `google-java-format` | dry-run format check |
+| PHP | `php-cs-fixer` | `php -l` |
+| Ruby | `rubocop` layout autocorrect | `rubocop` |
+| HTML | `superhtml fmt` | `superhtml check` |
+| TOML | `taplo` | `taplo` |
+| JSON/JSONC/CSS/SCSS/LESS/JS/JSX/TS/TSX | `biome` | `biome` |
+| Nix | `nixfmt` | `statix` |
+| Protobuf | `buf format` | `buf lint` |
+| YAML | `yamlfmt` | - |
+| GitHub Actions | `yamlfmt` | `actionlint` + `zizmor` |
+| Markdown | `rumdl` | `rumdl` |
+| Spelling | - | `typos` |
+| Starlark | `buildifier` | `buildifier --lint` |
+| Make | - | `checkmake` |
+| Dockerfile/Containerfile | `dockerfmt` | `hadolint` |
+| EditorConfig | - | `editorconfig-checker` |
+| Git config | - | `git config --file --list` |
+| Crontab | - | `crontab -T` |
+| Tmux config | - | `tmux source-file -n` |
+| Systemd units | - | `systemd-analyze verify` |
+
+See [Tool Details](#tool-details) for the `clang-tidy` gate and the
+`checkrun verify` analyzers.
 
 ## Install
+
+Requirements:
+
+- Bash.
+- [yq](https://github.com/mikefarah/yq) v4. `autoformat` and `autolint` exit
+  with an error without it.
+- Python 3.11+ (for stdlib `tomllib`). macOS's stock `python3` is older; set
+  `CHECKRUN_PYTHON` to a newer interpreter if `python3` on `PATH` is too old.
+- `jq` for `autolint --json`.
+- The formatters and linters you want. checkrun skips the rest silently, so a
+  file whose tools are all missing produces no output and exit status 0.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cgraf78/checkrun/main/install.sh | bash
@@ -39,8 +96,39 @@ Moving or deleting the checkout breaks the installed links.
 
 Command links resolve Checkrun's matching library, registry, and schemas from
 the checkout. The installer therefore creates no second `lib/checkrun/` or
-`share/checkrun/` tree and no completion tree. Continue to resolve non-binary
-assets through shdeps, or use their absolute paths in this checkout.
+`share/checkrun/` tree and no completion tree. Use the absolute paths of
+non-binary assets in this checkout.
+
+If you manage tools with [shdeps](https://github.com/cgraf78/shdeps), it can
+install checkrun as a dependency instead: it links the `bin/` entry points and
+man pages the same way, and resolves non-binary assets with `shdeps dep-file`.
+
+## Example
+
+With `ruff` installed, in a directory without project config:
+
+```console
+$ cat app.py
+import os
+
+def f( x ):
+    return 1
+$ autolint --json app.py
+{"path":"/tmp/demo/app.py","line":1,"col":1,"end_line":1,"end_col":10,"severity":"error","code":"I001","message":"Import block is un-sorted or un-formatted","source":"ruff"}
+{"path":"/tmp/demo/app.py","line":1,"col":8,"end_line":1,"end_col":10,"severity":"error","code":"F401","message":"`os` imported but unused","source":"ruff"}
+$ checkrun explain app.py
+/tmp/demo/app.py
+  exists: true
+  filetype: python
+  format: ruff
+  lint tools: ruff
+  schemas: none
+$ autoformat app.py
+```
+
+`autolint` exits 1 because it found problems. `autoformat` rewrites `app.py`
+in place (`def f(x):`, two blank lines before it). Without `ruff`, both
+commands do nothing and exit 0.
 
 ## CLIs
 
@@ -197,8 +285,9 @@ public interfaces it demonstrates.
 - `share/checkrun/shell.sh` is a stable no-op shell loader for integration
   harnesses that source each dependency's shell API uniformly.
 
-Source non-binary assets through shdeps so install locations stay under the
-dependency manager's contract:
+With shdeps, source non-binary assets through it so install locations stay
+under the dependency manager's contract; without it, use the same paths inside
+your checkout:
 
 ```bash
 . "$(shdeps dep-file cgraf78/checkrun share/checkrun/shell.sh)"
@@ -380,9 +469,9 @@ CI in host repos that track schema payloads.
   `shell`, `web`, `build`, `config`, `languages`, `docs`, and
   `github-actions`.
 
-`shdeps` installs each executable in `bin/` as a PATH-visible symlink, so these
-entry points resolve their dependency libraries without relying on consumer
-wrapper scripts.
+Each executable in `bin/` is installed as a PATH-visible symlink (by
+`install.sh` or shdeps), so these entry points resolve their dependency
+libraries without relying on consumer wrapper scripts.
 
 To add a formatter or linter, update the registry first:
 
@@ -412,38 +501,7 @@ that tool. Adapter helpers should return 0 when the underlying tool is missing,
 keep formatter failures advisory where appropriate, and preserve `autolint`'s
 dynamically scoped `fix` and `json` behavior.
 
-## Supported Tools
-
-| File type | Formatter | Linter |
-| --- | --- | --- |
-| Python | `ruff format` | `ruff check` |
-| Shell | `shfmt` | `shellcheck` |
-| Zsh | `shfmt` | `zsh -n` |
-| Go | `goimports` + `gofumpt` | - |
-| Lua | `stylua` | `selene` |
-| C/C++ | `clang-format` | gated `clang-tidy` |
-| CMake | `cmake-format` | `cmake-lint` |
-| Rust | `rustfmt` | - |
-| Java | `google-java-format` | dry-run format check |
-| PHP | `php-cs-fixer` | `php -l` |
-| Ruby | `rubocop` layout autocorrect | `rubocop` |
-| HTML | `superhtml fmt` | `superhtml check` |
-| TOML | `taplo` | `taplo` |
-| JSON/JSONC/CSS/SCSS/LESS/JS/JSX/TS/TSX | `biome` | `biome` |
-| Nix | `nixfmt` | `statix` |
-| Protobuf | `buf format` | `buf lint` |
-| YAML | `yamlfmt` | - |
-| GitHub Actions | `yamlfmt` | `actionlint` + `zizmor` |
-| Markdown | `rumdl` | `rumdl` |
-| Spelling | - | `typos` |
-| Starlark | `buildifier` | `buildifier --lint` |
-| Make | - | `checkmake` |
-| Dockerfile/Containerfile | `dockerfmt` | `hadolint` |
-| EditorConfig | - | `editorconfig-checker` |
-| Git config | - | `git config --file --list` |
-| Crontab | - | `crontab -T` |
-| Tmux config | - | `tmux source-file -n` |
-| Systemd units | - | `systemd-analyze verify` |
+## Tool Details
 
 `clang-tidy` is intentionally gated: it runs only when the target file's parent
 chain contains `compile_commands.json` or `compile_flags.txt`. A nearby
