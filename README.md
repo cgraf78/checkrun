@@ -18,8 +18,8 @@ call the same two commands instead of each carrying its own language table.
 slower project-wide analyzers (clippy, golangci-lint, govulncheck, cargo-audit)
 on demand.
 
-Unlike trunk check or MegaLinter, checkrun never installs linters or
-formatters: it runs the ones already on your `PATH`. Unlike conform.nvim or
+Unlike trunk check or MegaLinter, checkrun runs the formatters and linters
+already on your `PATH` instead of installing its own. Unlike conform.nvim or
 nvim-lint, it is not tied to an editor.
 
 ## Supported Tools
@@ -65,8 +65,9 @@ Requirements:
 - Bash.
 - [yq](https://github.com/mikefarah/yq) v4. `autoformat` and `autolint` exit
   with an error without it.
-- Python 3.11+ (for stdlib `tomllib`). macOS's stock `python3` is older; set
-  `CHECKRUN_PYTHON` to a newer interpreter if `python3` on `PATH` is too old.
+- Python 3.11+ (for stdlib `tomllib`). checkrun tries `CHECKRUN_PYTHON`, then
+  `python3` on `PATH`, `/usr/bin/python3`, `/opt/homebrew/bin/python3`, and
+  `/usr/local/bin/python3`. macOS's stock `python3` is too old.
 - `jq` for `autolint --json`.
 - The formatters and linters you want. checkrun skips the rest silently, so a
   file whose tools are all missing produces no output and exit status 0.

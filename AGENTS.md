@@ -40,10 +40,11 @@ semantics run. The cross-surface contract is
   cancellation, hook-performance, and runner suites alone first, then the
   rest with `CHECKRUN_TEST_JOBS` workers (default 4).
 - It requires Python 3.11+ (`CHECKRUN_PYTHON` overrides) and yq v4.
-- Missing backends skip locally, so a local green run does not prove adapter
-  behavior. CI installs every backend through mise from
-  `.github/mise/checkrun-ci.toml`, locked by `.github/mise/mise.lock`
-  (except on the Alpine leg).
+- Adapter tests skip when their tool is missing. CI installs only a core
+  subset: the mise tools in `.github/mise/checkrun-ci.toml` (locked by
+  `.github/mise/mise.lock`) plus clang-format, rustfmt, and schema-lint's
+  Python deps, and the Alpine leg installs none of them. Test other adapters
+  (gofumpt, hadolint, typos, ...) locally with the tool installed.
 - Termux CI runs only `install-test`, `path-policy-test`, `registry-test`, and
   `CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY=1 hook-performance-test`.
 - Registry changes need registry-level coverage plus one behavior test of the
