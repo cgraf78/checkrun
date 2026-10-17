@@ -3228,17 +3228,35 @@ rc=$?
 set -e
 _assert_exit "rust: no cargo — exits 0" 0 "$rc"
 
-# Missing yq: autolint must exit 1 with an error message (yq is
-# hard-required, matching autoformat's behavior).
+# Missing yq: autolint must fail with an error message (yq is hard-required,
+# like autoformat). The status is 127, the missing-dependency class, never 1:
+# callers read 1 as findings in the file. TMPDIR keeps the plan scratch, which
+# this PATH has no rm to clean up, inside the test directory.
 _noyq_bin=$(_mock_bin)
 ln -s "$(command -v bash)" "$_noyq_bin/bash"
 
 set +e
-output=$(PATH="$_noyq_bin" "$AUTOLINT" "$_td/nolint.sh" 2>&1)
+output=$(TMPDIR="$_td" PATH="$_noyq_bin" "$AUTOLINT" "$_td/nolint.sh" 2>&1)
 rc=$?
 set -e
-_assert_exit "missing yq: exits 1" 1 "$rc"
+_assert_exit "missing yq: exits 127" 127 "$rc"
 _assert_contains "missing yq: prints error" "autolint: yq is required" "$output"
+
+# Several files with the tools the supervised worker pool needs, which is the
+# path editor and agent hooks take: each worker's 127 comes back through its
+# status record and must survive the merge rather than become a finding.
+_noyq_pool_bin=$(_mock_bin)
+for _tool in bash cat dirname mkdir mktemp python3 rm sleep; do
+  ln -s "$(command -v "$_tool")" "$_noyq_pool_bin/$_tool"
+done
+cp "$_td/nolint.sh" "$_td/nolint2.sh"
+set +e
+output=$(CHECKRUN_AUTOLINT_JOBS=2 TMPDIR="$_td" PATH="$_noyq_pool_bin" \
+  "$AUTOLINT" "$_td/nolint.sh" "$_td/nolint2.sh" 2>&1)
+rc=$?
+set -e
+_assert_exit "missing yq, worker pool: exits 127" 127 "$rc"
+_assert_contains "missing yq, worker pool: prints error" "autolint: yq is required" "$output"
 
 # ---------------------------------------------------------------------------
 # Tests: ruff check fallback (CHECKRUN_CONFIG_DIR/ruff.toml)
@@ -3789,7 +3807,7 @@ set -e
 _assert_exit "json py: exits 0 on clean file" 0 "$rc"
 _assert_eq "json py: no output on clean file" "" "$output"
 
-# Missing jq → hard error (same shape as missing yq).
+# Missing jq → hard error with the missing-dependency status, as for yq.
 _nojq_bin=$(_mock_bin)
 ln -s "$(command -v bash)" "$_nojq_bin/bash"
 ln -s "$(command -v yq)" "$_nojq_bin/yq"
@@ -3797,7 +3815,7 @@ set +e
 output=$(PATH="$_nojq_bin" "$AUTOLINT" --json "$_td/json-ok.py" 2>&1)
 rc=$?
 set -e
-_assert_exit "json: missing jq exits 1" 1 "$rc"
+_assert_exit "json: missing jq exits 127" 127 "$rc"
 _assert_contains "json: missing jq error message" "jq is required for --json" "$output"
 
 echo "=== Mixed dirty diagnostics are deterministic ==="

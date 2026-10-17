@@ -82,11 +82,7 @@ Linting completed, or all files were skipped for non-fatal reasons.
 .TP
 .B 1
 One or more selected linters reported diagnostics or failed without a distinct
-tool-failure status, or required lint infrastructure such as
-.B yq
-or
-.B jq
-was unavailable.
+tool-failure status.
 .TP
 .B 2
 Usage error, registry planning failure, or a selected linter that could not
@@ -106,7 +102,14 @@ does not provide, or the temporary plan directory could not be removed. It
 outranks findings and status 2.
 .TP
 .B 127
-A required runtime dependency, such as a suitable Python interpreter, is missing.
+A required dependency is missing: a suitable Python interpreter or, once a
+file has lint steps,
+.B yq
+(and
+.B jq
+for
+.BR \-\-json ).
+A missing linter for one file type is not this status; that step is skipped.
 .TP
 .BR 129 ", " 130 ", " 143
 The run was cancelled by SIGHUP, SIGINT or SIGTERM, respectively (128 plus the
@@ -136,8 +139,8 @@ stays ignored on every path.
 Ordinary findings usually exit 1, but a linter's own nonzero status other
 than 2 is passed through, so treat any status not listed here as findings.
 A listed status can also come from a linter: one that itself exits 125 is
-treated as an internal failure, and one killed by a signal can report 129,
-130 or 143.
+treated as an internal failure, one that exits 127 reads as a missing
+dependency, and one killed by a signal can report 129, 130 or 143.
 .SH SEE ALSO
 .BR checkrun (1),
 .BR autoformat (1)
