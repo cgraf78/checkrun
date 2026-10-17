@@ -3245,8 +3245,12 @@ _assert_contains "missing yq: prints error" "autolint: yq is required" "$output"
 # Several files with the tools the supervised worker pool needs, which is the
 # path editor and agent hooks take: each worker's 127 comes back through its
 # status record and must survive the merge rather than become a finding.
+# Without /proc (macOS), the pool needs ps to verify it owns its process
+# group, or it falls back to the sequential path.
 _noyq_pool_bin=$(_mock_bin)
-for _tool in bash cat dirname mkdir mktemp python3 rm sleep; do
+_noyq_pool_tools=(bash cat dirname mkdir mktemp python3 rm sleep)
+command -v ps >/dev/null 2>&1 && _noyq_pool_tools+=(ps)
+for _tool in "${_noyq_pool_tools[@]}"; do
   ln -s "$(command -v "$_tool")" "$_noyq_pool_bin/$_tool"
 done
 cp "$_td/nolint.sh" "$_td/nolint2.sh"
@@ -3812,7 +3816,7 @@ _nojq_bin=$(_mock_bin)
 ln -s "$(command -v bash)" "$_nojq_bin/bash"
 ln -s "$(command -v yq)" "$_nojq_bin/yq"
 set +e
-output=$(PATH="$_nojq_bin" "$AUTOLINT" --json "$_td/json-ok.py" 2>&1)
+output=$(TMPDIR="$_td" PATH="$_nojq_bin" "$AUTOLINT" --json "$_td/json-ok.py" 2>&1)
 rc=$?
 set -e
 _assert_exit "json: missing jq exits 127" 127 "$rc"
