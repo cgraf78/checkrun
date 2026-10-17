@@ -153,13 +153,15 @@ _lint_one_with_plan() {
 
   [ -s "$plan_file" ] || return 0
 
+  # A missing required tool is 127, the missing-dependency status shared with
+  # a missing Python, not 1: callers read 1 as lint findings in the file.
   if ! command -v yq >/dev/null 2>&1; then
     echo "autolint: yq is required" >&2
-    return 1
+    return 127
   fi
   if [ "$json" -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
     echo "autolint: jq is required for --json" >&2
-    return 1
+    return 127
   fi
 
   while IFS= read -r -d '' path &&
