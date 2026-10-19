@@ -24,7 +24,7 @@ jobs:
     # SHA bump rather than as silent drift on a mutable branch.
     # The ref is generated from .github/cgraf78-actions.lock by the provider's
     # consumer-ci/sync.sh; do not update this literal independently.
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@3b726ff80de78ae9407dc1f609c11d951c56bd3b
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@6ecbf5dafaeb9483aeeba3915321544b31572172
     with:
       concurrency-scope: shell
       matrix-set: full
@@ -58,4 +58,4 @@ jobs:
       # files, so `.github/cgraf78-actions.lock` cannot be interpolated. This gate
       # verifies every unavoidable cgraf78/actions literal still matches that
       # single reviewed dependency decision.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@3b726ff80de78ae9407dc1f609c11d951c56bd3b
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@6ecbf5dafaeb9483aeeba3915321544b31572172
