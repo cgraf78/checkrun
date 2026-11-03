@@ -3055,8 +3055,12 @@ set -e
 _assert_exit "files0 stdin: empty input is a no-op" 0 "$rc"
 _assert_eq "files0 stdin: empty input is quiet" "" "$output"
 
+# Run the script with this suite's Bash rather than through its
+# `#!/usr/bin/env bash` shebang: Ubuntu 26.04's `env` is uutils, and Rust's
+# std runtime reopens closed descriptors 0-2 on /dev/null before `main`, so
+# the guard would only ever see an empty stream there.
 set +e
-output=$("$AUTOLINT" --files0-from - <&- 2>&1)
+output=$("$BASH" "$AUTOLINT" --files0-from - <&- 2>&1)
 rc=$?
 set -e
 _assert_exit "files0 stdin: closed descriptor exits 2" 2 "$rc"
