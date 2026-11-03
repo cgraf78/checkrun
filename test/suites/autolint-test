@@ -3056,7 +3056,7 @@ _assert_exit "files0 stdin: empty input is a no-op" 0 "$rc"
 _assert_eq "files0 stdin: empty input is quiet" "" "$output"
 
 set +e
-output=$("$AUTOLINT" --files0-from - <&- 2>&1)
+output=$(CHECKRUN_DIAG_FD0=1 "$AUTOLINT" --files0-from - <&- 2>&1)
 rc=$?
 set -e
 _assert_exit "files0 stdin: closed descriptor exits 2" 2 "$rc"

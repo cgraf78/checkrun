@@ -102,6 +102,20 @@ _autolint_read_files0() {
   # sharing decoded paths while still supporting Bash 3.2 without namerefs.
   _autolint_files0_args=()
   if [ "$display" = "-" ]; then
+    # TEMPORARY DIAGNOSTIC (revert before merge): CI reports closed stdin
+    # passing this guard while every local replication rejects it. Dump the
+    # real fd 0 state when CHECKRUN_DIAG_FD0 is set (the closed-stdin test
+    # sets it). Writes only to stderr; no assertion input is affected.
+    if [ -n "${CHECKRUN_DIAG_FD0:-}" ]; then
+      {
+        echo "DIAG fd0: BASH_VERSION=$BASH_VERSION"
+        ls -l "/proc/$$/fd/" 2>&1 | sed 's/^/DIAG fd: /'
+        if [ -e "/proc/$$/fd/0" ]; then echo "DIAG fd0: EXISTS"; else echo "DIAG fd0: MISSING"; fi
+        if ( exec 3<&0 ) 2>/dev/null; then echo "DIAG dup-probe: OPEN"; else echo "DIAG dup-probe: CLOSED"; fi
+        if [ -r /dev/stdin ]; then echo "DIAG /dev/stdin: readable"; else echo "DIAG /dev/stdin: NOT readable"; fi
+        if [ -d /dev/stdin ]; then echo "DIAG /dev/stdin: dir"; else echo "DIAG /dev/stdin: not dir"; fi
+      } >&2
+    fi
     # EOF is a valid empty manifest, but Bash gives a failed read with an empty
     # field for both EOF and descriptor errors. Reject a closed descriptor and
     # directory source before reading so an invalid stream cannot become a
