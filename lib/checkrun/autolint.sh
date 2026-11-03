@@ -106,7 +106,14 @@ _autolint_read_files0() {
     # field for both EOF and descriptor errors. Reject a closed descriptor and
     # directory source before reading so an invalid stream cannot become a
     # silent no-op. Pipes, regular files, sockets, and terminals remain valid.
-    if { [ ! -r /dev/stdin ] && [ ! -r /dev/fd/0 ]; } ||
+    # Test descriptor openness by duplicating fd 0 into a subshell rather
+    # than by probing /dev/stdin readability: the /dev probe misreports on
+    # hosts where /dev/stdin does not track the descriptor (observed on the
+    # ubuntu-26.04 runner, where a closed stdin passed the probe and read
+    # as EOF). Duplicating a closed descriptor fails; duplicating an open
+    # one succeeds regardless of what it points at. (Duplicating fd 0 onto
+    # itself is a no-op even when closed, so the target must differ.)
+    if ! ( exec 3<&0 ) 2>/dev/null ||
       [ -d /dev/stdin ] || [ -d /dev/fd/0 ]; then
       echo "autolint: --files0-from - requires a readable stream on standard input" >&2
       return 2
