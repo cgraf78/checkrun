@@ -3056,6 +3056,8 @@ _assert_exit "files0 stdin: empty input is a no-op" 0 "$rc"
 _assert_eq "files0 stdin: empty input is quiet" "" "$output"
 
 set +e
+probe_output=$(/usr/bin/env bash -c 'echo "PROBE bash: $BASH_VERSION"; ls -l /proc/$$/fd/ 2>&1 | sed "s/^/PROBE fd: /"; if ( exec 3<&0 ) 2>/dev/null; then echo PROBE-OPEN; else echo PROBE-CLOSED; fi' <&- 2>&1)
+echo "PROBE-RESULT: $probe_output" >&2
 output=$(CHECKRUN_DIAG_FD0=1 "$AUTOLINT" --files0-from - <&- 2>&1)
 rc=$?
 set -e
