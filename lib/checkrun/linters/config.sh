@@ -26,13 +26,36 @@ _lint_crontab() {
 }
 
 _lint_tmux_config() {
-  local file="$1" out tool_rc msg
+  local file="$1" out tool_rc msg socket_dir=""
   command -v tmux &>/dev/null || return 0
 
-  out=$(tmux source-file -n "$file" 2>&1)
+  out=$(
+    exec 2>&1
+    trap '
+      if [[ -n $socket_dir ]]; then
+        if [[ -S $socket_dir/s ]]; then
+          tmux -S "$socket_dir/s" kill-server >/dev/null 2>&1 || :
+        fi
+        rm -rf -- "$socket_dir"
+      fi
+    ' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # A short path fits the Unix socket limit even when macOS or the caller
+    # provides a long TMPDIR. Android can lack /tmp and use its native TMPDIR.
+    socket_dir=$(mktemp -d /tmp/checkrun-tmux.XXXXXX 2>/dev/null ||
+      mktemp -d "${TMPDIR:-/tmp}/checkrun-tmux.XXXXXX") || exit 1
+    # Defer parsing source-file until the private server starts. On versions
+    # without -n, parsing the whole queue in the client prevents startup and
+    # hides the unsupported flag behind a connection error.
+    # shellcheck disable=SC2016 # tmux expands the filename from its environment.
+    CHECKRUN_TMUX_LINT_FILE="$file" tmux -S "$socket_dir/s" -f /dev/null \
+      start-server \; if-shell -F 1 'source-file -n -- "$CHECKRUN_TMUX_LINT_FILE"'
+  )
   tool_rc=$?
   if [ "$tool_rc" -ne 0 ] &&
-    printf '%s\n' "$out" | grep -qiE 'unknown flag -n|invalid option'; then
+    printf '%s\n' "$out" | grep -qiE 'unknown flag -n|invalid option|^usage: source-file '; then
     return 0
   fi
   if [ "$tool_rc" -ne 0 ]; then
