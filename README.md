@@ -230,6 +230,12 @@ default. Set `CHECKRUN_TEST_JOBS` to a positive integer to tune that bound for a
 specific host. Cancellation and hook-latency suites always run alone so faster
 feedback does not weaken their timing and process-lifecycle assertions.
 
+The focused `test/suites/tmux-lint-test` suite exercises the real tmux parser
+without an existing server. The Ubuntu and macOS smoke jobs use the shared
+`tmux-pinned` profile from `cgraf78/actions` and require its
+`CI_TMUX_PINNED_BIN` output. The named Checkrun setup supplies yq and Python,
+and the generic setup installs the pinned parser in a second step.
+
 ## Examples
 
 [`examples/`](examples/) contains checked, copyable examples for schema

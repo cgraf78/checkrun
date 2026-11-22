@@ -117,14 +117,29 @@ if not (workflow_path.parents[2] / "test/shellcheck-files.txt").is_file():
     raise AssertionError("shared ShellCheck inventory is missing")
 if "setup: checkrun" not in shell_job:
     raise AssertionError("main shell job must retain the named Checkrun setup")
-if "profiles: base,python,tmux-pinned" not in shell_job:
-    raise AssertionError("desktop shell jobs must provide tmux for the real lint regression")
-if "termux-profiles: base,python" not in shell_job:
-    raise AssertionError("native Termux tests keep their own prerequisites")
 if "shellcheck-inventory-path: test/shellcheck-files.txt" not in shell_job:
     raise AssertionError("main shell job must include the shared ShellCheck gate")
 if "test-command: test/checkrun-test" not in shell_job:
     raise AssertionError("main shell job must run the complete repository suite")
+
+tmux_lint_job = job_block(workflow, "tmux-lint")
+prereqs_ref = f"uses: cgraf78/actions/.github/actions/shell-ci-prereqs@{actions_sha}"
+prereq_steps = [step for step in tmux_lint_job.split("\n      - ") if prereqs_ref in step]
+if len(prereq_steps) != 2:
+    raise AssertionError("headless lint needs locked actions for both setup steps")
+checkrun_setup, tmux_setup = prereq_steps
+if "setup: checkrun" not in checkrun_setup:
+    raise AssertionError("headless lint must install Checkrun's prerequisites first")
+if "setup: none" not in tmux_setup or "profiles: tmux-pinned" not in tmux_setup:
+    raise AssertionError("the generic setup must install the pinned tmux build")
+for contract in [
+    "runner: ubuntu-24.04",
+    "runner: macos-15",
+    "CI_TMUX_PINNED_BIN:?",
+    "test/suites/tmux-lint-test",
+]:
+    if contract not in tmux_lint_job:
+        raise AssertionError(f"headless tmux lint job is missing {contract!r}")
 
 actions_sync_job = job_block(workflow, "actions-sync")
 for contract in [
