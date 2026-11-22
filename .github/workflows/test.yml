@@ -28,8 +28,7 @@ jobs:
     with:
       concurrency-scope: shell
       matrix-set: full
-      profiles: base,python,tmux-pinned
-      termux-profiles: base,python
+      profiles: base,python
       setup: checkrun
       shellcheck-inventory-path: test/shellcheck-files.txt
       test-command: test/checkrun-test
@@ -39,6 +38,41 @@ jobs:
         test/suites/path-policy-test
         test/suites/registry-test
         CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY=1 test/suites/hook-performance-test
+
+  tmux-lint:
+    name: Headless tmux lint (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu
+            runner: ubuntu-24.04
+          - name: macOS
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Checkrun prerequisites
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@36d1bb6a8070d9dc7dfc85e1d21b2fe9b3721450
+        with:
+          matrix-name: ${{ matrix.name }}
+          setup: checkrun
+      # The named Checkrun setup supplies yq and Python. Only the generic
+      # setup installs profiles such as the shared tmux build.
+      - name: Install the pinned tmux build
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@36d1bb6a8070d9dc7dfc85e1d21b2fe9b3721450
+        with:
+          matrix-name: ${{ matrix.name }}
+          setup: none
+          profiles: tmux-pinned
+      - name: Run the real tmux lint regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "${CI_TMUX_PINNED_BIN:?missing shared tmux build}"
+          test/suites/tmux-lint-test
 
   actions-sync:
     name: cgraf78/actions sync
