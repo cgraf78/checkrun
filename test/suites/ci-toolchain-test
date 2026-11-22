@@ -117,6 +117,10 @@ if not (workflow_path.parents[2] / "test/shellcheck-files.txt").is_file():
     raise AssertionError("shared ShellCheck inventory is missing")
 if "setup: checkrun" not in shell_job:
     raise AssertionError("main shell job must retain the named Checkrun setup")
+if "profiles: base,python,tmux-pinned" not in shell_job:
+    raise AssertionError("desktop shell jobs must provide tmux for the real lint regression")
+if "termux-profiles: base,python" not in shell_job:
+    raise AssertionError("native Termux tests keep their own prerequisites")
 if "shellcheck-inventory-path: test/shellcheck-files.txt" not in shell_job:
     raise AssertionError("main shell job must include the shared ShellCheck gate")
 if "test-command: test/checkrun-test" not in shell_job:
