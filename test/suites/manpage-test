@@ -12,16 +12,37 @@ CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
 
 echo "=== checkrun: manpages ==="
 
-while IFS= read -r command; do
-  page="$CHECKRUN_REPO_ROOT/man/man1/$command.1"
-  _assert_file_exists "manpage exists: $command" "$page"
-  content=$(cat "$page")
-  _assert_contains "manpage NAME section: $command" ".SH NAME" "$content"
-  _assert_contains "manpage names command: $command" "$command \\" "$content"
-done < <(
-  git -C "$CHECKRUN_REPO_ROOT" ls-files -- 'bin/*' |
-    xargs -n 1 basename |
-    sort
-)
+_check_manpages() {
+  local inventory="$_TEST_TMP_ROOT/manpage-paths" file command page content
+
+  # Container fixtures can have a different uid from the owned checkout.
+  git -C "$CHECKRUN_REPO_ROOT" -c "safe.directory=$CHECKRUN_REPO_ROOT" \
+    ls-files -z -- 'bin/*' >"$inventory" || return
+  [[ -s "$inventory" ]] || return 1
+  while IFS= read -r -d '' file; do
+    command=${file##*/}
+    page="$CHECKRUN_REPO_ROOT/man/man1/$command.1"
+    _assert_file_exists "manpage exists: $command" "$page"
+    content=$(cat "$page")
+    _assert_contains "manpage NAME section: $command" ".SH NAME" "$content"
+    _assert_contains "manpage names command: $command" "$command \\" "$content"
+  done <"$inventory"
+}
+
+inventory_status=0
+inventory_output=$(
+  # shellcheck disable=SC2329 # Called by _check_manpages.
+  git() {
+    printf '%s\0' 'bin/checkrun'
+    return 17
+  }
+  _check_manpages
+) || inventory_status=$?
+_assert_eq "propagates failed manpage inventory status" 17 "$inventory_status"
+_assert_eq "does not check a partial manpage inventory" "" "$inventory_output"
+
+# Exercise command-scoped checkout trust even when the test uid owns the checkout.
+GIT_TEST_ASSUME_DIFFERENT_OWNER=1 _check_manpages ||
+  _fail "cannot enumerate tracked commands for manpage checks"
 
 _test_summary
