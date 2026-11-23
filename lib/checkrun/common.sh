@@ -16,10 +16,12 @@
 _abs_dir_into() {
   local output_name="$1" dir="$2" value
   [ -d "$dir" ] || return 1
+  # An explicit relative path bypasses CDPATH lookup and the special cd -.
+  [[ $dir == /* ]] || dir="./$dir"
   # The sentinel protects a directory name ending in newline from command
   # substitution trimming. `PWD` is already an absolute spelling after cd, so
   # a second `pwd` invocation is unnecessary and would add work per file.
-  value=$(cd "$dir" && printf '%s_' "$PWD") || return 1
+  value=$(cd -- "$dir" && printf '%s_' "$PWD") || return 1
   value=${value%_}
   printf -v "$output_name" '%s' "$value"
 }

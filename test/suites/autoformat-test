@@ -21,7 +21,7 @@ export NO_COLOR=1
 : "${MISE_GLOBAL_CONFIG_FILE:=$HOME/.config/mise/config.toml}"
 export MISE_GLOBAL_CONFIG_FILE
 
-CHECKRUN_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CHECKRUN_TEST_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CHECKRUN_REPO_ROOT="$(cd -- "$CHECKRUN_TEST_DIR/.." && pwd -P)"
 
 # shellcheck source=../helpers.sh
