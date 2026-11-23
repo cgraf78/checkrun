@@ -135,6 +135,111 @@ else
   _fail "python fallback: PID publication failure leaked the child group"
 fi
 
+# Linux can deliver a group signal to zombies, so drive the real fallback
+# with a private Python process that models Darwin's EPERM and process table.
+probe_dir=$(_tmpdir)
+cat >"$probe_dir/python3" <<'SH'
+#!/bin/sh
+exec "$TIMEOUT_TEST_PYTHON" -B "$TIMEOUT_TEST_PROBE" "$@"
+SH
+chmod +x "$probe_dir/python3"
+cat >"$probe_dir/probe.py" <<'PY'
+import errno
+import os
+import signal
+import subprocess
+import sys
+from types import SimpleNamespace
+
+case = os.environ["TIMEOUT_TEST_CASE"]
+group = 31234
+
+
+class Process:
+    """Leave the simulated group reserved until the owner reaps its leader."""
+
+    pid = group
+    reaped = False
+
+    def poll(self):
+        if case == "interrupt-ready":
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.reaped = True
+            return 0
+        return None
+
+    def wait(self, timeout):
+        if timeout == 0 and case == "late-waitability":
+            raise subprocess.TimeoutExpired("leader", timeout)
+        self.reaped = True
+        return 0
+
+    def kill(self):
+        pass
+
+
+leader = Process()
+
+
+def waitid(_kind, pid, _flags):
+    """Deliver TERM to this probe just as its simulated leader exits."""
+    assert pid == group and not leader.reaped
+    if case == "interrupt-ready":
+        os.kill(os.getpid(), signal.SIGTERM)
+        return SimpleNamespace(si_pid=pid)
+    return None
+
+
+def killpg(pgid, signum):
+    """Return the configured Darwin group signal responses."""
+    assert pgid == group and not leader.reaped, "group identity was released before signaling"
+    if signum == signal.SIGTERM and case != "term-denial":
+        return
+    raise PermissionError(errno.EPERM, "fixture group denied the signal")
+
+
+def process_table(args, **_kwargs):
+    """Show a zombie leader plus any live member in the exact group."""
+    assert args == ["/bin/ps", "-axo", "pgid=,stat="]
+    assert not leader.reaped, "group identity was released before inspection"
+    rows = f"{group} Z+\n{group + 1} S\n"
+    if case == "live-member":
+        rows += f"{group} S\n"
+    if case == "snapshot-failure":
+        raise subprocess.CalledProcessError(1, args)
+    return subprocess.CompletedProcess(args, 0, stdout=rows)
+
+
+assert sys.argv[1] == "-c"
+source = sys.argv[2]
+sys.argv = ["-c", *sys.argv[3:]]
+sys.platform = "darwin"
+os.killpg = killpg
+# The ordinary cases exercise each host's native waitid ABI.
+os.waitid = waitid
+os.P_PID, os.WEXITED, os.WNOHANG, os.WNOWAIT = 1, 4, 1, 32
+subprocess.Popen = lambda *_args, **_kwargs: leader
+subprocess.run = process_table
+exec(compile(source, "<test timeout fallback>", "exec"), {"__name__": "__main__"})
+PY
+
+for probe_case in term-denial late-waitability live-member snapshot-failure interrupt-ready; do
+  probe_status=0
+  probe_output=$(TIMEOUT_TEST_CASE="$probe_case" TIMEOUT_TEST_PYTHON="$python" \
+    TIMEOUT_TEST_PROBE="$probe_dir/probe.py" PATH="$probe_dir" \
+    _with_timeout 0 /bin/true 2>&1) || probe_status=$?
+  case "$probe_case" in
+    term-denial | late-waitability) probe_expected=124 ;;
+    interrupt-ready) probe_expected=143 ;;
+    *) probe_expected=125 ;;
+  esac
+  _assert_exit "python fallback: Darwin group cleanup handles $probe_case" \
+    "$probe_expected" "$probe_status"
+  if [[ "$probe_status" != "$probe_expected" ]]; then
+    printf '%s\n' "$probe_output" >&2
+  fi
+done
+
 empty_bin="$(_tmpdir)/empty-bin"
 mkdir -p "$empty_bin"
 PATH="$empty_bin" _with_timeout 1 /bin/true >/dev/null 2>&1
