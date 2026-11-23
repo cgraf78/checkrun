@@ -13,6 +13,19 @@ echo "=== suite isolation ==="
 
 fixture=$(_tmpdir)
 
+fixture_colon_tmp=$fixture/has:colon
+mkdir "$fixture_colon_tmp"
+fixture_status=0
+# The child shell expands its own positional parameter.
+# shellcheck disable=SC2016
+fixture_output=$(TMPDIR="$fixture_colon_tmp" "$BASH" -c '
+  . "$1"
+  printf "fixture setup continued\n"
+' bash "$CHECKRUN_TEST_DIR/helpers.sh" 2>&1) || fixture_status=$?
+_assert_exit "isolation: rejects a temporary root that cannot be used in PATH" 1 "$fixture_status"
+_assert_contains "isolation: explains how to select a usable TMPDIR" \
+  'TMPDIR must not contain a colon' "$fixture_output"
+
 # A suite started with a hostile startup file and exported knobs must run as
 # if neither existed. The probe prints the state each part of helpers.sh is
 # responsible for, so deleting any part of it fails one assertion below.
