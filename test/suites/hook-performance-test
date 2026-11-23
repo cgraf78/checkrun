@@ -54,12 +54,17 @@ _perf_budget_ms() {
 }
 
 _measure_hook_perf() {
+  local calibrate=0
+  if [[ "$1" == --calibrate ]]; then
+    calibrate=1
+    shift
+  fi
   local command="$1"
   shift
 
   PATH="$hook_path" TMPDIR="$td" CHECKRUN_CONFIG_DIR=/nonexistent \
     CHECKRUN_SCHEMA_LINT=/nonexistent python3 - \
-    "$CHECKRUN_HOOK_PERF_RUNS" "$command" "$@" <<'PY'
+    "$CHECKRUN_HOOK_PERF_RUNS" "$calibrate" "$command" "$@" <<'PY'
 import math
 import os
 import signal
@@ -69,12 +74,13 @@ import tempfile
 import time
 
 runs = int(sys.argv[1])
-command = sys.argv[2:]
+calibrate = sys.argv[2] == "1"
+command = sys.argv[3:]
 timeout = float(os.environ.get("CHECKRUN_HOOK_PERF_TIMEOUT_SECONDS", "10"))
 timeout_ms = math.ceil(timeout * 1000)
 
 
-def sample() -> int:
+def wall_sample() -> int:
     started = time.perf_counter_ns()
     with tempfile.TemporaryDirectory(
         prefix="checkrun-hook-sample.", dir=os.environ["TMPDIR"]
@@ -116,24 +122,58 @@ def sample() -> int:
     return elapsed_ms
 
 
-sample()  # Warm interpreter and filesystem caches before collecting samples.
-durations = sorted(sample() for _ in range(runs))
+def scheduling_delay() -> float:
+    """Measure time lost while an independent task remains runnable."""
+    wall_started = time.perf_counter_ns()
+    cpu_started = time.process_time_ns()
+    cpu_elapsed = 0
+    while cpu_elapsed < 20_000_000:
+        cpu_elapsed = time.process_time_ns() - cpu_started
+    return (time.perf_counter_ns() - wall_started) / cpu_elapsed
+
+
+def sample() -> tuple[int, int, bool]:
+    before = scheduling_delay() if calibrate else 1.0
+    wall = wall_sample()
+    if not calibrate or wall >= timeout_ms:
+        return wall, wall, False
+    # Adjust only when both adjacent controls saw contention. A quiet runner
+    # still uses wall time, including any blocking delays in the command.
+    scale = min(before, scheduling_delay(), 2.0)
+    if scale < 1.5:
+        return wall, wall, False
+    return wall, math.ceil(wall / scale), True
+
+
+wall_sample()  # Warm interpreter and filesystem caches before collecting samples.
+samples = [sample() for _ in range(runs)]
+durations = sorted(wall for wall, _, _ in samples)
+adjusted = sorted(value for _, value, _ in samples)
 p95_index = math.ceil(len(durations) * 0.95) - 1
+median_index = len(durations) // 2
 timeouts = sum(duration >= timeout_ms for duration in durations)
-print(f"{durations[p95_index]} {durations[len(durations) // 2]} {timeouts}")
+contended = sum(observed for _, _, observed in samples)
+print(f"{durations[p95_index]} {durations[median_index]} {timeouts} "
+      f"{adjusted[median_index]} {contended}")
 PY
 }
 
 _assert_perf_result() {
   local name="$1" result="$2" rc="$3" median_budget_ms="$4" p95_budget_ms="$5"
-  local p95_ms median_ms timeout_count
+  local p95_ms median_ms timeout_count adjusted_median_ms contended_count
 
   _assert_exit "hook performance: all ${name} samples exit 0" 0 "$rc"
-  read -r p95_ms median_ms timeout_count <<<"$result"
-  if [[ "$p95_ms" =~ ^[0-9]+$ && "$median_ms" =~ ^[0-9]+$ && "$timeout_count" =~ ^[0-9]+$ ]]; then
+  read -r p95_ms median_ms timeout_count adjusted_median_ms contended_count <<<"$result"
+  if [[ "$p95_ms" =~ ^[0-9]+$ && "$median_ms" =~ ^[0-9]+$ && "$timeout_count" =~ ^[0-9]+$ &&
+    "$adjusted_median_ms" =~ ^[0-9]+$ && "$contended_count" =~ ^[0-9]+$ ]]; then
     echo "  PERF: ${name} median ${median_ms}ms / ${median_budget_ms}ms, p95 ${p95_ms}ms / ${p95_budget_ms}ms (timeouts ${timeout_count}, runs ${CHECKRUN_HOOK_PERF_RUNS})"
+    if [[ "$contended_count" -gt 0 ]]; then
+      echo "  PERF: ${name} adjusted median ${adjusted_median_ms}ms (${contended_count} contended samples, adjustment capped at 2x)"
+    fi
     if [[ "$median_ms" -le "$median_budget_ms" ]]; then
       _pass "hook performance: ${name} median stays within budget"
+    elif [[ "$contended_count" -gt 0 && "$adjusted_median_ms" -le "$median_budget_ms" ]]; then
+      _pass "hook performance: ${name} adjusted median stays within budget under contention"
     else
       _fail "hook performance: ${name} median ${median_ms}ms exceeds ${median_budget_ms}ms"
     fi
@@ -250,7 +290,7 @@ EOF
       CHECKRUN_TIMEOUT_CHILD_FILE="$timeout_child_file" \
       _measure_hook_perf "$timeout_fixture" "$td/unused"
   )
-  read -r _ _ timeout_count <<<"$timeout_result"
+  read -r _ _ timeout_count _ <<<"$timeout_result"
   _assert_eq "hook timeout: one stalled sample is reported" "1" "$timeout_count"
   timeout_child=""
   [[ -f "$timeout_child_file" ]] && timeout_child=$(cat "$timeout_child_file")
@@ -280,6 +320,24 @@ EOF
   else
     _pass "hook timeout: per-sample scratch directory is removed"
   fi
+
+  # A known command delay must fail the median gate even if calibration finds
+  # contention. Using sleep here also exercises the actual child timer.
+  slow_status=0
+  slow_result=$(
+    CHECKRUN_HOOK_PERF_RUNS=1 CHECKRUN_HOOK_PERF_TIMEOUT_SECONDS=10 \
+      _measure_hook_perf --calibrate "$hook_path/sleep" 0.2
+  ) || slow_status=$?
+  _assert_exit "hook performance control: delayed child exits normally" 0 "$slow_status"
+  gate_status=0
+  gate_output=$(
+    FAIL=0
+    _assert_perf_result "delayed control" "$slow_result" "$slow_status" 80 3000 2>&1
+    [[ "$FAIL" -eq 0 ]]
+  ) || gate_status=$?
+  _assert_exit "hook performance control: child delay fails the median gate" 1 "$gate_status"
+  _assert_contains "hook performance control: failure measures the child's delay" \
+    'exceeds 80ms' "$gate_output"
 fi
 
 real_python=$(command -v python3)
@@ -1007,12 +1065,12 @@ if [[ "${CHECKRUN_HOOK_PERF_STRUCTURAL_ONLY:-0}" != 1 ]]; then
 
   # Keep the default supervised path under the same large-commit budget. The
   # portable probe supplements this developer path; it must not replace it.
-  perf_result=$(_measure_hook_perf "$AUTOLINT" "${supported_batch[@]}")
+  perf_result=$(_measure_hook_perf --calibrate "$AUTOLINT" "${supported_batch[@]}")
   rc=$?
   _assert_perf_result "300-file supported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
 
-  perf_result=$(_measure_hook_perf "$portable_autolint" "${supported_batch[@]}")
+  perf_result=$(_measure_hook_perf --calibrate "$portable_autolint" "${supported_batch[@]}")
   rc=$?
   _assert_perf_result "portable 300-file supported autolint batch" "$perf_result" "$rc" \
     "$median_budget_ms" "$p95_budget_ms"
