@@ -7,7 +7,7 @@ set -euo pipefail
 # do not source helpers.sh rely on this alone.
 unset BASH_ENV ENV
 
-test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+test_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 parallel_suites=()
 exclusive_suites=()

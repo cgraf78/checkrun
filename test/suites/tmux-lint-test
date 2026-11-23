@@ -4,7 +4,7 @@
 set -o pipefail
 export NO_COLOR=1
 
-test_dir="$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"
+test_dir="$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"
 # shellcheck source=../helpers.sh
 . "$test_dir/helpers.sh"
 _require_compatible_libc "tmux-lint-test"

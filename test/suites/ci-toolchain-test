@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+test_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd -- "$test_dir/../.." && pwd -P)"
 
 python3 "$repo_root/.github/scripts/verify_mise_lock.py" \
@@ -119,7 +119,7 @@ if "setup: checkrun" not in shell_job:
     raise AssertionError("main shell job must retain the named Checkrun setup")
 if "shellcheck-inventory-path: test/shellcheck-files.txt" not in shell_job:
     raise AssertionError("main shell job must include the shared ShellCheck gate")
-if "test-command: test/checkrun-test" not in shell_job:
+if "test-command: CDPATH=. test/checkrun-test" not in shell_job:
     raise AssertionError("main shell job must run the complete repository suite")
 
 tmux_lint_job = job_block(workflow, "tmux-lint")
