@@ -294,6 +294,12 @@ _assert_file_content() {
 # Temp directory management
 # ---------------------------------------------------------------------------
 
+# Fixture commands only shadow host tools when their directory is one PATH entry.
+if [[ ${TMPDIR:-} == *:* ]]; then
+  printf '%s\n' 'test fixtures: TMPDIR must not contain a colon' >&2
+  exit 1
+fi
+
 _TEST_TMP_ROOT=$(mktemp -d) || {
   echo "failed to create test temp root" >&2
   exit 1
