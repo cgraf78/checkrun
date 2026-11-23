@@ -27,6 +27,14 @@ if [[ -n "${BASH_ENV:-}" ]]; then
 fi
 unset ENV
 
+# A suite can start inside a Git hook. Repository selectors also override
+# git -C, and injected config can override a fixture's hooks or init setup.
+# Cases that exercise these settings set them explicitly after setup.
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_DIR GIT_GRAFT_FILE
+unset GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_NAMESPACE GIT_OBJECT_DIRECTORY
+unset GIT_NO_REPLACE_OBJECTS GIT_PREFIX GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_WORK_TREE
+unset GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_TEMPLATE_DIR
+
 PASS=0
 FAIL=0
 SKIP=0

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Verify that a suite can run from a Git hook without writing to its repository.
+
+set -euo pipefail
+
+test_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck source=test/helpers.sh
+. "$test_dir/helpers.sh"
+
+_mock_home
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_ALLOW_PROTOCOL=file
+
+outside=$(_tmpdir)
+git -C "$outside" init --quiet --initial-branch=main --template=''
+git -C "$outside" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false -c core.hooksPath=/dev/null commit --quiet --allow-empty -m sentinel
+mkdir "$outside/hooks"
+git -C "$outside" config core.hooksPath "$outside/hooks"
+printf 'caller worktree\n' >"$outside/untracked"
+outside_head=$(git -C "$outside" rev-parse HEAD)
+outside_status=$(git -C "$outside" status --porcelain)
+
+run_installer_fixture() {
+  local description=$1 log
+  shift
+  log=$(_tmpdir)/installer.log
+  if env "$@" "$BASH" "$test_dir/suites/install-test" >"$log" 2>&1; then
+    _pass "$description"
+  else
+    _fail "$description"
+    cat "$log" >&2
+  fi
+}
+
+run_installer_fixture "install fixture runs with inherited Git selectors" \
+  "GIT_DIR=$outside/.git" "GIT_WORK_TREE=$outside"
+_assert_eq "fixture preserves caller HEAD" "$outside_head" "$(git -C "$outside" rev-parse HEAD)"
+_assert_eq "fixture preserves caller index and worktree" "$outside_status" "$(git -C "$outside" status --porcelain)"
+_assert_eq "fixture preserves caller hooks" "$outside/hooks" "$(git -C "$outside" config --local core.hooksPath)"
+
+# Command-scope config outranks an explicit repository-local hooks setting.
+# Keep the probe hook in the disposable caller repository.
+marker="$outside/hook-ran"
+printf '#!%s\n: >%q\n' "$BASH" "$marker" >"$outside/hooks/pre-commit"
+chmod +x "$outside/hooks/pre-commit"
+run_installer_fixture "install fixture runs with inherited Git config" \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath "GIT_CONFIG_VALUE_0=$outside/hooks"
+if [[ -e "$marker" ]]; then
+  _fail "fixture ignores inherited Git hook configuration"
+else
+  _pass "fixture ignores inherited Git hook configuration"
+fi
+
+_test_summary
