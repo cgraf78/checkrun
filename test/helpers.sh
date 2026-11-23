@@ -510,29 +510,85 @@ import sys
 import time
 
 
-def kill_group(signum, allow_darwin_zombie=False):
+libc_waitid = None
+
+
+def leader_exited():
+    """Observe completion without releasing the PID that reserves the group."""
+    required = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
+    if all(hasattr(os, name) for name in required):
+        try:
+            result = os.waitid(
+                os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+            )
+        except InterruptedError:
+            return False
+        observed = result.si_pid if result is not None else 0
+    elif sys.platform == "darwin":
+        # Stock macOS Python omits waitid. Darwin libc exposes the same operation.
+        # Darwin siginfo_t is 128 bytes with si_pid at byte 12, and wait.h defines
+        # P_PID=1, WEXITED=4, WNOHANG=1, WNOWAIT=32.
+        import ctypes
+
+        global libc_waitid
+        if libc_waitid is None:
+            libc_waitid = ctypes.CDLL(None, use_errno=True).waitid
+            libc_waitid.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            libc_waitid.restype = ctypes.c_int
+        info = (ctypes.c_uint64 * 16)()
+        if libc_waitid(1, process.pid, info, 4 | 1 | 32) != 0:
+            error = ctypes.get_errno()
+            if error == errno.EINTR:
+                return False
+            raise OSError(error, os.strerror(error))
+        observed = ctypes.c_int32.from_buffer(info, 12).value
+    else:
+        raise RuntimeError("non-reaping waitid is required for the Python timeout")
+    if observed not in (0, process.pid):
+        raise RuntimeError("waitid returned a different child")
+    return observed == process.pid
+
+
+def kill_group(signum):
     try:
         os.killpg(process.pid, signum)
     except ProcessLookupError:
         pass
-    except PermissionError:
-        if allow_darwin_zombie and sys.platform == "darwin":
-            try:
-                process.wait(timeout=0)
-            except subprocess.TimeoutExpired:
-                pass
-            else:
-                return
-        raise
+
+
+def group_has_live_members():
+    """Check the exact group while its unreaped leader still reserves its ID."""
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pgid=,stat="],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    for row in result.stdout.splitlines():
+        group, status = row.split()
+        if int(group) == process.pid and not status.startswith("Z"):
+            return True
+    return False
 
 
 def cleanup(signum):
     try:
-        kill_group(signum)
+        try:
+            kill_group(signum)
+        except PermissionError:
+            # Darwin may report EPERM during exit before the group is waitable.
+            # Keep ownership through final escalation before judging that race.
+            if sys.platform != "darwin":
+                raise
         time.sleep(0.2)
-        kill_group(signal.SIGKILL, allow_darwin_zombie=True)
+        try:
+            kill_group(signal.SIGKILL)
+        except PermissionError:
+            if sys.platform != "darwin" or group_has_live_members():
+                raise
         process.wait(timeout=1)
-    except (PermissionError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.SubprocessError):
         try:
             process.kill()
             process.wait(timeout=0.2)
@@ -586,16 +642,17 @@ if wrapper_pid_file:
         raise SystemExit(125)
 
 deadline = time.monotonic() + seconds
+exited = False
+interval = 0.001
 try:
     signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
-    while process.poll() is None and interrupted_signum is None:
+    while interrupted_signum is None:
+        exited = leader_exited()
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if exited or remaining <= 0:
             break
-        try:
-            process.wait(timeout=min(0.05, remaining))
-        except subprocess.TimeoutExpired:
-            pass
+        time.sleep(min(interval, remaining))
+        interval = min(0.05, interval * 2)
 except BaseException:
     quiesce_signals()
     cleanup(signal.SIGTERM)
@@ -606,11 +663,11 @@ quiesce_signals()
 if interrupted_signum is not None:
     cleanup(interrupted_signum)
     raise SystemExit(128 + interrupted_signum)
-if process.poll() is None:
+if not exited:
     cleanup(signal.SIGTERM)
     raise SystemExit(124)
 
-return_code = process.returncode
+return_code = process.wait()
 raise SystemExit(128 - return_code if return_code < 0 else return_code)
 ' "$secs" "$@"
   else
