@@ -52,4 +52,26 @@ else
   _pass "fixture ignores inherited Git hook configuration"
 fi
 
+# A real receive hook would reject the installer fixture's local bare push
+# if Git reads either caller config file. Exercise each scope independently.
+for scope in global system; do
+  hooks="$outside/$scope-hooks"
+  marker="$outside/$scope-hook-ran"
+  config="$outside/$scope.gitconfig"
+  mkdir "$hooks"
+  printf '#!%s\n: >%q\nexit 1\n' "$BASH" "$marker" >"$hooks/pre-receive"
+  chmod +x "$hooks/pre-receive"
+  git -C "$outside" config --file "$config" core.hooksPath "$hooks"
+  case "$scope" in
+    global) config_env=("GIT_CONFIG_GLOBAL=$config") ;;
+    system) config_env=("GIT_CONFIG_SYSTEM=$config" GIT_CONFIG_NOSYSTEM=0) ;;
+  esac
+  run_installer_fixture "install fixture ignores inherited $scope Git config" "${config_env[@]}"
+  if [[ -e "$marker" ]]; then
+    _fail "fixture does not run the caller's $scope receive hook"
+  else
+    _pass "fixture does not run the caller's $scope receive hook"
+  fi
+done
+
 _test_summary
