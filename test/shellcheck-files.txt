@@ -44,4 +44,5 @@ program	test/suites/schema-lint-test
 program	test/suites/schema-refresh-test
 program	test/suites/timeout-test
 program	test/suites/tmux-lint-test
+program	test/suites/verify-cancellation-test
 program	test/suites/verify-test

@@ -14,7 +14,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +37,65 @@ _SKIP_WALK_DIRS = {
 }
 _CPP_FILETYPES = {"c", "cpp"}
 _GOLANGCI_JSON_ARGS: list[str] | None = None
+_CANCEL_SIGNAL: int | None = None
+_MANAGED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+
+
+class _VerificationCancelled(Exception):
+    """Carry Checkrun's signal exit status past normal diagnostic processing."""
+
+
+def _remember_signal(signum: int, _frame: object) -> None:
+    """Latch the first cancellation without interrupting child registration."""
+    global _CANCEL_SIGNAL
+    if _CANCEL_SIGNAL is None:
+        _CANCEL_SIGNAL = signum
+
+
+def _raise_if_cancelled() -> None:
+    if _CANCEL_SIGNAL is not None:
+        raise _VerificationCancelled(128 + _CANCEL_SIGNAL)
+
+
+def _stop_command(child: subprocess.Popen[str], signum: int) -> None:
+    """Signal a private group while its unreaped leader pins the group ID."""
+    # communicate() only reaps on successful completion. During cancellation
+    # keep the leader unreaped until after escalation, even if it exits while
+    # a descendant ignores the first signal. Wait does not need pipe EOF.
+    for delivery in (signum, signal.SIGKILL):
+        try:
+            os.killpg(child.pid, delivery)
+        except ProcessLookupError:
+            break
+        if delivery != signal.SIGKILL:
+            time.sleep(0.2)
+    child.wait()
+
+
+def _run_command(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    stdout: int | None = None,
+    stderr: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a verifier child with interruptible waiting and owned teardown."""
+    _raise_if_cancelled()
+    # A private session prevents terminal signals from racing our forwarding
+    # and preserves inherited standard streams for interactive reporting.
+    with subprocess.Popen(
+        args, cwd=cwd, stdout=stdout, stderr=stderr, text=True, start_new_session=True
+    ) as child:
+        while True:
+            if _CANCEL_SIGNAL is not None:
+                _stop_command(child, _CANCEL_SIGNAL)
+                _raise_if_cancelled()
+            try:
+                out, err = child.communicate(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                continue
+            _raise_if_cancelled()
+            return subprocess.CompletedProcess(args, child.returncode, out, err)
 
 
 @dataclass(frozen=True)
@@ -94,11 +155,10 @@ def _nearest_existing_dir(path: Path) -> Path | None:
 def _git_root(start: Path) -> Path | None:
     if shutil.which("git") is None:
         return None
-    result = subprocess.run(
+    result = _run_command(
         ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        check=False,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     if result.returncode != 0:
         return None
@@ -419,12 +479,10 @@ def _golangci_json_args() -> list[str]:
         return list(_GOLANGCI_JSON_ARGS)
 
     try:
-        result = subprocess.run(
+        result = _run_command(
             ["golangci-lint", "run", "--help"],
-            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
         )
     except OSError:
         _GOLANGCI_JSON_ARGS = ["--out-format", "json"]
@@ -817,12 +875,11 @@ def _run_project_tool(
         human_args = human_command(project) if callable(human_command) else human_command
         json_args = json_command(project) if callable(json_command) else json_command
         if json_mode:
-            proc = subprocess.run(
+            proc = _run_command(
                 json_args,
                 cwd=project,
-                text=True,
-                capture_output=True,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
             diagnostics = parse_json(project, proc.stdout)
             if proc.returncode != 0 and not diagnostics:
@@ -861,7 +918,7 @@ def _run_project_tool(
                 # parsers that found actionable records despite a clean exit.
                 rc = _merge_rc(rc, 1)
         else:
-            proc = subprocess.run(human_args, cwd=project, check=False)
+            proc = _run_command(human_args, cwd=project)
             rc = _merge_rc(rc, proc.returncode)
     return rc
 
@@ -895,11 +952,10 @@ def run_cargo_clippy(projects: list[Path], *, json_mode: bool) -> int:
     if shutil.which("cargo") is None:
         return 0
     if (
-        subprocess.run(
+        _run_command(
             ["cargo", "clippy", "--version"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            check=False,
         ).returncode
         != 0
     ):
@@ -952,11 +1008,10 @@ def run_clang_tidy(files: list[Path], *, json_mode: bool) -> int:
         args = _clang_tidy_args(file)
         if not args:
             continue
-        proc = subprocess.run(
+        proc = _run_command(
             ["clang-tidy", *args, str(file)],
-            text=True,
-            capture_output=True,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         output = "\n".join(item for item in (proc.stdout, proc.stderr) if item)
         diagnostics = _parse_clang_tidy_text(file, output)
@@ -1081,4 +1136,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    for managed_signal in _MANAGED_SIGNALS:
+        if signal.getsignal(managed_signal) != signal.SIG_IGN:
+            signal.signal(managed_signal, _remember_signal)
+    try:
+        status = main()
+        _raise_if_cancelled()
+    except _VerificationCancelled as cancelled:
+        status = cancelled.args[0]
+    raise SystemExit(status)

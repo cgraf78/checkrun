@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Exercise cancellation of project analyzers through the public verify command.
+
+set -uo pipefail
+
+test_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck disable=SC1091
+# shellcheck source=test/helpers.sh
+. "$test_dir/helpers.sh"
+
+fixture=$(_tmpdir)
+mock_bin=$(_mock_bin)
+cat >"$mock_bin/govulncheck" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+signals = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+root = Path(os.environ["VERIFY_CANCEL_FIXTURE"])
+signalled = None
+
+
+def remember(signum, _frame):
+    global signalled
+    signalled = signum
+
+
+for signum in signals:
+    signal.signal(signum, remember)
+child = subprocess.Popen([sys.executable, "-c", """
+import signal
+import sys
+from pathlib import Path
+for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, lambda sig, _frame: sys.exit(128 + sig))
+Path(sys.argv[1]).touch()
+signal.pause()
+""", str(root / "child-ready")])
+with (root / "pids.tmp").open("w") as info:
+    info.write(f"{os.getpid()} {child.pid}\n")
+(root / "pids.tmp").rename(root / "pids")
+child.wait()
+if signalled is not None:
+    (root / "delivered").write_text(str(signalled))
+    if os.environ.get("VERIFY_CANCEL_STUBBORN") != "1":
+        sys.exit(128 + signalled)
+while True:
+    signal.pause()
+PY
+chmod +x "$mock_bin/govulncheck"
+
+if python3 - "$test_dir/../bin/checkrun" "$fixture" "$mock_bin" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+checkrun, fixture, mock_bin = map(Path, sys.argv[1:])
+
+
+def until(predicate, description):
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {description}")
+
+
+def exists(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def kill_group(group):
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def verify(label, signum, *, json_mode=False, stubborn=False):
+    root = fixture / label
+    root.mkdir()
+    (root / "go.mod").write_text("module example.invalid/verify-cancel\ngo 1.23\n")
+    env = {
+        **os.environ,
+        "PATH": str(mock_bin) + os.pathsep + os.environ["PATH"],
+        "VERIFY_CANCEL_FIXTURE": str(root),
+        "VERIFY_CANCEL_STUBBORN": str(int(stubborn)),
+    }
+    args = [checkrun, "verify", "--tool", "govulncheck"]
+    if json_mode:
+        args.append("--json")
+    proc = subprocess.Popen(
+        args, cwd=root, env=env, start_new_session=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    pids = ()
+    try:
+        until(lambda: (root / "pids").exists() and (root / "child-ready").exists(),
+              f"{label} analyzer and child")
+        pids = tuple(map(int, (root / "pids").read_text().split()))
+        proc.send_signal(signum)
+        stdout, stderr = proc.communicate(timeout=3)
+        assert proc.returncode == 128 + signum, (label, proc.returncode, stderr)
+        assert stdout == "", (label, stdout)
+        assert int((root / "delivered").read_text()) == signum
+        until(lambda: not any(map(exists, pids)), f"{label} reaping")
+    finally:
+        if proc.poll() is None or any(map(exists, pids)):
+            for group in {proc.pid, *pids[:1]}:
+                kill_group(group)
+            proc.wait(timeout=3)
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+verify("human-term", signal.SIGTERM)
+verify("json-int", signal.SIGINT, json_mode=True)
+verify("stubborn-hup", signal.SIGHUP, stubborn=True)
+PY
+then
+  _pass "verify: PID-only cancellation reaches analyzer groups and reaps them"
+else
+  _fail "verify: PID-only cancellation reaches analyzer groups and reaps them"
+fi
+
+_test_summary
