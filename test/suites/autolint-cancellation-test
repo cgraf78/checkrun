@@ -238,22 +238,49 @@ export AUTOLINT_CANCEL_PARENT_PID=${BASHPID:-$$}
 # shellcheck source=/dev/null
 . "$impl"
 
-# Record, in order, every pause the parent itself takes and every group
-# signal, so the harness can check how cancellation escalates without
-# measuring wall time. Bash 3.2 has no BASHPID to tell the parent from a
-# subshell, so it records no pauses there; only the parent signals a group.
+# Record the parent's pauses, including its managed poll timer, in order
+# with the group signals. Bash 3.2 has no BASHPID to identify the parent's
+# other pauses. Only the parent sets validated after forking the supervisor.
 sleep() {
-  if [ -n "${BASHPID:-}" ] && [ "$BASHPID" = "$AUTOLINT_CANCEL_PARENT_PID" ]; then
+  local attempt REPLY=""
+  if [ "${_autolint_parallel_validated:-0}" -eq 1 ] ||
+    { [ -n "${BASHPID:-}" ] && [ "$BASHPID" = "$AUTOLINT_CANCEL_PARENT_PID" ]; }; then
     printf 'pause %s\n' "$1" >>"$root/parent-events"
   fi
+  # Hold the parent's timer while both backends are ready so Python can
+  # deliver INT while the timer is still outstanding.
+  if [ "$mode" = int-wait ] && [ "${_autolint_parallel_validated:-0}" -eq 1 ] &&
+    [ -f "$root/backend-0.ready" ] && [ -f "$root/backend-1.ready" ] &&
+    [ ! -e "$root/poll-timer-release" ]; then
+    _autolint_current_shell_pid || return
+    printf '%s\n' "$REPLY" >"$root/poll-timer.pid"
+    for ((attempt = 0; attempt < 2000; attempt++)); do
+      [ ! -e "$root/poll-timer-release" ] || break
+      command sleep 0.01
+    done
+    : >"$root/poll-timer-done"
+    return 0
+  fi
   command sleep "$@"
+}
+_autolint_real_record_signal=$(declare -f _autolint_record_signal)
+eval "_autolint_real_record_signal${_autolint_real_record_signal#_autolint_record_signal}"
+_autolint_record_signal() {
+  _autolint_real_record_signal "$@"
+  if [ "${_autolint_parallel_validated:-0}" -eq 1 ]; then
+    printf 'latch %s\n' "$1" >>"$root/parent-events"
+  fi
 }
 kill() {
   local owned owned_pid attempt pending
   case "${2:-}" in
     -[1-9]*) printf 'kill %s %s\n' "$1" "$2" >>"$root/parent-events" ;;
   esac
-  if { [ "$mode" = normal ] || [ "$mode" = planner-signal ]; } &&
+  if [ "$mode" = int-wait ] && [ "${1:-}" = -TERM ] && [[ "${2:-}" == -[1-9]* ]] &&
+    [ ! -e "$root/poll-timer-done" ]; then
+    : >"$root/cancel-before-poll-timer"
+  fi
+  if { [ "$mode" = normal ] || [ "$mode" = int-wait ] || [ "$mode" = planner-signal ]; } &&
     [ "${1:-}" = -KILL ] && [[ "${2:-}" == -[1-9]* ]]; then
     # The parent KILLs the group once the supervisor has reaped its workers,
     # which outlive TERM only until their linter exits, or after its 200 ms
@@ -995,6 +1022,8 @@ GRACE_SCENARIOS = (
     "grace-stubborn-wave",
 )
 mode, count, jobs, expected_status = case
+if scenario == "signal" and signal_name == "INT":
+    mode = "int-wait"
 env = os.environ.copy()
 env["PATH"] = tool_bin + os.pathsep + env["PATH"]
 env["AUTOLINT_CANCEL_REAL_PS"] = shutil.which("ps")
@@ -1298,7 +1327,18 @@ try:
             signal_time = time.monotonic()
             os.kill(process.pid, signal.SIGTERM)
         elif scenario in ("signal", "repeat"):
-            os.kill(process.pid, getattr(signal, f"SIG{signal_name}"))
+            if mode == "int-wait":
+                timer_path = root / "poll-timer.pid"
+                try:
+                    wait_for(lambda: timer_path.is_file() and read_pid(timer_path), "parent poll timer")
+                    if read_pid(timer_path) == process.pid:
+                        raise RuntimeError("parent used a foreground poll instead of an owned timer")
+                    os.kill(process.pid, signal.SIGINT)
+                finally:
+                    # Bash can defer a trap while its read waits for EOF.
+                    (root / "poll-timer-release").touch()
+            else:
+                os.kill(process.pid, getattr(signal, f"SIG{signal_name}"))
             if scenario == "repeat":
                 wait_for(
                     lambda: all((root / f"backend-{index}.term").is_file() for index in range(count)),
@@ -1355,7 +1395,18 @@ try:
         try:
             stdout, stderr = process.communicate(timeout=8)
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError("autolint did not finish after its observable event") from error
+            driver = driver_exit_status()
+            if driver is not None:
+                state = f"driver exited {driver} with output pipes still open"
+            elif hasattr(os, "waitid"):
+                state = "driver still running"
+            else:
+                state = "driver exit unknown with output pipes still open"
+            signals = [event for event in parent_events() if event[0] != "pause"]
+            raise RuntimeError(
+                f"autolint timeout: {state}; signal {signal_name}; parent events {signals!r}\n"
+                f"observed {observed_paths()!r}"
+            ) from error
 
     expected_driver_status = 125 if scenario == "cleanup-failure-errexit" else 0
     if direct_signal:
@@ -1567,6 +1618,8 @@ try:
         group_signals = [event[1] for event in parent_events() if event[0] == "kill"]
         if not group_signals or group_signals[0] != "-TERM":
             raise RuntimeError(f"group signals {group_signals!r} did not start with TERM")
+    if mode == "int-wait" and (root / "cancel-before-poll-timer").exists():
+        raise RuntimeError("parent cancelled the backend group before its poll timer finished")
     unobserved = [
         index for index in range(count) if not (root / f"backend-{index}.term").is_file()
     ]

@@ -1017,10 +1017,8 @@ _autolint_record_signal() {
   [ "${_autolint_cancel_status:-0}" -ne 0 ] || _autolint_cancel_status=$status
   # Only latch here. The supervised parent polls this latch on every iteration
   # and forwards cancellation from normal control flow, where it can first
-  # prove that the supervisor still pins its private PGID. Forwarding from the
-  # trap gained no latency, because Bash runs it only after the parent's
-  # foreground poll command returns, but it raced a supervisor that had just
-  # exited and been reaped asynchronously.
+  # prove that the supervisor still pins its private PGID. Forwarding from
+  # the trap could race a supervisor that exited and was reaped asynchronously.
 }
 
 _autolint_restore_signal_traps() {
@@ -1148,6 +1146,23 @@ _autolint_job_exited() {
   # supervisor waits for the parent, so declining to stop it would deadlock.
   _autolint_job_is_running "$1" "$2" || rc=$?
   [ "$rc" -eq 1 ]
+}
+
+_autolint_parent_poll_pause() {
+  local _discarded
+
+  # Bash 3.2 can lose a parent-only INT while restoring its trap after a
+  # foreground child exits. Read from the timer's pipe without replacing
+  # the handler or consulting the job table. Bash reaps the pipe writer.
+  {
+    while IFS= read -r _discarded; do :; done
+    if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
+      # A trap may interrupt read before EOF. Drain the same pipe with
+      # later managed signals shielded before starting group cleanup.
+      trap '' HUP INT TERM
+      while IFS= read -r _discarded; do :; done
+    fi
+  } < <(sleep 0.01)
 }
 
 _autolint_read_proc_group() {
@@ -1855,7 +1870,7 @@ _autolint_run_parallel_supervised() {
         break
       fi
     fi
-    sleep 0.01
+    _autolint_parent_poll_pause
   done
 
   # Bash reports a KILLed job from inside wait; the status below suffices.
