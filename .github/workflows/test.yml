@@ -24,7 +24,7 @@ jobs:
     # SHA bump rather than as silent drift on a mutable branch.
     # The ref is generated from .github/cgraf78-actions.lock by the provider's
     # consumer-ci/sync.sh; do not update this literal independently.
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@fa46009e947ced9ab40dfa59049ae2d725f97480
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@7cc897229a80517e83f09acf989f2da5889961ad
     with:
       concurrency-scope: shell
       matrix-set: full
@@ -56,14 +56,14 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Checkrun prerequisites
-        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@fa46009e947ced9ab40dfa59049ae2d725f97480
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@7cc897229a80517e83f09acf989f2da5889961ad
         with:
           matrix-name: ${{ matrix.name }}
           setup: checkrun
       # The named Checkrun setup supplies yq and Python. Only the generic
       # setup installs profiles such as the shared tmux build.
       - name: Install the pinned tmux build
-        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@fa46009e947ced9ab40dfa59049ae2d725f97480
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@7cc897229a80517e83f09acf989f2da5889961ad
         with:
           matrix-name: ${{ matrix.name }}
           setup: none
@@ -94,4 +94,4 @@ jobs:
       # files, so `.github/cgraf78-actions.lock` cannot be interpolated. This gate
       # verifies every unavoidable cgraf78/actions literal still matches that
       # single reviewed dependency decision.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@fa46009e947ced9ab40dfa59049ae2d725f97480
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@7cc897229a80517e83f09acf989f2da5889961ad
