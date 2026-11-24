@@ -59,8 +59,32 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 checkrun, fixture, mock_bin = map(Path, sys.argv[1:])
+
+
+def check_darwin_permission():
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(checkrun.resolve().parent.parent / "lib/checkrun"))
+    import verify as implementation
+
+    for table, dead in (("123 Z+\n456 S\n", True), ("123 Z\n123 S\n", False), ("truncated\n", False)):
+        child = Mock(pid=123)
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch.object(implementation.os, "killpg", side_effect=PermissionError),
+            patch.object(implementation.subprocess, "run",
+                         return_value=subprocess.CompletedProcess([], 0, table, "")),
+        ):
+            try:
+                implementation._stop_command(child, signal.SIGTERM)
+            except PermissionError:
+                assert not dead, table
+                child.wait.assert_not_called()
+            else:
+                assert dead, table
+                child.wait.assert_called_once()
 
 
 def until(predicate, description):
@@ -127,6 +151,7 @@ def verify(label, signum, *, json_mode=False, stubborn=False):
 verify("human-term", signal.SIGTERM)
 verify("json-int", signal.SIGINT, json_mode=True)
 verify("stubborn-hup", signal.SIGHUP, stubborn=True)
+check_darwin_permission()
 PY
 then
   _pass "verify: PID-only cancellation reaches analyzer groups and reaps them"

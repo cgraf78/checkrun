@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -57,6 +58,30 @@ def _raise_if_cancelled() -> None:
         raise _VerificationCancelled(128 + _CANCEL_SIGNAL)
 
 
+def _darwin_group_is_inert(group: int) -> bool:
+    """Check that Darwin's ambiguous EPERM has no live group members."""
+    try:
+        snapshot = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pgid=", "-o", "stat="],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    members = snapshot.stdout.splitlines()
+    if not members:
+        return False
+    for member in members:
+        fields = member.split()
+        if len(fields) != 2 or not fields[0].isdigit():
+            return False
+        if int(fields[0]) == group and not fields[1].startswith("Z"):
+            return False
+    return True
+
+
 def _stop_command(child: subprocess.Popen[str], signum: int) -> None:
     """Signal a private group while its unreaped leader pins the group ID."""
     # communicate() only reaps on successful completion. During cancellation
@@ -66,6 +91,12 @@ def _stop_command(child: subprocess.Popen[str], signum: int) -> None:
         try:
             os.killpg(child.pid, delivery)
         except ProcessLookupError:
+            break
+        except PermissionError:
+            # XNU skips zombies when signaling a group and uses EPERM if it
+            # finds no recipients. The unreaped leader still pins the PGID.
+            if sys.platform != "darwin" or not _darwin_group_is_inert(child.pid):
+                raise
             break
         if delivery != signal.SIGKILL:
             time.sleep(0.2)
