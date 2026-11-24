@@ -13,7 +13,7 @@ parallel_suites=()
 exclusive_suites=()
 for suite in "$test_dir"/suites/*-test; do
   case "${suite##*/}" in
-    autolint-cancellation-test | hook-performance-test | runner-test)
+    autolint-cancellation-test | hook-performance-test | runner-test | verify-cancellation-test)
       # Cancellation and latency suites intentionally assert wall-clock and
       # signal behavior. Running them beside CPU-heavy suites would trade test
       # reliability for a misleadingly shorter aggregate time.

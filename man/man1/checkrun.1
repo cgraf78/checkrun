@@ -70,6 +70,8 @@ sets the per-source fetch timeout in seconds (default 20).
 .TP
 .B verify [--json] [--tool TOOL] [PATH...]
 Run explicit project verification checks selected from the changed-file scope.
+On SIGHUP, SIGINT, or SIGTERM, stop the active analyzer and its process group
+and exit with 128 plus the signal number.
 .TP
 .B format
 or
