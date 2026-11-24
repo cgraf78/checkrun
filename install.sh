@@ -24,11 +24,41 @@
   checkout_git_kill_after_default=5
   checkout_git_retries_default=3
   checkout_git_retry_delay_default=5
+  child_launching=false
+  pending_child_stop=
   default_repo_url="https://github.com/${checkout_repo}.git"
 
   die() {
     printf 'install.sh: %s\n' "$*" >&2
     exit 1
+  }
+
+  # Bash can run a trap after launching an asynchronous job but before the
+  # next command records its PID. Preserve the first signal until cleanup
+  # can use the ownership information for that job.
+  # shellcheck disable=SC2329 # Called through the signal handlers.
+  defer_child_signal() {
+    # Keep the signal and status together if a different trap interrupts.
+    pending_child_stop=${pending_child_stop:-$1:$2}
+    [[ "$child_launching" == true ]]
+  }
+
+  finish_child_launch() {
+    child_launching=false
+    if [[ -n "$pending_child_stop" ]]; then
+      "$1" "${pending_child_stop%:*}" "${pending_child_stop#*:}"
+    fi
+  }
+
+  # shellcheck shell=bash
+  # Included in the standalone and legacy checkout installer templates.
+
+  installer_exclusive_mkdir() {
+    local mkdir_command
+    # Ubuntu's uutils mkdir can return success on EEXIST when another process
+    # created the directory first. Ubuntu also ships GNU mkdir as gnumkdir.
+    mkdir_command=$(type -P gnumkdir) || mkdir_command='mkdir'
+    command "$mkdir_command" "$1"
   }
 
   checkout_installer_git=
@@ -249,9 +279,11 @@
 
   # shellcheck disable=SC2329 # Reached by the supervised wrapper's signal traps.
   network_git_wrapper_stop() {
-    local pid=$1 pgid=$2 status=$3 started=$SECONDS
+    defer_child_signal "$@" && return 0
+    local pid=$git_pid pgid=$git_pgid started=$SECONDS
 
-    trap - HUP INT TERM
+    trap '' HUP INT TERM
+    [[ -n "$pid" ]] || exit "${pending_child_stop#*:}"
     kill -s TERM -- "-$pgid" 2>/dev/null || true
     while network_git_process_running "$pid"; do
       ((SECONDS - started < checkout_git_kill_after)) || break
@@ -261,7 +293,7 @@
       kill -s KILL -- "-$pgid" 2>/dev/null || true
     fi
     wait "$pid" 2>/dev/null || true
-    exit "$status"
+    exit "${pending_child_stop#*:}"
   }
 
   reset_network_git_attempt() {
@@ -274,49 +306,60 @@
     done
   }
 
+  # This asynchronously run shell owns Git's process group and reaps its
+  # leader. Keep the wrapper's launch state separate from the outer installer.
+  network_git_wrapper() {
+    local completion=$1 completion_tmp=$1.tmp status git_pid='' git_pgid=''
+    local child_launching=false pending_child_stop=''
+    shift
+
+    GIT_ASKPASS=/bin/false
+    SSH_ASKPASS=/bin/false
+    GIT_SSH_COMMAND='ssh -oBatchMode=yes'
+    CHECKOUT_INSTALLER_GIT_HOME=$active_git_home
+    export CHECKOUT_INSTALLER_GIT_HOME
+    export GIT_ASKPASS SSH_ASKPASS GIT_SSH_COMMAND
+    trap 'network_git_wrapper_stop HUP 129' HUP
+    trap 'network_git_wrapper_stop INT 130' INT
+    trap 'network_git_wrapper_stop TERM 143' TERM
+    # An inherited monitor flag does not prove job control is active here.
+    set +m
+    set -m
+    child_launching=true
+    exec_bootstrap_git -c credential.helper= "$@" &
+    git_pid=$!
+    set +m
+    # Job control assigns this asynchronous child its own process group. Use
+    # the child PID directly instead of racing a `ps` lookup after a fast Git
+    # command has already exited.
+    git_pgid=$git_pid
+    finish_child_launch network_git_wrapper_stop
+    if wait "$git_pid"; then
+      status=0
+    else
+      status=$?
+    fi
+    trap '' HUP INT TERM
+    printf 'complete\n' >"$completion_tmp" || exit 125
+    mv "$completion_tmp" "$completion" || exit 125
+    exit "$status"
+  }
+
   network_git_attempt() {
-    local status started completion completion_tmp git_pid git_pgid
+    local status started completion
 
     active_git_home=$(mktemp -d \
       "${TMPDIR:-/tmp}/cgraf78-checkout-installer.git.XXXXXX") ||
       die 'cannot create isolated Git configuration home'
     completion=$active_git_home/network-complete
-    completion_tmp=$active_git_home/network-complete.tmp
 
-    # The outer child is a reap-capable Bash wrapper. It owns the one process
-    # group boundary below, around Git and its descendants.
-    (
-      GIT_ASKPASS=/bin/false
-      SSH_ASKPASS=/bin/false
-      GIT_SSH_COMMAND='ssh -oBatchMode=yes'
-      CHECKOUT_INSTALLER_GIT_HOME=$active_git_home
-      export CHECKOUT_INSTALLER_GIT_HOME
-      export GIT_ASKPASS SSH_ASKPASS GIT_SSH_COMMAND
-      set -m
-      exec_bootstrap_git -c credential.helper= "$@" &
-      git_pid=$!
-      set +m
-      # Job control assigns this asynchronous child its own process group. Use
-      # the child PID directly instead of racing a `ps` lookup after a fast Git
-      # command has already exited.
-      git_pgid=$git_pid
-      trap 'network_git_wrapper_stop "$git_pid" "$git_pgid" 129' HUP
-      trap 'network_git_wrapper_stop "$git_pid" "$git_pgid" 130' INT
-      trap 'network_git_wrapper_stop "$git_pid" "$git_pgid" 143' TERM
-      if wait "$git_pid"; then
-        status=0
-      else
-        status=$?
-      fi
-      trap - HUP INT TERM
-      printf 'complete\n' >"$completion_tmp" || exit 125
-      mv "$completion_tmp" "$completion" || exit 125
-      exit "$status"
-    ) </dev/null &
+    child_launching=true
+    network_git_wrapper "$completion" "$@" </dev/null &
     active_child_pid=$!
     # This is a presence flag for the signal trap. The stop helper tracks the
     # wrapper PID directly; only the inner Git child needs a dedicated PGID.
     active_child_pgid=$active_child_pid
+    finish_child_launch forward_signal
     started=$SECONDS
     while network_git_process_running "$active_child_pid" "$completion"; do
       if ((SECONDS - started >= checkout_git_timeout)); then
@@ -714,7 +757,9 @@
   cleanup() {
     local status=$?
 
-    trap - EXIT HUP INT TERM
+    # Once teardown starts, another signal must not interrupt lock recovery.
+    trap '' HUP INT TERM
+    trap - EXIT
     recover_update_transaction || true
     recover_staging_location
     if [[ -n "$active_git_home" && -d "$active_git_home" &&
@@ -794,9 +839,11 @@
 
   # shellcheck disable=SC2329 # Installed as the signal traps below.
   forward_signal() {
-    local signal=$1 status=$2 child_signal=$1
+    defer_child_signal "$@" && return 0
+    local signal=${pending_child_stop%:*} status=${pending_child_stop#*:}
+    local child_signal=$signal
 
-    trap - HUP INT TERM
+    trap '' HUP INT TERM
     if [[ -n "$active_child_pid" ]]; then
       # Non-job-control Bash starts asynchronous children with SIGINT ignored.
       # Use a catchable termination signal for those owned children while the
@@ -820,7 +867,7 @@
   trap 'forward_signal INT 130' INT
   trap 'forward_signal TERM 143' TERM
 
-  if ! mkdir "$lock_dir" 2>/dev/null; then
+  if ! installer_exclusive_mkdir "$lock_dir" 2>/dev/null; then
     die "another install may be using the managed checkout lock: $lock_dir; if no install is running, remove that exact empty directory with rmdir and retry"
   fi
   lock_held=1
@@ -917,8 +964,10 @@
   require_delegate "$checkout_dir"
   umask "$caller_umask"
   set +e
+  child_launching=true
   "$BASH" "$checkout_dir/$checkout_delegate" "$@" <&0 &
   active_child_pid=$!
+  finish_child_launch forward_signal
   wait "$active_child_pid"
   delegate_status=$?
   active_child_pid=
