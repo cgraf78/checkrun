@@ -263,14 +263,14 @@ sleep() {
   fi
   command sleep "$@"
 }
-if [ "$mode" = int-wait ]; then
-  _autolint_real_record_signal=$(declare -f _autolint_record_signal)
-  eval "_autolint_real_record_signal${_autolint_real_record_signal#_autolint_record_signal}"
-  _autolint_record_signal() {
-    _autolint_real_record_signal "$@"
-    [ "$1" -ne 130 ] || : >"$root/int-latched"
-  }
-fi
+_autolint_real_record_signal=$(declare -f _autolint_record_signal)
+eval "_autolint_real_record_signal${_autolint_real_record_signal#_autolint_record_signal}"
+_autolint_record_signal() {
+  _autolint_real_record_signal "$@"
+  if [ "${_autolint_parallel_validated:-0}" -eq 1 ]; then
+    printf 'latch %s\n' "$1" >>"$root/parent-events"
+  fi
+}
 kill() {
   local owned owned_pid attempt pending
   case "${2:-}" in
@@ -1334,8 +1334,8 @@ try:
                     if read_pid(timer_path) == process.pid:
                         raise RuntimeError("parent used a foreground poll instead of an owned timer")
                     os.kill(process.pid, signal.SIGINT)
-                    wait_for(lambda: (root / "int-latched").is_file(), "parent to latch INT")
                 finally:
+                    # Bash can defer a trap while its read waits for EOF.
                     (root / "poll-timer-release").touch()
             else:
                 os.kill(process.pid, getattr(signal, f"SIG{signal_name}"))
@@ -1404,8 +1404,8 @@ try:
                 state = "driver exit unknown with output pipes still open"
             signals = [event for event in parent_events() if event[0] != "pause"]
             raise RuntimeError(
-                f"autolint timeout: {state}; "
-                f"observed {observed_paths()!r}; group events {signals!r}"
+                f"autolint timeout: {state}; signal {signal_name}; parent events {signals!r}\n"
+                f"observed {observed_paths()!r}"
             ) from error
 
     expected_driver_status = 125 if scenario == "cleanup-failure-errexit" else 0

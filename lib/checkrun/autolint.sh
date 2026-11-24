@@ -1149,18 +1149,20 @@ _autolint_job_exited() {
 }
 
 _autolint_parent_poll_pause() {
-  local timer
+  local _discarded
 
   # Bash 3.2 can lose a parent-only INT while restoring its trap after a
-  # foreground child exits. An explicit wait keeps the trap active.
-  sleep 0.01 &
-  timer=$!
-  if ! wait "$timer" 2>/dev/null && [ "${_autolint_signal_status:-0}" -ne 0 ]; then
-    # The next poll immediately cancels the group using this latched status.
-    # Shield the short exact reap from later delivery just as cleanup does.
-    trap '' HUP INT TERM
-    wait "$timer" 2>/dev/null || :
-  fi
+  # foreground child exits. Read from the timer's pipe without replacing
+  # the handler or consulting the job table. Bash reaps the pipe writer.
+  {
+    while IFS= read -r _discarded; do :; done
+    if [ "${_autolint_signal_status:-0}" -ne 0 ]; then
+      # A trap may interrupt read before EOF. Drain the same pipe with
+      # later managed signals shielded before starting group cleanup.
+      trap '' HUP INT TERM
+      while IFS= read -r _discarded; do :; done
+    fi
+  } < <(sleep 0.01)
 }
 
 _autolint_read_proc_group() {
