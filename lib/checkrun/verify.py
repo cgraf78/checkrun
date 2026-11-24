@@ -70,16 +70,18 @@ def _darwin_group_is_inert(group: int) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    members = snapshot.stdout.splitlines()
-    if not members:
-        return False
-    for member in members:
+    # The unreaped leader stays in Darwin's census with its original PGID.
+    # A snapshot missing that group cannot demonstrate that it is inert.
+    found = False
+    for member in snapshot.stdout.splitlines():
         fields = member.split()
         if len(fields) != 2 or not fields[0].isdigit():
             return False
-        if int(fields[0]) == group and not fields[1].startswith("Z"):
-            return False
-    return True
+        if int(fields[0]) == group:
+            if not fields[1].startswith("Z"):
+                return False
+            found = True
+    return found
 
 
 def _stop_command(child: subprocess.Popen[str], signum: int) -> None:

@@ -69,7 +69,12 @@ def check_darwin_permission():
     sys.path.insert(0, str(checkrun.resolve().parent.parent / "lib/checkrun"))
     import verify as implementation
 
-    for table, dead in (("123 Z+\n456 S\n", True), ("123 Z\n123 S\n", False), ("truncated\n", False)):
+    for table, dead in (
+        ("123 Z+\n456 S\n", True),
+        ("123 Z\n123 S\n", False),
+        ("456 Z\n789 S\n", False),
+        ("truncated\n", False),
+    ):
         child = Mock(pid=123)
         with (
             patch.object(sys, "platform", "darwin"),
